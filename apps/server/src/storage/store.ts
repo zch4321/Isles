@@ -1,0 +1,850 @@
+import { agentSchema } from '@isles/contracts';
+import type {
+  Agent,
+  AgentDetail,
+  Channel,
+  ChannelDetail,
+  DeliveryStatus,
+  IslesEvent,
+  Message,
+  QuestionAnswer,
+  QuestionDefinition,
+  Run,
+  RunItem,
+  RunStatus,
+  UserQuestion,
+} from '@isles/contracts';
+import { and, asc, desc, eq, gt, inArray, lt, ne, sql } from 'drizzle-orm';
+import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
+import { HttpError } from '../errors.js';
+import type { IslesDatabase } from './database.js';
+import {
+  agents,
+  channelMembers,
+  channels,
+  deliveries,
+  events,
+  messages,
+  questions,
+  runItems,
+  runs,
+} from './schema.js';
+
+export type AgentRecord = typeof agents.$inferSelect & { channelId: string };
+export type ChannelRecord = typeof channels.$inferSelect;
+type AgentUpdate = Partial<
+  Pick<
+    AgentRecord,
+    'status' | 'desiredState' | 'threadId' | 'error' | 'threadCreationAttempted' | 'canCreateGroups'
+  >
+>;
+export type Sender = { type: 'user' } | { type: 'agent'; id: string };
+/** 'user' or the ID of the acting Agent. */
+export type Actor = string;
+export interface NewAgent {
+  name: string;
+  model: string;
+  reasoningEffort: string;
+  canCreateGroups: boolean;
+  /** The Codex home the Agent's thread lives in. */
+  nativeHome: string;
+}
+export interface MessageInput {
+  body: string;
+  clientId: string;
+  replyTo?: string | undefined;
+  mentions?: string[] | undefined;
+}
+/** One channel's share of a merged input. */
+export interface ClaimedChannel {
+  channel: ChannelRecord;
+  messages: Message[];
+  /** Earlier unread messages marked skipped instead of being submitted. */
+  skipped: number;
+}
+/** A channel holding unread messages that can wake an Agent. */
+export interface PendingChannel {
+  channelId: string;
+  kind: 'private' | 'group';
+  oldest: string;
+  latest: string;
+}
+
+// Each channel contributes its most recent unread messages, plus every unread mention.
+const RECENT_PER_CHANNEL = 10;
+const USER = 'user';
+const now = () => new Date().toISOString();
+
+export class Store {
+  private emitter = new EventEmitter();
+  constructor(
+    readonly database: IslesDatabase,
+    private dataDir: string,
+  ) {}
+  private get db() {
+    return this.database.db;
+  }
+
+  // Transactions are strictly synchronous; no RPC or model wait belongs here.
+  private change<T>(fn: () => T): T {
+    const cursor = this.cursor();
+    const result = this.database.sqlite.transaction(fn)();
+    for (const event of this.eventsAfter(cursor)) this.emitter.emit('event', event);
+    return result;
+  }
+  private event(
+    type: IslesEvent['type'],
+    scope: { agentId?: string | null; channelId?: string | null },
+    data: IslesEvent['data'],
+  ) {
+    this.db
+      .insert(events)
+      .values({
+        type,
+        agentId: scope.agentId ?? null,
+        channelId: scope.channelId ?? null,
+        data: JSON.stringify(data),
+        createdAt: now(),
+      })
+      .run();
+  }
+  cursor(): number {
+    return this.db
+      .select({ id: sql<number>`coalesce(max(${events.id}), 0)` })
+      .from(events)
+      .get()!.id;
+  }
+  eventsAfter(cursor: number, limit = 500): IslesEvent[] {
+    return this.db
+      .select()
+      .from(events)
+      .where(gt(events.id, cursor))
+      .orderBy(asc(events.id))
+      .limit(limit)
+      .all()
+      .map((r) => ({ ...r, data: JSON.parse(r.data) as IslesEvent['data'] }));
+  }
+  subscribe(listener: (event: IslesEvent) => void): () => void {
+    this.emitter.on('event', listener);
+    return () => this.emitter.off('event', listener);
+  }
+
+  // Agents
+
+  getAgent(id: string): AgentRecord {
+    const agent = this.db.select().from(agents).where(eq(agents.id, id)).get();
+    const channel = this.db.select().from(channels).where(eq(channels.agentId, id)).get();
+    if (!agent || !channel) throw new HttpError(404, 'Agent 不存在');
+    return { ...agent, channelId: channel.id };
+  }
+  publicAgent(id: string): Agent {
+    return agentSchema.parse(this.getAgent(id));
+  }
+  listAgents(): Agent[] {
+    return this.db
+      .select({ id: agents.id })
+      .from(agents)
+      .orderBy(asc(agents.createdAt))
+      .all()
+      .map((r) => this.publicAgent(r.id));
+  }
+  createAgent(input: NewAgent): AgentRecord {
+    const id = randomUUID();
+    const channelId = randomUUID();
+    return this.change(() => {
+      const root = join(this.dataDir, 'agents', id);
+      this.db
+        .insert(agents)
+        .values({
+          id,
+          ...input,
+          status: 'creating',
+          workspace: join(root, 'workspace'),
+          createdAt: now(),
+          updatedAt: now(),
+        })
+        .run();
+      this.db
+        .insert(channels)
+        .values({
+          id: channelId,
+          kind: 'private',
+          agentId: id,
+          createdBy: USER,
+          createdAt: now(),
+          updatedAt: now(),
+        })
+        .run();
+      this.db
+        .insert(channelMembers)
+        .values({ channelId, agentId: id, addedBy: USER, joinedAt: now() })
+        .run();
+      this.event('agent', { agentId: id }, { status: 'creating' });
+      this.event('channel', { channelId }, { created: true });
+      return this.getAgent(id);
+    });
+  }
+  updateAgent(id: string, update: AgentUpdate) {
+    this.change(() => {
+      this.db
+        .update(agents)
+        .set({ ...update, updatedAt: now() })
+        .where(eq(agents.id, id))
+        .run();
+      this.event('agent', { agentId: id }, update);
+    });
+  }
+  private agentName(id: string) {
+    return this.db.select({ name: agents.name }).from(agents).where(eq(agents.id, id)).get()?.name;
+  }
+  private actorName(actor: Actor) {
+    return actor === USER ? '用户' : (this.agentName(actor) ?? '未知 Agent');
+  }
+
+  // Channels
+
+  getChannel(id: string): ChannelRecord {
+    const channel = this.db.select().from(channels).where(eq(channels.id, id)).get();
+    if (!channel) throw new HttpError(404, '频道不存在');
+    return channel;
+  }
+  private group(id: string): ChannelRecord {
+    const channel = this.getChannel(id);
+    if (channel.kind !== 'group') throw new HttpError(400, '私聊不能修改名称或成员');
+    return channel;
+  }
+  memberIds(channelId: string): string[] {
+    return this.db
+      .select({ agentId: channelMembers.agentId })
+      .from(channelMembers)
+      .where(eq(channelMembers.channelId, channelId))
+      .orderBy(asc(channelMembers.joinedAt))
+      .all()
+      .map((r) => r.agentId);
+  }
+  isMember(channelId: string, agentId: string) {
+    return Boolean(
+      this.db
+        .select()
+        .from(channelMembers)
+        .where(and(eq(channelMembers.channelId, channelId), eq(channelMembers.agentId, agentId)))
+        .get(),
+    );
+  }
+  publicChannel(id: string): Channel {
+    const channel = this.getChannel(id);
+    const last = this.db
+      .select()
+      .from(messages)
+      .where(eq(messages.channelId, id))
+      .orderBy(desc(messages.seq))
+      .limit(1)
+      .all();
+    return {
+      ...channel,
+      memberIds: this.memberIds(id),
+      lastMessage: this.withDeliveries(last)[0] ?? null,
+    };
+  }
+  listChannels(): Channel[] {
+    return this.db
+      .select({ id: channels.id })
+      .from(channels)
+      .orderBy(asc(channels.createdAt))
+      .all()
+      .map((r) => this.publicChannel(r.id));
+  }
+  channelsOf(agentId: string): Channel[] {
+    return this.db
+      .select({ id: channelMembers.channelId })
+      .from(channelMembers)
+      .where(eq(channelMembers.agentId, agentId))
+      .all()
+      .map((r) => this.publicChannel(r.id));
+  }
+  private existingAgents(ids: string[]) {
+    const unique = [...new Set(ids)];
+    if (!unique.length) return [];
+    const found = this.db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(inArray(agents.id, unique))
+      .all();
+    if (found.length !== unique.length) throw new HttpError(400, '只能添加已有的 Agent');
+    return unique;
+  }
+  createGroup(actor: Actor, name: string, memberIds: string[]): Channel {
+    const members = this.existingAgents(actor === USER ? memberIds : [actor, ...memberIds]);
+    const id = randomUUID();
+    this.change(() => {
+      this.db
+        .insert(channels)
+        .values({
+          id,
+          kind: 'group',
+          name,
+          createdBy: actor,
+          createdAt: now(),
+          updatedAt: now(),
+        })
+        .run();
+      for (const agentId of members)
+        this.db
+          .insert(channelMembers)
+          .values({ channelId: id, agentId, addedBy: actor, joinedAt: now() })
+          .run();
+      const names = members.map((m) => this.agentName(m)).join('、');
+      this.systemMessage(
+        id,
+        `${this.actorName(actor)}创建了群聊“${name}”${names ? `，成员：${names}` : ''}。`,
+      );
+      this.event('channel', { channelId: id }, { created: true });
+    });
+    return this.publicChannel(id);
+  }
+  updateChannel(id: string, update: { name?: string | undefined; paused?: boolean | undefined }) {
+    const channel = this.group(id);
+    this.change(() => {
+      const set: Partial<ChannelRecord> = {};
+      if (update.name !== undefined && update.name !== channel.name) {
+        set.name = update.name;
+        this.systemMessage(id, `用户将群名改为“${update.name}”。`);
+      }
+      if (update.paused !== undefined && update.paused !== channel.paused) {
+        set.paused = update.paused;
+        this.systemMessage(
+          id,
+          update.paused
+            ? '用户暂停了群讨论：新消息会保存，但暂不投递给任何 Agent。'
+            : '用户继续了群讨论。',
+        );
+      }
+      if (!Object.keys(set).length) return;
+      this.db
+        .update(channels)
+        .set({ ...set, updatedAt: now() })
+        .where(eq(channels.id, id))
+        .run();
+      this.event('channel', { channelId: id }, set);
+    });
+    return this.publicChannel(id);
+  }
+  /** Returns the Agents that were actually added. */
+  addMembers(id: string, actor: Actor, agentIds: string[]): string[] {
+    this.group(id);
+    if (actor !== USER && !this.isMember(id, actor))
+      throw new HttpError(403, '只能邀请 Agent 加入自己所在的群');
+    const added = this.existingAgents(agentIds).filter((a) => !this.isMember(id, a));
+    if (!added.length) return [];
+    this.change(() => {
+      for (const agentId of added)
+        this.db
+          .insert(channelMembers)
+          .values({ channelId: id, agentId, addedBy: actor, joinedAt: now() })
+          .run();
+      this.systemMessage(
+        id,
+        `${this.actorName(actor)}邀请 ${added.map((a) => this.agentName(a)).join('、')} 加入了群聊。更早的消息可以通过历史读取。`,
+      );
+      this.event('channel', { channelId: id }, { members: 'added' });
+    });
+    return added;
+  }
+  removeMember(id: string, agentId: string) {
+    this.group(id);
+    if (!this.isMember(id, agentId)) throw new HttpError(404, '该 Agent 不在群中');
+    this.change(() => {
+      this.db
+        .delete(channelMembers)
+        .where(and(eq(channelMembers.channelId, id), eq(channelMembers.agentId, agentId)))
+        .run();
+      // A removed member no longer receives anything still waiting for it here.
+      this.db
+        .update(deliveries)
+        .set({ status: 'cancelled', updatedAt: now() })
+        .where(
+          and(
+            eq(deliveries.channelId, id),
+            eq(deliveries.agentId, agentId),
+            eq(deliveries.status, 'queued'),
+          ),
+        )
+        .run();
+      this.systemMessage(id, `用户将 ${this.agentName(agentId)} 移出了群聊。`);
+      this.event('channel', { channelId: id }, { members: 'removed' });
+    });
+  }
+
+  // Messages
+
+  private withDeliveries(rows: (typeof messages.$inferSelect)[]): Message[] {
+    const ids = rows.map((r) => r.id);
+    const byMessage = new Map<string, Message['deliveries']>();
+    if (ids.length)
+      for (const d of this.db
+        .select({
+          messageId: deliveries.messageId,
+          agentId: deliveries.agentId,
+          status: deliveries.status,
+        })
+        .from(deliveries)
+        .where(inArray(deliveries.messageId, ids))
+        .all())
+        byMessage.set(d.messageId, [
+          ...(byMessage.get(d.messageId) ?? []),
+          { agentId: d.agentId, status: d.status },
+        ]);
+    return rows.map((r) => ({
+      ...r,
+      mentions: JSON.parse(r.mentions) as string[],
+      deliveries: byMessage.get(r.id) ?? [],
+    }));
+  }
+  listMessages(
+    channelId: string,
+    query: { after?: number; before?: number; limit?: number } = {},
+  ): Message[] {
+    this.getChannel(channelId);
+    const predicates = [eq(messages.channelId, channelId)];
+    if (query.after !== undefined) predicates.push(gt(messages.seq, query.after));
+    if (query.before !== undefined) predicates.push(lt(messages.seq, query.before));
+    const recent = query.after === undefined;
+    const rows = this.db
+      .select()
+      .from(messages)
+      .where(and(...predicates))
+      .orderBy(recent ? desc(messages.seq) : asc(messages.seq))
+      .limit(query.limit ?? 100)
+      .all();
+    return this.withDeliveries(recent ? rows.reverse() : rows);
+  }
+  private insertMessage(
+    channelId: string,
+    sender: { type: 'user' | 'agent' | 'system'; id: string },
+    input: MessageInput & { mentions: string[] },
+  ) {
+    const seq = this.db
+      .select({ n: sql<number>`coalesce(max(${messages.seq}), 0) + 1` })
+      .from(messages)
+      .where(eq(messages.channelId, channelId))
+      .get()!.n;
+    const message = {
+      id: randomUUID(),
+      channelId,
+      seq,
+      sender: sender.type,
+      senderId: sender.id,
+      body: input.body,
+      clientId: input.clientId,
+      replyTo: input.replyTo ?? null,
+      mentions: JSON.stringify(input.mentions),
+      createdAt: now(),
+    };
+    this.db.insert(messages).values(message).run();
+    // Every member except the sender receives it, whatever the mentions say.
+    for (const agentId of this.memberIds(channelId))
+      if (sender.type !== 'agent' || agentId !== sender.id)
+        this.db
+          .insert(deliveries)
+          .values({
+            messageId: message.id,
+            agentId,
+            channelId,
+            status: 'queued',
+            updatedAt: now(),
+          })
+          .run();
+    const channel = this.getChannel(channelId);
+    this.event('message', { channelId, agentId: channel.agentId }, { messageId: message.id, seq });
+    return message;
+  }
+  private systemMessage(channelId: string, body: string) {
+    this.insertMessage(
+      channelId,
+      { type: 'system', id: 'system' },
+      { body, clientId: randomUUID(), mentions: [] },
+    );
+  }
+  saveMessage(channelId: string, sender: Sender, input: MessageInput): Message {
+    const channel = this.getChannel(channelId);
+    const senderId = sender.type === 'user' ? USER : sender.id;
+    if (sender.type === 'agent' && !this.isMember(channelId, sender.id))
+      throw new HttpError(403, '只能在自己所在的频道发言');
+    const members = new Set(this.memberIds(channelId));
+    const mentions = [...new Set(input.mentions ?? [])].filter((m) => m !== senderId);
+    if (mentions.some((m) => !members.has(m))) throw new HttpError(400, '只能 @ 该频道的成员');
+    return this.change(() => {
+      const existing = this.db
+        .select()
+        .from(messages)
+        .where(
+          and(
+            eq(messages.channelId, channelId),
+            eq(messages.sender, sender.type),
+            eq(messages.senderId, senderId),
+            eq(messages.clientId, input.clientId),
+          ),
+        )
+        .get();
+      if (existing) {
+        if (
+          existing.body !== input.body ||
+          existing.replyTo !== (input.replyTo ?? null) ||
+          existing.mentions !== JSON.stringify(mentions)
+        )
+          throw new HttpError(409, '去重标识已用于不同内容');
+        return this.withDeliveries([existing])[0]!;
+      }
+      if (input.replyTo) {
+        const parent = this.db.select().from(messages).where(eq(messages.id, input.replyTo)).get();
+        if (!parent || parent.channelId !== channel.id)
+          throw new HttpError(400, '只能回复同一频道中的消息');
+      }
+      const message = this.insertMessage(
+        channelId,
+        { type: sender.type, id: senderId },
+        { ...input, mentions },
+      );
+      return this.withDeliveries([message])[0]!;
+    });
+  }
+
+  // Scheduling
+
+  /** Unread user or Agent messages in unpaused channels; system notices never wake anyone. */
+  pendingTriggers(agentId: string): PendingChannel[] {
+    return this.db
+      .select({
+        channelId: channels.id,
+        kind: channels.kind,
+        oldest: sql<string>`min(${messages.createdAt})`,
+        latest: sql<string>`max(${messages.createdAt})`,
+      })
+      .from(deliveries)
+      .innerJoin(messages, eq(deliveries.messageId, messages.id))
+      .innerJoin(channels, eq(deliveries.channelId, channels.id))
+      .where(
+        and(
+          eq(deliveries.agentId, agentId),
+          eq(deliveries.status, 'queued'),
+          eq(channels.paused, false),
+          ne(messages.sender, 'system'),
+        ),
+      )
+      .groupBy(channels.id)
+      .all();
+  }
+  /**
+   * Claims the merged input for one turn: per unpaused channel, the most recent unread
+   * messages plus all unread mentions (every user message in a private chat), and marks
+   * the rest skipped. Returns undefined when there is nothing to submit.
+   */
+  startRun(agentId: string, threadId: string): { run: Run; input: ClaimedChannel[] } | undefined {
+    return this.change(() => {
+      const rows = this.db
+        .select({ message: messages, channel: channels })
+        .from(deliveries)
+        .innerJoin(messages, eq(deliveries.messageId, messages.id))
+        .innerJoin(channels, eq(deliveries.channelId, channels.id))
+        .where(
+          and(
+            eq(deliveries.agentId, agentId),
+            eq(deliveries.status, 'queued'),
+            eq(channels.paused, false),
+          ),
+        )
+        .orderBy(asc(channels.createdAt), asc(messages.seq))
+        .all();
+      if (!rows.length) return undefined;
+      const byChannel = new Map<string, { channel: ChannelRecord; rows: typeof rows }>();
+      for (const row of rows) {
+        const entry = byChannel.get(row.channel.id) ?? { channel: row.channel, rows: [] };
+        entry.rows.push(row);
+        byChannel.set(row.channel.id, entry);
+      }
+      const included: string[] = [];
+      const skipped: string[] = [];
+      const claims: { channel: ChannelRecord; ids: string[]; skipped: number }[] = [];
+      for (const { channel, rows: unread } of byChannel.values()) {
+        const ids: string[] = [];
+        let skippedHere = 0;
+        unread.forEach(({ message }, index) => {
+          const addressed =
+            channel.kind === 'private'
+              ? message.sender === 'user'
+              : (JSON.parse(message.mentions) as string[]).includes(agentId);
+          if (addressed || index >= unread.length - RECENT_PER_CHANNEL) ids.push(message.id);
+          else {
+            skipped.push(message.id);
+            skippedHere++;
+          }
+        });
+        included.push(...ids);
+        claims.push({ channel, ids, skipped: skippedHere });
+      }
+      const id = randomUUID();
+      this.db
+        .insert(runs)
+        .values({ id, agentId, threadId, status: 'starting', createdAt: now() })
+        .run();
+      const mark = (ids: string[], set: Partial<typeof deliveries.$inferInsert>) => {
+        if (ids.length)
+          this.db
+            .update(deliveries)
+            .set({ ...set, updatedAt: now() })
+            .where(and(eq(deliveries.agentId, agentId), inArray(deliveries.messageId, ids)))
+            .run();
+      };
+      mark(included, { status: 'submitting', runId: id });
+      mark(skipped, { status: 'skipped' });
+      this.event('run', { agentId }, { runId: id });
+      for (const claim of claims)
+        this.event('delivery', { agentId, channelId: claim.channel.id }, { runId: id });
+      const messagesById = new Map(
+        this.withDeliveries(rows.map((r) => r.message)).map((m) => [m.id, m]),
+      );
+      return {
+        run: this.getRun(id),
+        input: claims.map((claim) => ({
+          channel: claim.channel,
+          messages: claim.ids.map((m) => messagesById.get(m)!),
+          skipped: claim.skipped,
+        })),
+      };
+    });
+  }
+  private runChannels(runId: string) {
+    return [
+      ...new Set(
+        this.db
+          .select({ channelId: deliveries.channelId })
+          .from(deliveries)
+          .where(eq(deliveries.runId, runId))
+          .all()
+          .map((r) => r.channelId),
+      ),
+    ];
+  }
+  acceptRun(runId: string, turnId: string) {
+    this.change(() => {
+      const run = this.getRun(runId);
+      if (run.finishedAt) return;
+      this.db
+        .update(runs)
+        .set({ turnId, status: run.status === 'waiting' ? 'waiting' : 'running' })
+        .where(eq(runs.id, runId))
+        .run();
+      this.db
+        .update(deliveries)
+        .set({ turnId, status: 'accepted', updatedAt: now() })
+        .where(eq(deliveries.runId, runId))
+        .run();
+      for (const channelId of this.runChannels(runId))
+        this.event('delivery', { agentId: run.agentId, channelId }, { runId, status: 'accepted' });
+      this.event('run', { agentId: run.agentId }, { runId });
+    });
+  }
+  finishRun(
+    runId: string,
+    status: RunStatus,
+    delivery: DeliveryStatus,
+    error: string | null = null,
+  ) {
+    this.change(() => {
+      const run = this.getRun(runId);
+      if (run.finishedAt) return;
+      this.db
+        .update(runs)
+        .set({ status, error, finishedAt: now() })
+        .where(eq(runs.id, runId))
+        .run();
+      this.db
+        .update(deliveries)
+        .set({ status: delivery, updatedAt: now() })
+        .where(eq(deliveries.runId, runId))
+        .run();
+      this.db
+        .update(questions)
+        .set({ status: 'expired' })
+        .where(and(eq(questions.runId, runId), eq(questions.status, 'pending')))
+        .run();
+      this.event('run', { agentId: run.agentId }, { runId, status });
+      for (const channelId of this.runChannels(runId))
+        this.event('delivery', { agentId: run.agentId, channelId }, { runId, status: delivery });
+      this.event('question', { agentId: run.agentId }, { runId });
+    });
+  }
+  getRun(id: string): Run {
+    const row = this.db.select().from(runs).where(eq(runs.id, id)).get();
+    if (!row) throw new HttpError(404, '执行不存在');
+    const inputs: Run['inputs'] = [];
+    for (const d of this.db
+      .select({ channelId: deliveries.channelId, messageId: deliveries.messageId })
+      .from(deliveries)
+      .innerJoin(messages, eq(deliveries.messageId, messages.id))
+      .where(eq(deliveries.runId, id))
+      .orderBy(asc(messages.createdAt), asc(messages.seq))
+      .all()) {
+      const group = inputs.find((i) => i.channelId === d.channelId);
+      if (group) group.messageIds.push(d.messageId);
+      else inputs.push({ channelId: d.channelId, messageIds: [d.messageId] });
+    }
+    const items = this.db
+      .select({
+        id: runItems.id,
+        type: runItems.type,
+        status: runItems.status,
+        text: runItems.text,
+      })
+      .from(runItems)
+      .where(eq(runItems.runId, id))
+      .all();
+    return { ...row, inputs, items };
+  }
+  updateItem(runId: string, item: RunItem, append = false) {
+    const run = this.getRun(runId);
+    if (run.finishedAt) return;
+    this.change(() => {
+      const key = `${runId}:${item.id}`;
+      const previous = append
+        ? (this.db.select().from(runItems).where(eq(runItems.key, key)).get()?.text ?? '')
+        : '';
+      const text = (previous + item.text).slice(-128_000);
+      this.db
+        .insert(runItems)
+        .values({ ...item, text, key, runId })
+        .onConflictDoUpdate({ target: runItems.key, set: { ...item, text } })
+        .run();
+      this.event('run', { agentId: run.agentId }, { runId });
+    });
+  }
+
+  // Native questions
+
+  createQuestion(
+    agentId: string,
+    runId: string,
+    turnId: string,
+    nativeRequestId: string | number,
+    definition: QuestionDefinition[],
+  ) {
+    return this.change(() => {
+      const id = randomUUID();
+      this.db
+        .insert(questions)
+        .values({
+          id,
+          agentId,
+          runId,
+          turnId,
+          nativeRequestId: JSON.stringify(nativeRequestId),
+          definition: JSON.stringify(definition),
+          status: 'pending',
+          createdAt: now(),
+        })
+        .run();
+      this.db.update(runs).set({ status: 'waiting' }).where(eq(runs.id, runId)).run();
+      this.event('question', { agentId }, { questionId: id });
+      return id;
+    });
+  }
+  getQuestion(id: string) {
+    const row = this.db.select().from(questions).where(eq(questions.id, id)).get();
+    if (!row) throw new HttpError(404, '问题不存在');
+    return { ...row, questions: JSON.parse(row.definition) as QuestionDefinition[] };
+  }
+  answerQuestion(id: string, answers: QuestionAnswer) {
+    this.change(() => {
+      const q = this.getQuestion(id);
+      const saved = structuredClone(answers);
+      for (const question of q.questions)
+        if (question.isSecret) saved.answers[question.id] = { answers: ['[redacted]'] };
+      this.db
+        .update(questions)
+        .set({ status: 'answered', answer: JSON.stringify(saved) })
+        .where(eq(questions.id, id))
+        .run();
+      const pending = this.db
+        .select()
+        .from(questions)
+        .where(and(eq(questions.runId, q.runId), eq(questions.status, 'pending')))
+        .get();
+      if (!pending)
+        this.db.update(runs).set({ status: 'running' }).where(eq(runs.id, q.runId)).run();
+      this.event('question', { agentId: q.agentId }, { questionId: id });
+    });
+  }
+  private pendingQuestions(agentIds: string[]): UserQuestion[] {
+    if (!agentIds.length) return [];
+    return this.db
+      .select({
+        id: questions.id,
+        agentId: questions.agentId,
+        runId: questions.runId,
+        status: questions.status,
+        definition: questions.definition,
+        createdAt: questions.createdAt,
+      })
+      .from(questions)
+      .where(and(inArray(questions.agentId, agentIds), eq(questions.status, 'pending')))
+      .orderBy(asc(questions.createdAt))
+      .all()
+      .map(({ definition, ...q }) => ({
+        ...q,
+        questions: JSON.parse(definition) as QuestionDefinition[],
+      }));
+  }
+
+  // Snapshots
+
+  agentDetail(id: string): AgentDetail {
+    const agent = this.publicAgent(id);
+    const history = this.db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(eq(runs.agentId, id))
+      .orderBy(desc(runs.createdAt))
+      .limit(30)
+      .all();
+    return {
+      agent,
+      runs: history.map((r) => this.getRun(r.id)),
+      questions: this.pendingQuestions([id]),
+      cursor: this.cursor(),
+    };
+  }
+  channelDetail(id: string): ChannelDetail {
+    const channel = this.publicChannel(id);
+    return {
+      channel,
+      messages: this.listMessages(id),
+      questions: this.pendingQuestions(channel.memberIds),
+      cursor: this.cursor(),
+    };
+  }
+  recoverOnBoot() {
+    const active = this.db
+      .select({ id: runs.id, agentId: runs.agentId })
+      .from(runs)
+      .where(inArray(runs.status, ['starting', 'running', 'waiting']))
+      .all();
+    for (const r of active) {
+      this.finishRun(
+        r.id,
+        'uncertain',
+        'uncertain',
+        '服务在执行结束前退出，原生结果待核对；不会自动重投。',
+      );
+      this.updateAgent(r.agentId, {
+        status: 'error',
+        error: '上次执行结果待核对，请查看原生记录后显式恢复。',
+      });
+    }
+    for (const agent of this.listAgents()) {
+      if (agent.desiredState === 'stopped') this.updateAgent(agent.id, { status: 'stopped' });
+      else if (agent.status !== 'error') this.updateAgent(agent.id, { status: 'recovering' });
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "isles",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.4.1",
+  "engines": {
+    "node": "^24.15.0 || ^26.0.0",
+    "pnpm": ">=12.4.1 <13"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @isles/contracts build && pnpm -r --parallel --stream dev",
+    "build": "pnpm -r build",
+    "start": "pnpm --filter @isles/server start",
+    "typecheck": "pnpm --filter @isles/contracts build && pnpm -r typecheck",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm --filter @isles/contracts build && vitest run",
+    "test:e2e": "playwright test",
+    "db:generate": "pnpm --filter @isles/server db:generate",
+    "db:migrate": "pnpm --filter @isles/server db:migrate",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.19.0",
+    "@vue/eslint-config-typescript": "14.9.0",
+    "eslint": "10.11.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-vue": "10.11.1",
+    "node-gyp": "13.0.2",
+    "prettier": "3.9.9",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0",
+    "vitest": "5.0.2"
+  }
+}

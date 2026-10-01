@@ -1,0 +1,19 @@
+<template>
+  <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+    <rect width="32" height="32" rx="8" fill="currentColor" />
+    <path
+      d="M6.5 19.5c1.5-4 3.8-6 6.2-6 2.1 0 3.8 1.4 5 3.9.9-1.7 2.2-2.6 3.7-2.6 2 0 3.6 1.6 4.6 4.7"
+      stroke="#fff"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <path
+      d="M6.5 24c1.6 0 1.6-1.1 3.2-1.1s1.6 1.1 3.2 1.1 1.6-1.1 3.1-1.1 1.6 1.1 3.2 1.1 1.6-1.1 3.2-1.1S24 24 25.5 24"
+      stroke="#fff"
+      stroke-opacity="0.65"
+      stroke-width="1.6"
+      stroke-linecap="round"
+    />
+  </svg>
+</template>

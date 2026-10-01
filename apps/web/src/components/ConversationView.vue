@@ -1,0 +1,253 @@
+<script setup lang="ts">
+import type { Message, QuestionAnswer } from '@isles/contracts';
+import { useMutation, useQueryClient } from '@tanstack/vue-query';
+import { CircleAlert, Clock3, LoaderCircle, Pause, RefreshCw, X } from '@lucide/vue';
+import { computed, ref } from 'vue';
+import {
+  answerQuestion,
+  controlAgent,
+  fetchOlderMessages,
+  sendMessage,
+  updateChannel,
+} from '@/api/isles';
+import { invalidateAll, useAgents, useChannelDetail, useDirectory } from '@/api/queries';
+import ConversationHeader from './ConversationHeader.vue';
+import MessageComposer from './MessageComposer.vue';
+import MessageFeed from './MessageFeed.vue';
+import QuestionForm from './QuestionForm.vue';
+import { Button } from '@/components/ui/button';
+import { outgoing, settle, useDraft } from '@/composables/useDraft';
+import { errorMessage } from '@/lib/format';
+import { findMentions } from '@/lib/mentions';
+
+const PAGE_SIZE = 100;
+
+const props = defineProps<{ channelId: string; inspectorOpen: boolean }>();
+const emit = defineEmits<{ back: []; toggleInspector: []; openInspector: [] }>();
+
+const queryClient = useQueryClient();
+const detail = useChannelDetail(() => props.channelId);
+const agents = useAgents();
+const directory = useDirectory();
+const channel = computed(() => detail.data.value?.channel);
+const agent = computed(() =>
+  channel.value?.kind === 'private' ? directory.value.get(channel.value.agentId ?? '') : undefined,
+);
+const members = computed(() =>
+  (channel.value?.memberIds ?? []).flatMap((id) => directory.value.get(id) ?? []),
+);
+const ready = computed(() => channel.value && (channel.value.kind === 'group' || agent.value));
+const questions = computed(() => detail.data.value?.questions ?? []);
+const working = computed(() =>
+  members.value.filter(
+    (m) => m.status === 'running' && !questions.value.some((q) => q.agentId === m.id),
+  ),
+);
+
+// The detail snapshot carries the latest page; older pages are merged in on demand.
+const older = ref<Message[]>([]);
+const olderExhausted = ref(false);
+const messages = computed(() => {
+  const merged = new Map(
+    [...older.value, ...(detail.data.value?.messages ?? [])].map((message) => [
+      message.id,
+      message,
+    ]),
+  );
+  return [...merged.values()].sort((a, b) => a.seq - b.seq);
+});
+const hasOlder = computed(() => !olderExhausted.value && (messages.value[0]?.seq ?? 1) > 1);
+async function loadOlder() {
+  const first = messages.value[0];
+  if (!first) return;
+  try {
+    const page = await fetchOlderMessages(props.channelId, first.seq);
+    older.value = [...page.messages, ...older.value];
+    olderExhausted.value = page.messages.length < PAGE_SIZE;
+  } catch (error) {
+    actionError.value = errorMessage(error);
+  }
+}
+
+const actionError = ref('');
+const mutationHandlers = {
+  onMutate: () => {
+    actionError.value = '';
+  },
+  onError: (error: unknown) => {
+    actionError.value = errorMessage(error);
+  },
+  onSettled: () => invalidateAll(queryClient),
+};
+const control = useMutation({
+  mutationFn: (action: 'stop' | 'resume') => controlAgent(agent.value!.id, action),
+  ...mutationHandlers,
+});
+const pause = useMutation({
+  mutationFn: (paused: boolean) => updateChannel(props.channelId, { paused }),
+  ...mutationHandlers,
+});
+const answer = useMutation({
+  mutationFn: (input: { agentId: string; questionId: string; answers: QuestionAnswer }) =>
+    answerQuestion(input.agentId, input.questionId, input.answers),
+  ...mutationHandlers,
+});
+const send = useMutation({
+  mutationFn: (input: { body: string; clientId: string }) =>
+    sendMessage(props.channelId, {
+      ...input,
+      ...(channel.value?.kind === 'group' && { mentions: findMentions(input.body, members.value) }),
+    }),
+  ...mutationHandlers,
+});
+
+const draft = useDraft(() => props.channelId);
+async function submit() {
+  const body = draft.value.trim();
+  if (!body || send.isPending.value) return;
+  try {
+    await send.mutateAsync(outgoing(props.channelId, body));
+  } catch {
+    return;
+  }
+  settle(props.channelId);
+  // Keep anything typed while the request was in flight.
+  if (draft.value.trim() === body) draft.value = '';
+}
+
+const placeholder = computed(() => {
+  if (agent.value)
+    return agent.value.desiredState === 'stopped'
+      ? `给 ${agent.value.name} 留言，恢复后处理…`
+      : `给 ${agent.value.name} 发消息…`;
+  return channel.value?.paused
+    ? '讨论已暂停，消息会先保存…'
+    : `在 ${channel.value?.name ?? '群聊'} 中发言，输入 @ 提及成员…`;
+});
+const notice = computed(() => {
+  if (channel.value?.paused)
+    return { held: true, text: '讨论已暂停：新消息只保存，不投递给成员；继续后再汇总投递。' };
+  const current = agent.value;
+  if (!current) return undefined;
+  const queued = messages.value.filter((m) => m.deliveries[0]?.status === 'queued').length;
+  const count = queued ? `${queued} 条消息排队中。` : '';
+  if (current.desiredState === 'stopped')
+    return { held: true, text: `Agent 已停止，新消息会排队，恢复后处理。${count}` };
+  if (!count) return undefined;
+  return {
+    held: false,
+    text:
+      current.status === 'error'
+        ? `${count}恢复 Agent 后继续处理。`
+        : `${count}当前执行结束后处理。`,
+  };
+});
+const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent';
+</script>
+
+<template>
+  <div class="flex h-full min-h-0 flex-col">
+    <template v-if="channel && ready">
+      <ConversationHeader
+        :channel="channel"
+        :agent="agent"
+        :members="members"
+        :inspector-open="inspectorOpen"
+        :control-pending="control.isPending.value || pause.isPending.value"
+        @back="emit('back')"
+        @stop="control.mutate('stop')"
+        @resume="control.mutate('resume')"
+        @pause="pause.mutate(true)"
+        @continue="pause.mutate(false)"
+        @toggle-inspector="emit('toggleInspector')"
+      />
+      <div
+        v-if="agent?.error"
+        role="alert"
+        class="flex items-start gap-2.5 border-b border-destructive/20 bg-destructive/5 px-4 py-2.5 text-[13px] md:px-6"
+      >
+        <CircleAlert class="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
+        <div class="min-w-0">
+          <p class="font-medium text-destructive">Agent 运行异常</p>
+          <p class="mt-0.5 break-words text-muted-foreground">{{ agent.error }}</p>
+        </div>
+      </div>
+      <MessageFeed
+        class="flex-1"
+        :channel="channel"
+        :agent="agent"
+        :messages="messages"
+        :directory="directory"
+        :has-older="hasOlder"
+        :load-older="loadOlder"
+        :working="working"
+        :inspector-open="inspectorOpen"
+        @open-inspector="emit('openInspector')"
+      />
+      <div class="mx-auto w-full max-w-4xl space-y-2 px-3 pb-3 md:px-6 md:pb-4">
+        <div
+          v-if="actionError"
+          role="alert"
+          class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 py-2 pr-1.5 pl-3 text-[13px] text-destructive"
+        >
+          <CircleAlert class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <span class="min-w-0 flex-1 break-words">{{ actionError }}</span>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            class="text-destructive hover:text-destructive"
+            aria-label="关闭提示"
+            @click="actionError = ''"
+          >
+            <X />
+          </Button>
+        </div>
+        <section v-if="questions.length" aria-label="等待回答的问题" class="space-y-2">
+          <QuestionForm
+            v-for="question in questions"
+            :key="question.id"
+            :question="question"
+            :agent-name="nameOf(question.agentId)"
+            :pending="answer.isPending.value"
+            @submit="
+              (answers) =>
+                answer.mutate({ agentId: question.agentId, questionId: question.id, answers })
+            "
+          />
+        </section>
+        <p v-if="notice" class="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+          <Pause v-if="notice.held" class="size-3.5 shrink-0" aria-hidden="true" />
+          <Clock3 v-else class="size-3.5 shrink-0" aria-hidden="true" />{{ notice.text }}
+        </p>
+        <MessageComposer
+          v-model="draft"
+          :placeholder="placeholder"
+          :sending="send.isPending.value"
+          :members="channel.kind === 'group' ? members : []"
+          @submit="submit"
+        />
+      </div>
+    </template>
+
+    <div
+      v-else-if="detail.isError.value || agents.isError.value"
+      class="m-auto flex max-w-sm flex-col items-center px-6 text-center"
+    >
+      <CircleAlert class="size-6 text-destructive" aria-hidden="true" />
+      <h2 class="mt-3 font-medium">无法载入对话</h2>
+      <p role="alert" class="mt-1 text-[13px] text-muted-foreground">
+        {{ (detail.error.value ?? agents.error.value)?.message }}
+      </p>
+      <div class="mt-4 flex gap-2">
+        <Button variant="outline" size="sm" class="md:hidden" @click="emit('back')">返回</Button>
+        <Button variant="outline" size="sm" @click="invalidateAll(queryClient)"
+          ><RefreshCw />重试</Button
+        >
+      </div>
+    </div>
+
+    <div v-else class="m-auto flex items-center gap-2 text-[13px] text-muted-foreground">
+      <LoaderCircle class="size-4 animate-spin" />正在载入对话…
+    </div>
+  </div>
+</template>
