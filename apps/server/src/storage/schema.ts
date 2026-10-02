@@ -123,6 +123,7 @@ export const deliveries = sqliteTable(
         'queued',
         'submitting',
         'accepted',
+        'received',
         'completed',
         'cancelled',
         'failed',

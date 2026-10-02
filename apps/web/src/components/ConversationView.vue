@@ -126,7 +126,7 @@ const placeholder = computed(() => {
 });
 const notice = computed(() => {
   if (channel.value?.paused)
-    return { held: true, text: '讨论已暂停：新消息只保存，不投递给成员；继续后再汇总投递。' };
+    return { held: true, text: '讨论已暂停：新消息会保存，暂不自动投递；继续后汇总剩余未读。' };
   const current = agent.value;
   if (!current) return undefined;
   const queued = messages.value.filter((m) => m.deliveries[0]?.status === 'queued').length;

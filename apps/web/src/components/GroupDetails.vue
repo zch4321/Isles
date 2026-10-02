@@ -61,7 +61,7 @@ const error = computed(() => rename.error.value?.message ?? remove.error.value?.
       </form>
       <dl class="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-[13px]">
         <dt class="text-muted-foreground">讨论</dt>
-        <dd>{{ channel.paused ? '已暂停，新消息只保存不投递' : '进行中' }}</dd>
+        <dd>{{ channel.paused ? '已暂停自动投递，仍可主动读取' : '进行中' }}</dd>
         <dt class="text-muted-foreground">创建</dt>
         <dd>{{ creator }} · {{ formatDateTime(channel.createdAt) }}</dd>
       </dl>

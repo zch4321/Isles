@@ -20,6 +20,8 @@ export const deliveryStatusSchema = z.enum([
   'queued',
   'submitting',
   'accepted',
+  // Returned through an Agent's MCP inbox/history read; not a completed native turn.
+  'received',
   'completed',
   'cancelled',
   'failed',

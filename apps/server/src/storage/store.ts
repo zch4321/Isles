@@ -64,13 +64,6 @@ export interface ClaimedChannel {
   /** Earlier unread messages marked skipped instead of being submitted. */
   skipped: number;
 }
-/** A channel holding unread messages that can wake an Agent. */
-export interface PendingChannel {
-  channelId: string;
-  kind: 'private' | 'group';
-  oldest: string;
-  latest: string;
-}
 
 // Each channel contributes its most recent unread messages, plus every unread mention.
 const RECENT_PER_CHANNEL = 10;
@@ -317,7 +310,7 @@ export class Store {
         this.systemMessage(
           id,
           update.paused
-            ? '用户暂停了群讨论：新消息会保存，但暂不投递给任何 Agent。'
+            ? '用户暂停了群讨论：新消息会保存，但暂不自动投递给任何 Agent；主动读取仍然可用。'
             : '用户继续了群讨论。',
         );
       }
@@ -420,6 +413,67 @@ export class Store {
       .all();
     return this.withDeliveries(recent ? rows.reverse() : rows);
   }
+  /** Record only the messages actually returned, without changing existing run outcomes. */
+  private recordReceipt(agentId: string, messageIds: string[]) {
+    if (!messageIds.length) return;
+    const updated = this.db
+      .update(deliveries)
+      .set({ status: 'received', updatedAt: now() })
+      .where(
+        and(
+          eq(deliveries.agentId, agentId),
+          inArray(deliveries.messageId, messageIds),
+          inArray(deliveries.status, ['queued', 'skipped']),
+        ),
+      )
+      .returning({ channelId: deliveries.channelId })
+      .all();
+    for (const channelId of new Set(updated.map((d) => d.channelId)))
+      this.event('delivery', { agentId, channelId }, { status: 'received' });
+  }
+  markMessagesReceived(agentId: string, messageIds: string[]) {
+    this.change(() => this.recordReceipt(agentId, messageIds));
+  }
+  /** Pull queued messages into the current native turn; pagination never discards unread. */
+  receiveMessages(
+    agentId: string,
+    query: { channelId?: string | undefined; limit: number },
+  ): { input: ClaimedChannel[]; hasMore: boolean } {
+    return this.change(() => {
+      const rows = this.db
+        .select({ message: messages, channel: channels })
+        .from(deliveries)
+        .innerJoin(messages, eq(deliveries.messageId, messages.id))
+        .innerJoin(channels, eq(deliveries.channelId, channels.id))
+        .innerJoin(
+          channelMembers,
+          and(eq(channelMembers.channelId, channels.id), eq(channelMembers.agentId, agentId)),
+        )
+        .where(
+          and(
+            eq(deliveries.agentId, agentId),
+            eq(deliveries.status, 'queued'),
+            query.channelId === undefined ? undefined : eq(channels.id, query.channelId),
+          ),
+        )
+        .orderBy(asc(messages.createdAt), asc(channels.id), asc(messages.seq))
+        .limit(query.limit + 1)
+        .all();
+      const page = rows.slice(0, query.limit);
+      this.recordReceipt(
+        agentId,
+        page.map((r) => r.message.id),
+      );
+      const byChannel = new Map<string, ClaimedChannel>();
+      const received = this.withDeliveries(page.map((r) => r.message));
+      page.forEach(({ channel }, index) => {
+        const entry = byChannel.get(channel.id) ?? { channel, messages: [], skipped: 0 };
+        entry.messages.push(received[index]!);
+        byChannel.set(channel.id, entry);
+      });
+      return { input: [...byChannel.values()], hasMore: rows.length > query.limit };
+    });
+  }
   private insertMessage(
     channelId: string,
     sender: { type: 'user' | 'agent' | 'system'; id: string },
@@ -514,27 +568,24 @@ export class Store {
   // Scheduling
 
   /** Unread user or Agent messages in unpaused channels; system notices never wake anyone. */
-  pendingTriggers(agentId: string): PendingChannel[] {
-    return this.db
-      .select({
-        channelId: channels.id,
-        kind: channels.kind,
-        oldest: sql<string>`min(${messages.createdAt})`,
-        latest: sql<string>`max(${messages.createdAt})`,
-      })
-      .from(deliveries)
-      .innerJoin(messages, eq(deliveries.messageId, messages.id))
-      .innerJoin(channels, eq(deliveries.channelId, channels.id))
-      .where(
-        and(
-          eq(deliveries.agentId, agentId),
-          eq(deliveries.status, 'queued'),
-          eq(channels.paused, false),
-          ne(messages.sender, 'system'),
-        ),
-      )
-      .groupBy(channels.id)
-      .all();
+  hasPendingMessages(agentId: string): boolean {
+    return Boolean(
+      this.db
+        .select({ messageId: deliveries.messageId })
+        .from(deliveries)
+        .innerJoin(messages, eq(deliveries.messageId, messages.id))
+        .innerJoin(channels, eq(deliveries.channelId, channels.id))
+        .where(
+          and(
+            eq(deliveries.agentId, agentId),
+            eq(deliveries.status, 'queued'),
+            eq(channels.paused, false),
+            ne(messages.sender, 'system'),
+          ),
+        )
+        .limit(1)
+        .get(),
+    );
   }
   /**
    * Claims the merged input for one turn: per unpaused channel, the most recent unread

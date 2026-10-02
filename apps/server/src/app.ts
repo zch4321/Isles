@@ -19,7 +19,7 @@ import { NativeCatalog, type Catalog } from './codex/catalog.js';
 import { NativeEnvironment, type NativeOptions } from './codex/environment.js';
 import { HttpError } from './errors.js';
 import { registerMcp } from './mcp/server.js';
-import { Runtime, type ClientFactory, type Schedule } from './runtime/runtime.js';
+import { Runtime, type ClientFactory } from './runtime/runtime.js';
 import { openDatabase } from './storage/database.js';
 import { acquireDataLock } from './storage/lock.js';
 import { Store } from './storage/store.js';
@@ -32,7 +32,6 @@ export interface AppOptions {
   catalog?: Catalog;
   clientFactory?: ClientFactory;
   runtimeUrl?: string;
-  schedule?: Schedule;
 }
 
 export async function buildApp(options: AppOptions) {
@@ -55,7 +54,7 @@ export async function buildApp(options: AppOptions) {
   });
   const store = new Store(database, options.dataDir);
   const catalog = options.catalog ?? new NativeCatalog(environment, options.dataDir);
-  const runtime = new Runtime(store, catalog, environment, options.clientFactory, options.schedule);
+  const runtime = new Runtime(store, catalog, environment, options.clientFactory);
   if (options.runtimeUrl) runtime.start(options.runtimeUrl);
   app.decorate('isles', { runtime, store });
 

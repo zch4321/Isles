@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { agentRoot } from '../codex/environment.js';
 import { HttpError } from '../errors.js';
-import { agentView, channelView, directoryOf } from '../runtime/envelope.js';
+import { agentView, channelView, directoryOf, unreadEnvelope } from '../runtime/envelope.js';
 import type { Runtime } from '../runtime/runtime.js';
 
 const agentIds = z.array(z.string().uuid()).max(50);
@@ -34,7 +34,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
       )
         throw new HttpError(401, 'MCP Agent 身份无效');
       const id = agent.id;
-      const server = new McpServer({ name: 'isles', version: '0.2.0' });
+      const server = new McpServer({ name: 'isles', version: '0.3.0' });
       // Membership and permissions are read again on every call, not from this connection.
       const member = (channelId: string) => {
         store.getChannel(channelId);
@@ -87,14 +87,14 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         'read_messages',
         {
           description:
-            'Read saved history of a channel you belong to, in ascending sequence order. Without after/before it returns the latest page; continue with nextAfter or nextBefore when present.',
+            'Read saved history of a channel you belong to, including paused groups, in ascending sequence order. Without after/before it returns the latest page; continue with nextAfter or nextBefore when present. Only messages actually returned are recorded as received by you and will not be automatically delivered again.',
           inputSchema: {
             channelId: z.string().uuid(),
             after: z.number().int().min(0).optional(),
             before: z.number().int().min(1).optional(),
             limit: z.number().int().min(1).max(100).default(50),
           },
-          annotations: { readOnlyHint: true, openWorldHint: false },
+          annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         },
         ({ channelId, after, before, limit }) => {
           member(channelId);
@@ -109,11 +109,35 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
           const page = forward ? all.slice(0, limit) : all.slice(-limit);
           const more = all.length > limit;
           const directory = directoryOf(store.listAgents());
-          return result({
+          const response = result({
             ...channelView(store.getChannel(channelId)),
             messages: page.map((m) => agentView(m, id, directory)),
             nextAfter: forward && more ? page.at(-1)!.seq : null,
             nextBefore: !forward && more ? page[0]!.seq : null,
+          });
+          store.markMessagesReceived(
+            id,
+            page.map((m) => m.id),
+          );
+          return response;
+        },
+      );
+      server.registerTool(
+        'receive_messages',
+        {
+          description:
+            'Receive queued messages during your current turn, oldest first and grouped by channel. Omit channelId to check all your channels, including paused groups. Returns immediately, even if empty; call again when has_more is true. Only returned messages are recorded as received and will not trigger another turn. Older messages skipped from automatic input remain available through read_messages.',
+          inputSchema: {
+            channelId: z.string().uuid().optional(),
+            limit: z.number().int().min(1).max(100).default(50),
+          },
+          annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+        },
+        ({ channelId, limit }) => {
+          const { input, hasMore } = runtime.receiveMessages(id, { channelId, limit });
+          return result({
+            ...unreadEnvelope(id, input, directoryOf(store.listAgents())),
+            has_more: hasMore,
           });
         },
       );

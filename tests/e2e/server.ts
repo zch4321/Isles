@@ -6,7 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../../apps/server/src/app.js';
 import { agentRoot } from '../../apps/server/src/codex/environment.js';
-import { MockHarness, testCatalog, type MockClient } from '../../apps/server/test/helpers.js';
+import {
+  MockHarness,
+  testCatalog,
+  type MockClient,
+  type Envelope,
+} from '../../apps/server/test/helpers.js';
 
 const dataDir = await mkdtemp(join(tmpdir(), 'isles-e2e-'));
 const harness = new MockHarness();
@@ -23,10 +28,9 @@ const app = await buildApp({
   dataDir,
   catalog: testCatalog,
   clientFactory: harness.factory,
-  schedule: { groupQuietMs: 300, groupMaxWaitMs: 1_500 },
 });
 
-async function sendMessage(client: MockClient, args: Record<string, unknown>) {
+async function callMcp<T>(client: MockClient, name: string, args: Record<string, unknown>) {
   const response = await fetch(`${client.baseUrl}/mcp/${client.agent.id}`, {
     method: 'POST',
     headers: {
@@ -38,10 +42,15 @@ async function sendMessage(client: MockClient, args: Record<string, unknown>) {
       jsonrpc: '2.0',
       id: 10,
       method: 'tools/call',
-      params: { name: 'send_message', arguments: args },
+      params: { name, arguments: args },
     }),
   });
-  if (!response.ok) throw new Error('Test MCP reply failed');
+  if (!response.ok) throw new Error('Test MCP request failed');
+  const rpc = (await response.json()) as {
+    result?: { isError?: boolean; content: { text: string }[] };
+  };
+  if (!rpc.result || rpc.result.isError) throw new Error('Test MCP tool failed');
+  return JSON.parse(rpc.result.content[0]!.text) as T;
 }
 
 // Replies once per channel to the latest user message; other Agents' messages get no reply,
@@ -52,10 +61,18 @@ harness.onTurn = (client) => {
     const latest = channel.messages.filter((m) => m.sender.type === 'user').at(-1);
     return latest ? [{ channelId: channel.channel_id, message: latest }] : [];
   });
+  const receiveDuringTurn = targets.some((t) => t.message.body === '请在执行中收信');
   const publish = async () => {
+    if (receiveDuringTurn) {
+      const inbox = await callMcp<Envelope>(client, 'receive_messages', {});
+      for (const channel of inbox.channels) {
+        const message = channel.messages.filter((m) => m.sender.type === 'user').at(-1);
+        if (message) targets.push({ channelId: channel.channel_id, message });
+      }
+    }
     for (const { channelId, message } of targets) {
       if (client.closed) return;
-      await sendMessage(client, {
+      await callMcp(client, 'send_message', {
         channelId,
         body: `MCP 回复：${message.body}`,
         replyTo: message.message_id,
@@ -64,7 +81,7 @@ harness.onTurn = (client) => {
     }
     client.complete();
   };
-  if (targets.some((t) => t.message.body === '请向我提问')) {
+  if (receiveDuringTurn || targets.some((t) => t.message.body === '请向我提问')) {
     setTimeout(() => client.question(), 30);
     const respond = client.respond.bind(client);
     client.respond = (id, result) => {

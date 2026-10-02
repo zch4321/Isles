@@ -36,13 +36,17 @@ export function channelView(channel: ChannelRecord | Channel) {
 }
 
 /** The single text input of one turn: every claimed channel with its unread messages. */
-export function buildEnvelope(recipientId: string, input: ClaimedChannel[], directory: Directory) {
-  return JSON.stringify({
+export function unreadEnvelope(recipientId: string, input: ClaimedChannel[], directory: Directory) {
+  return {
     type: 'isles.unread',
     channels: input.map(({ channel, messages, skipped }) => ({
       ...channelView(channel),
       skipped_unread: skipped,
       messages: messages.map((m) => agentView(m, recipientId, directory)),
     })),
-  });
+  };
+}
+
+export function buildEnvelope(recipientId: string, input: ClaimedChannel[], directory: Directory) {
+  return JSON.stringify(unreadEnvelope(recipientId, input, directory));
 }

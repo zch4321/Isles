@@ -115,7 +115,7 @@ const running = computed(() => props.members.filter((m) => m.status === 'running
         variant="outline"
         size="sm"
         aria-label="暂停讨论"
-        title="暂停后新消息只保存，不投递给成员"
+        title="暂停自动投递，成员仍可主动读取消息"
         :disabled="controlPending"
         @click="$emit('pause')"
       >

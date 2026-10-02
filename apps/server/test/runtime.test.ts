@@ -9,7 +9,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { agentRoot } from '../src/codex/environment.js';
-import type { Schedule } from '../src/runtime/runtime.js';
 import { MockHarness, testCatalog } from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -17,7 +16,7 @@ afterEach(async () => {
   for (const fn of cleanups.reverse()) await fn();
   cleanups.length = 0;
 });
-async function fixture(schedule: Schedule = { groupQuietMs: 80, groupMaxWaitMs: 400 }) {
+async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'isles-runtime-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));
   const harness = new MockHarness();
@@ -27,7 +26,6 @@ async function fixture(schedule: Schedule = { groupQuietMs: 80, groupMaxWaitMs: 
       catalog: testCatalog,
       clientFactory: harness.factory,
       runtimeUrl: 'http://127.0.0.1:1',
-      schedule,
     });
   const app = await open();
   cleanups.push(() => app.close());
@@ -317,28 +315,21 @@ describe('durable runtime with simulated Codex', () => {
       .toBe('completed');
   });
 
-  it('debounces group messages, wakes every other member once, and wakes private chats at once', async () => {
-    const { app, harness, create, say, group, ready } = await fixture({
-      groupQuietMs: 150,
-      groupMaxWaitMs: 2_000,
-    });
+  it('immediately wakes every other group member and private chats, but not for system notices or self messages', async () => {
+    const { app, harness, create, say, group, ready } = await fixture();
     const a = await create('A');
     const b = await create('B');
     const c = await create('C');
     const room = group('讨论组', [a.id, b.id]);
-    say(room.id, '大家好');
-    say(room.id, '一起看看', { mentions: [b.id] });
-    await sleep(60);
     expect(harness.turns).toBe(0);
-    await expect.poll(() => harness.turns).toBe(2);
-    await sleep(200);
+    say(room.id, '一起看看', { mentions: [b.id] });
     expect(harness.turns).toBe(2);
-    expect(harness.bodies(a.id)[0]!.slice(-2)).toEqual(['大家好', '一起看看']);
+    expect(harness.bodies(a.id)[0]!.at(-1)).toBe('一起看看');
     const forB = harness.inputs.find((i) => i.agentId === b.id)!.envelope.channels;
     expect(forB).toHaveLength(1);
     expect(forB[0]).toMatchObject({ channel_id: room.id, kind: 'group', name: '讨论组' });
     expect(forB[0]!.messages[0]!.sender.type).toBe('system');
-    expect(forB[0]!.messages.slice(1).map((m) => m.mentions_you)).toEqual([false, true]);
+    expect(forB[0]!.messages[1]!.mentions_you).toBe(true);
     expect(harness.bodies(c.id)).toEqual([]);
 
     harness.latest(a.id).complete();
@@ -347,7 +338,7 @@ describe('durable runtime with simulated Codex', () => {
     await ready(b.id);
     const reply = app.isles.runtime.publish(a.id, room.id, { body: 'A 的看法', clientId: 'a-1' });
     expect(reply.deliveries.map((d) => d.agentId)).toEqual([b.id]);
-    await expect.poll(() => harness.bodies(b.id).length).toBe(2);
+    expect(harness.bodies(b.id)).toHaveLength(2);
     expect(harness.bodies(b.id)[1]).toEqual(['A 的看法']);
     expect(harness.inputs.at(-1)!.envelope.channels[0]!.messages[0]!.sender).toMatchObject({
       type: 'agent',
@@ -360,21 +351,30 @@ describe('durable runtime with simulated Codex', () => {
     expect(harness.bodies(c.id)).toEqual([['私聊']]);
   });
 
-  it('wakes a busy group after the maximum wait even while messages keep arriving', async () => {
-    const { harness, create, say, group } = await fixture({
-      groupQuietMs: 200,
-      groupMaxWaitMs: 500,
-    });
+  it('merges busy input immediately after a turn without waiting for other members, including arrivals at turn completion', async () => {
+    const { app, harness, create, say, group, ready } = await fixture();
     const a = await create('A');
-    const room = group('持续讨论', [a.id]);
-    for (let i = 0; i < 12; i++) {
-      say(room.id, `消息 ${i}`);
-      await sleep(80);
-    }
-    expect(harness.turns).toBe(1);
-    const first = harness.bodies(a.id)[0]!.filter((b) => b.startsWith('消息'));
-    expect(first.length).toBeGreaterThan(3);
-    expect(first.length).toBeLessThan(12);
+    const b = await create('B');
+    const room = group('持续讨论', [a.id, b.id]);
+    say(room.id, '开始工作');
+    expect(harness.turns).toBe(2);
+    app.isles.runtime.publish(b.id, room.id, { body: 'B 的进展', clientId: 'progress' });
+    say(room.id, '补充要求');
+    expect(harness.turns).toBe(2);
+
+    harness.latest(a.id).complete();
+    // This arrives before the completion continuation can drain the pending queue.
+    say(room.id, '刚结束时的新消息');
+    await expect.poll(() => harness.bodies(a.id).length).toBe(2);
+    expect(harness.bodies(a.id)[1]).toEqual(['B 的进展', '补充要求', '刚结束时的新消息']);
+    expect(harness.bodies(b.id)).toHaveLength(1);
+    expect(app.isles.store.publicAgent(b.id).status).toBe('running');
+
+    harness.latest(a.id).complete();
+    await ready(a.id);
+    expect(harness.bodies(a.id)).toHaveLength(2);
+    say(room.id, '空闲后的消息');
+    expect(harness.bodies(a.id)[2]).toEqual(['空闲后的消息']);
   });
 
   it('merges unread channels into one turn: recent ten per channel plus earlier mentions, never repeated', async () => {
@@ -538,6 +538,7 @@ describe('durable runtime with simulated Codex', () => {
       'list_agents',
       'list_channels',
       'read_messages',
+      'receive_messages',
       'send_message',
     ]);
     for (const channelId of [other.channelId, outside.id])

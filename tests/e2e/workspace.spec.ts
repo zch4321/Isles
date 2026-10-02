@@ -199,7 +199,7 @@ test('runs a group discussion with mentions, pause and member management', async
   await page.getByRole('button', { name: '暂停讨论' }).click();
   await expect(page.getByTestId('group-status')).toHaveText('已暂停');
   await send(page, '暂停期间的消息');
-  await expect(page.getByText('讨论已暂停：新消息只保存')).toBeVisible();
+  await expect(page.getByText('讨论已暂停：新消息会保存')).toBeVisible();
   await page.waitForTimeout(1_000);
   await expect(replies).toHaveCount(2);
   await page.getByRole('button', { name: '继续讨论' }).click();
@@ -225,6 +225,30 @@ test('runs a group discussion with mentions, pause and member management', async
   await page.screenshot({ path: testInfo.outputPath('group-mobile.png'), fullPage: true });
   expect(await noHorizontalScroll(page)).toBe(false);
   expect(errors).toEqual([]);
+});
+
+test('receives busy input through MCP without creating another native turn or leaving a queued badge', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await createAgent(page, '收信 Agent');
+  await send(page, '请在执行中收信');
+  await expect(page.getByText('收信 Agent 需要你的回答')).toBeVisible();
+  await send(page, '执行中的更新');
+  const message = page.locator('[data-sender="user"]').last();
+  await expect(message).toContainText('排队中');
+  await page.getByRole('radio', { name: /^继续/ }).check();
+  await page.getByRole('button', { name: '提交回答' }).click();
+  const replies = page.locator('[data-sender="agent"]');
+  await expect(replies).toHaveCount(2);
+  await expect(replies.last()).toContainText('MCP 回复：执行中的更新');
+  await expect(page.getByTestId('agent-status')).toHaveText('可用');
+  await expect(message).not.toContainText('排队中');
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  await expect(page.getByTestId('inspector').locator('details[data-run]')).toHaveCount(1);
+  await page.reload();
+  await expect(replies).toHaveCount(2);
+  await expect(message).not.toContainText('排队中');
 });
 
 test('shows a recoverable connection error instead of a connected state', async ({ page }) => {

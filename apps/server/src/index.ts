@@ -5,7 +5,6 @@ const config = readConfig();
 const app = await buildApp({
   dataDir: config.dataDir,
   webRoot: config.webRoot,
-  schedule: config.schedule,
   logger: true,
 });
 

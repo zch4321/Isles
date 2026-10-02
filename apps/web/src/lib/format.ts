@@ -13,6 +13,7 @@ export const deliveryLabels: Record<DeliveryStatus, string> = {
   queued: '排队中',
   submitting: '提交中',
   accepted: '执行中',
+  received: '已通过 MCP 接收',
   completed: '已完成',
   cancelled: '已取消',
   failed: '投递失败',
