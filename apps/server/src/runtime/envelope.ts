@@ -1,52 +1,51 @@
 import type { Agent, Channel, Message } from '@isles/contracts';
 import type { ChannelRecord, ClaimedChannel } from '../storage/store.js';
 
-/** Looks up Agents by ID for sender and mention names. */
 export type Directory = ReadonlyMap<string, Pick<Agent, 'name' | 'harness' | 'model'>>;
+export const directoryOf = (agents: Agent[]): Directory =>
+  new Map(agents.map((agent) => [agent.id, agent]));
+export const channelView = (channel: ChannelRecord | Channel) => ({
+  channel_id: channel.id,
+  kind: channel.kind,
+  name: channel.name,
+});
+export const channelLabel = (recipientId: string, channel: ChannelRecord | Channel) =>
+  channel.kind === 'private' && channel.agentId === recipientId ? 'private' : channel.id;
 
-export function directoryOf(agents: Agent[]): Directory {
-  return new Map(agents.map((a) => [a.id, a]));
+/** Only platform-generated headers begin with '['. Escape reserved body lines reversibly. */
+export function escapeMessageBody(body: string): string {
+  return body
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => (['[', '\\'].includes(line.trimStart()[0] ?? '') ? `\\${line}` : line))
+    .join('\n');
 }
 
-// Metadata comes from stored columns, never from the body, so a body cannot pose as another sender.
-export function agentView(message: Message, recipientId: string, directory: Directory) {
-  const agent = message.sender === 'agent' ? directory.get(message.senderId) : undefined;
-  return {
-    message_id: message.id,
-    seq: message.seq,
-    sender: agent
-      ? {
-          type: 'agent',
-          id: message.senderId,
-          name: agent.name,
-          harness: agent.harness,
-          model: agent.model,
-        }
-      : { type: message.sender, id: message.senderId },
-    body: message.body,
-    reply_to: message.replyTo,
-    mentions: message.mentions.map((id) => ({ id, name: directory.get(id)?.name ?? null })),
-    mentions_you: message.mentions.includes(recipientId),
-    created_at: message.createdAt,
-  };
+export function formatChannelMessages(
+  recipientId: string,
+  channel: ChannelRecord | Channel,
+  messages: Message[],
+  skipped = 0,
+) {
+  const label = channelLabel(recipientId, channel);
+  const blocks: string[] = [];
+  if (skipped) blocks.push(`[channel: ${label}, skipped_unread: ${skipped}]`);
+  for (const message of messages) {
+    const sender = message.sender === 'agent' ? `agent:${message.senderId}` : message.sender;
+    const fields = [`channel: ${label}`, `seq: ${message.seq}`, `from: ${sender}`];
+    if (message.replyTo !== null) fields.push(`reply_to: ${message.replyTo}`);
+    if (message.mentions.length) fields.push(`mentions: ${message.mentions.join('|')}`);
+    blocks.push(`[${fields.join(', ')}]\n${escapeMessageBody(message.body)}`);
+  }
+  return blocks.join('\n\n');
 }
 
-export function channelView(channel: ChannelRecord | Channel) {
-  return { channel_id: channel.id, kind: channel.kind, name: channel.name };
-}
-
-/** The single text input of one turn: every claimed channel with its unread messages. */
-export function unreadEnvelope(recipientId: string, input: ClaimedChannel[], directory: Directory) {
-  return {
-    type: 'isles.unread',
-    channels: input.map(({ channel, messages, skipped }) => ({
-      ...channelView(channel),
-      skipped_unread: skipped,
-      messages: messages.map((m) => agentView(m, recipientId, directory)),
-    })),
-  };
-}
-
-export function buildEnvelope(recipientId: string, input: ClaimedChannel[], directory: Directory) {
-  return JSON.stringify(unreadEnvelope(recipientId, input, directory));
+/** The same text representation is used for turn input and MCP inbox/history results. */
+export function formatMessages(recipientId: string, input: ClaimedChannel[]) {
+  return input
+    .map(({ channel, messages, skipped }) =>
+      formatChannelMessages(recipientId, channel, messages, skipped),
+    )
+    .filter(Boolean)
+    .join('\n\n');
 }

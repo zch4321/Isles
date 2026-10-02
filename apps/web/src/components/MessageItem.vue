@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { DeliveryStatus, Message } from '@isles/contracts';
+import { messageKey, type DeliveryStatus, type Message } from '@isles/contracts';
 import { AtSign, Ban, CircleAlert, Clock3, CornerDownRight, LoaderCircle } from '@lucide/vue';
 import { computed, type Component } from 'vue';
 import MarkdownContent from './MarkdownContent.vue';
@@ -51,7 +51,7 @@ const segments = computed(() =>
 
 <template>
   <article
-    :id="`message-${message.id}`"
+    :id="`message-${messageKey(message)}`"
     :data-sender="message.sender"
     :aria-label="`${senderName}的消息`"
     :class="

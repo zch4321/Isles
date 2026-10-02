@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   check,
+  foreignKey,
   index,
   integer,
   primaryKey,
@@ -49,6 +50,7 @@ export const channels = sqliteTable(
     // The Agent of a private chat; null for groups.
     agentId: text('agent_id').references(() => agents.id),
     paused: integer({ mode: 'boolean' }).notNull().default(false),
+    nextMessageSeq: integer('next_message_seq').notNull().default(1),
     // 'user' or the ID of the Agent that created the group.
     createdBy: text('created_by').notNull(),
     createdAt: text('created_at').notNull(),
@@ -85,7 +87,6 @@ export const channelMembers = sqliteTable(
 export const messages = sqliteTable(
   'messages',
   {
-    id: text().primaryKey(),
     channelId: text('channel_id')
       .notNull()
       .references(() => channels.id),
@@ -94,13 +95,15 @@ export const messages = sqliteTable(
     senderId: text('sender_id').notNull(),
     body: text().notNull(),
     clientId: text('client_id').notNull(),
-    replyTo: text('reply_to'),
+    replyTo: integer('reply_to'),
     // JSON array of mentioned Agent IDs.
     mentions: text().notNull().default('[]'),
     createdAt: text('created_at').notNull(),
   },
   (t) => [
-    uniqueIndex('messages_sequence').on(t.channelId, t.seq),
+    primaryKey({ columns: [t.channelId, t.seq] }),
+    check('messages_positive_seq', sql`${t.seq} > 0`),
+    foreignKey({ columns: [t.channelId, t.replyTo], foreignColumns: [t.channelId, t.seq] }),
     uniqueIndex('messages_dedupe').on(t.channelId, t.sender, t.senderId, t.clientId),
   ],
 );
@@ -109,9 +112,7 @@ export const messages = sqliteTable(
 export const deliveries = sqliteTable(
   'deliveries',
   {
-    messageId: text('message_id')
-      .notNull()
-      .references(() => messages.id),
+    seq: integer().notNull(),
     agentId: text('agent_id')
       .notNull()
       .references(() => agents.id),
@@ -136,7 +137,11 @@ export const deliveries = sqliteTable(
     updatedAt: text('updated_at').notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.messageId, t.agentId] }),
+    primaryKey({ columns: [t.channelId, t.seq, t.agentId] }),
+    foreignKey({
+      columns: [t.channelId, t.seq],
+      foreignColumns: [messages.channelId, messages.seq],
+    }),
     index('deliveries_queue').on(t.agentId, t.status),
     index('deliveries_run').on(t.runId),
   ],

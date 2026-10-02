@@ -8,6 +8,7 @@ import { buildApp } from '../../apps/server/src/app.js';
 import { agentRoot } from '../../apps/server/src/codex/environment.js';
 import {
   MockHarness,
+  parseMessageText,
   testCatalog,
   type MockClient,
   type Envelope,
@@ -50,7 +51,11 @@ async function callMcp<T>(client: MockClient, name: string, args: Record<string,
     result?: { isError?: boolean; content: { text: string }[] };
   };
   if (!rpc.result || rpc.result.isError) throw new Error('Test MCP tool failed');
-  return JSON.parse(rpc.result.content[0]!.text) as T;
+  return (
+    name === 'receive_messages'
+      ? parseMessageText(rpc.result.content[0]!.text, client.agent.channelId, client.agent.id)
+      : JSON.parse(rpc.result.content[0]!.text)
+  ) as T;
 }
 
 // Replies once per channel to the latest user message; other Agents' messages get no reply,
@@ -75,8 +80,8 @@ harness.onTurn = (client) => {
       await callMcp(client, 'send_message', {
         channelId,
         body: `MCP 回复：${message.body}`,
-        replyTo: message.message_id,
-        clientId: `reply-${message.message_id}`,
+        replyTo: message.seq,
+        clientId: `reply-${message.seq}`,
       });
     }
     client.complete();

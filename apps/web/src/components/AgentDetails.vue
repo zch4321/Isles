@@ -52,7 +52,7 @@ function inputs(run: Run) {
         : channel.kind === 'private'
           ? '私聊'
           : channelTitle(channel, props.directory);
-      return `${name} ${input.messageIds.length} 条`;
+      return `${name} ${input.messageSeqs.length} 条`;
     })
     .join(' · ');
 }

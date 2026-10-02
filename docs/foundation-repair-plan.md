@@ -1,12 +1,12 @@
 # Agent 基础规则与消息协议修复计划
 
-> 日期：2026-10-02 · 状态：方向已确认，修复与重新验收待实施
+> 日期：2026-10-02 · 状态：基础修复与 M1/M2 重新验收已完成，结果见第 8 节
 >
-> 当前优先级：完成本计划，再恢复 M2 群聊验收与后续阶段。现有群聊、收信代码及历史测试记录保留，不能代替本计划的验收。
+> 本计划补齐规则文件、模型消息协议、消息关联迁移和真实压缩验证，再重新验收 M2。M3 及后续接入未在本轮实施。
 
-## 1. 为什么重新安排
+## 1. 修复前的问题
 
-现有实现已打通 Codex 私聊、群聊和 MCP 收信，但基础说明的加载路径与用户要求存在偏离：
+修复前的实现已打通 Codex 私聊、群聊和 MCP 收信，但基础说明的加载路径与用户要求存在偏离：
 
 - `NativeEnvironment.launch()` 只准备工作目录、`.isles-root` 与 MCP token，没有生成 Agent 自己的 `AGENTS.md`。
 - `Runtime.instructions()` 在 TypeScript 中拼接环境、身份与消息格式说明，经 `developerInstructions` 传入 `thread/start` / `thread/resume`；首次创建还通过 `thread/inject_items` 将同一说明写入历史，用于空 thread 落盘。
@@ -52,16 +52,16 @@
 
 ## 4. 消息协议的目标
 
-以下是已确认的呈现方向，最终字段与边界说明在第一项修复中写成一份可测试的协议：
+字段与边界已固定在 [消息协议](message-protocol.md)，自动输入、收信和历史查询共用同一个编码器。例如：
 
 ```text
 [channel: private, seq: 8, from: user]
 先帮我分析这个方案。
 
-[channel: group-id, seq: 12, from: agent-a]
+[channel: group-id, seq: 12, from: agent:agent-a]
 我建议先确认接口。
 
-[channel: group-id, seq: 13, from: agent-b, reply_to: 12]
+[channel: group-id, seq: 13, from: agent:agent-b, reply_to: 12]
 同意。
 ```
 
@@ -84,17 +84,51 @@
 
 消息数据默认保留，不沿用早期 M1 到 M2 时“可以清空数据”的一次性决定。迁移要提供备份和失败恢复方案；如发现必须改变已确认语义或舍弃数据的情况，先讨论再执行。
 
-空 thread 持久化单独处理：当前 `thread/inject_items` 有落盘目的，移除规则正文不能破坏“创建后尚未聊天也能恢复原 thread”的要求。核对实际 CLI 的持久化能力；若仍需要最小初始化，必须与规则加载分离，不以注入完整规则作为替代。
+空 thread 持久化单独处理：实际 CLI `0.159.2` 仍在首条历史之前延迟落盘。当前只通过 `thread/inject_items` 写入 `Isles session initialized.` 这条中性 assistant 标记，不含规则、不调用模型。即使文件加载校验失败，新 thread 也先完成最小持久化，使用户修好文件后能恢复同一 ID；不再注入完整规则。
 
 ## 6. 压缩行为的证据边界
 
 [OpenAI 的 AGENTS.md 文档](https://learn.chatgpt.com/docs/agent-configuration/agents-md)说明 Codex 启动时发现并组合全局和项目规则，并存在覆盖顺序及读取大小限制。这份说明没有承诺每次压缩后都会重新读取文件。
 
-因此验收要求是“以持久规则文件为来源，原生加载和压缩后实际行为均经过验证”，不能只凭文件存在或模型自述就宣称规则不会丢失。需要记录 CLI 版本、加载证据、真实压缩事件和压缩后的协议操作结果；本次计划整理尚未执行这些新验收。
+因此验收要求是“以持久规则文件为来源，原生加载和压缩后实际行为均经过验证”，不能只凭文件存在或模型自述就宣称规则不会丢失。本轮记录了 CLI 版本、加载路径、真实压缩事件和压缩后的协议操作结果，见第 8 节。该结论限定于已验证版本和场景，不推断所有 harness 的压缩机制。
 
 ## 7. 当前工作状态
 
 - `main` 已包含旧的 Codex 路径修复 `bbd0b37`；不回滚已存在的群聊代码。
-- `feat/agent-inbox` 的 `420736c` 及草稿 PR #1 保存即时收信实现，已有 37 项服务测试、7 项浏览器测试和真实收信/重启验证；这些结果不覆盖本计划新增的文件加载与压缩验收。
-- 当前先修复基础，再重新验收 M2；M3 Kimi、M4 Claude 与 M5 扩展不提前推进。
-- 本次更新是需求纠偏与工作重排，代码仍使用 JSON、消息 UUID 和会话规则注入；完成上述任务后再将状态更新为已修复。
+- `feat/agent-inbox` 的 `420736c` 保存即时收信实现，`b6e812f` 保存本计划的纠偏决定；本轮基础修复沿用同一分支与草稿 PR #1。
+- 已移除 `Runtime.instructions()` 和 Isles 的 `developerInstructions`。唯一模板位于 `apps/server/resources/AGENTS.template.md`，文件维护位于 `runtime/guidance.ts`，新建及恢复用原生 `instructionSources` 校验实际加载。
+- 已统一自动输入与 MCP 的文本格式，消息、回复、投递、执行输入、事件及前端定位均使用频道与序号。旧 M2 数据先备份再事务迁移；原生历史和 thread 绑定保留。
+- M3 Kimi、M4 Claude 与 M5 扩展未在本轮实施。
+
+## 8. 验收记录
+
+环境：Windows、`codex-cli 0.159.2`、真实模型 `gpt-6.1-sol / low`。真实验证使用隔离数据目录与随机端口；报告与脚本保存在 Git 忽略目录 `.isles/foundation-acceptance/`，不使用日常数据目录。
+
+自动化检查：
+
+- `pnpm check`：格式、ESLint、类型、44 项服务测试及生产构建通过；设置 `ISLES_TEST_CODEX_BIN`，包含真实 CLI 协议类型生成检查。
+- `ISLES_TEST_BROWSER_CHANNEL=chrome pnpm test:e2e`：7 项浏览器测试通过，覆盖私聊、群聊、暂停、成员管理和当前 turn 内 MCP 收信。
+- `pnpm db:generate`：schema 与已提交迁移快照一致，无额外变更。
+- 迁移回归保留旧回复、投递状态、执行关联和事件游标；验证一致性备份、跨频道旧引用导致回滚、频道独立计数、发送重试及删除后序号不重用。
+- 规则回归验证托管段更新、保留用户内容、异常标记不覆盖、正文转义，以及修正规则加载问题后恢复原 thread。
+
+第一组真实验证的报告为 `live-Pl9aib/report.json`，结果 `success: true`：
+
+| 场景               | 观测证据                                                                                                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 原生文件加载       | 新建与恢复返回 workspace/AGENTS.md 的 `instructionSources`；当前调用没有传 `developerInstructions`。                                                                                       |
+| 原 session 兼容    | 旧方式创建的 thread `01a0fb71-e9e7-7f41-bf97-ea6135b32c22` 与新建空 thread `01a0fb71-f2b2-7813-b0e9-cc4f6fae627e` 均在服务重启后保持原 ID。                                                |
+| 两个 Agent 群聊    | 两个 Agent 均通过 MCP 发布群消息，序号为 3、4，数字 `replyTo` 均为用户消息序号 2。                                                                                                         |
+| 当前 turn 主动收信 | 第一条通过 `receive_messages(limit: 1)` 接收，第二条通过历史读取接收；第三条才启动下一 turn。状态为 `received / received / completed`，共两次执行。                                        |
+| 子目录工作         | Agent 在 workspace 的子目录中执行命令并读取上层规则文件，经 MCP 回复。                                                                                                                     |
+| 真实压缩           | `thread/compact/start` 产生 `contextCompaction` 的 started/completed，turn 为 `01a0fb73-4d0a-73f1-809a-f417f7662ea1`。之后 Agent 经 MCP 返回仅写在规则文件中的标记，用户提示未携带该标记。 |
+| 文件更新与恢复     | 修改段外规则标记，重启并恢复同一 thread；Agent 返回新标记。用户全局 `config.toml` 哈希保持一致。                                                                                           |
+
+第二组真实验证的报告为 `m2-final-SVKTp6/m2-final-report.json`，结果 `success: true`：
+
+- 用 `AGENTS.override.md` 遮住规则文件，创建明确报错；移除覆盖文件后恢复同一 thread `01a0fb8b-2fee-7e70-a537-5835076fc7d5`，全过程没有模型 turn，证明失败分支仍保留可恢复的空 session。
+- 原生 `mcpServerStatus/list` 确认拉群权限关闭、开启、撤销后的工具数为 5 → 7 → 5。经原生 MCP 连接成功建群及邀请；未授权调用被拒绝，权限刷新始终恢复原 thread。
+- 两个真实 Agent 加入暂停群。A 在私聊 turn 中主动读取群消息序号 4，A 的状态变为 `received`，B 仍为 `queued`；序号 5 对两者均继续排队。继续群讨论后，A 只自动收到剩余消息，B 收到未读，两者都回复序号 5，A 的序号 4 始终未被重新投递。
+- 通过原生 turn 事件核对，每个 Agent 同时最多一个活动 turn；用户全局指导与 workspace 规则均出现在 `instructionSources`，全局 `config.toml` 哈希保持一致。
+
+补测最初尝试复用第一组的 thread 时，Codex 返回该 thread 已有活动 writer；该次尝试未计为通过，失败报告保留在 `live-Pl9aib/m2-final-report.json`。随后使用新的隔离目录完成上述验证，没有操作占用原 thread 的外部进程。验收服务与其创建的原生进程已关闭，测试 Agent 均已停止。

@@ -7,6 +7,7 @@ import {
 } from '../src/codex/protocol.js';
 import type { ClientFactory } from '../src/runtime/runtime.js';
 import type { AgentRecord } from '../src/storage/store.js';
+import { join } from 'node:path';
 
 export const testCatalog: Catalog = {
   status: async () => ({
@@ -45,11 +46,26 @@ export class MockClient implements NativeClient {
   }
   async request<T = unknown>(method: string, params: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
-    if (method === 'thread/start') return { thread: { id: this.threadId } } as T;
-    if (method === 'thread/inject_items') return {} as T;
+    if (method === 'thread/start')
+      return {
+        thread: { id: this.threadId },
+        instructionSources: this.harness.missingGuidance
+          ? []
+          : [join(this.agent.workspace, 'AGENTS.md')],
+      } as T;
+    if (method === 'thread/inject_items') {
+      this.harness.persistedThreads.add(this.threadId);
+      return {} as T;
+    }
     if (method === 'thread/resume') {
-      if (this.harness.failResume) throw new NativeRpcError('no rollout found for thread id');
-      return { thread: { id: params.threadId } } as T;
+      if (this.harness.failResume || !this.harness.persistedThreads.has(this.threadId))
+        throw new NativeRpcError('no rollout found for thread id');
+      return {
+        thread: { id: params.threadId },
+        instructionSources: this.harness.missingGuidance
+          ? []
+          : [join(this.agent.workspace, 'AGENTS.md')],
+      } as T;
     }
     if (method === 'turn/start') {
       if (this.harness.failTurn === 'reject') throw new NativeRpcError('input rejected');
@@ -58,7 +74,7 @@ export class MockClient implements NativeClient {
       const input = params.input as { text: string }[];
       this.harness.inputs.push({
         agentId: this.agent.id,
-        envelope: JSON.parse(input[0]!.text) as Envelope,
+        envelope: parseMessageText(input[0]!.text, this.agent.channelId, this.agent.id),
       });
       this.handlers.notification('turn/started', {
         threadId: this.threadId,
@@ -124,7 +140,6 @@ export interface Envelope {
     name: string | null;
     skipped_unread: number;
     messages: {
-      message_id: string;
       seq: number;
       sender: { type: string; id: string; name?: string };
       body: string;
@@ -134,9 +149,11 @@ export interface Envelope {
 }
 export class MockHarness {
   clients: MockClient[] = [];
+  persistedThreads = new Set<string>();
   turns = 0;
   inputs: { agentId: string; envelope: Envelope }[] = [];
   failResume = false;
+  missingGuidance = false;
   failTurn: 'reject' | 'unknown' | undefined;
   onTurn: ((client: MockClient, params: Record<string, unknown>) => void) | undefined;
   factory: ClientFactory = async (agent, handlers, baseUrl) => {
@@ -153,4 +170,65 @@ export class MockHarness {
       .filter((i) => i.agentId === id)
       .map((i) => i.envelope.channels.flatMap((c) => c.messages.map((m) => m.body)));
   }
+}
+
+/** Test-only reader for the documented text grammar; production never parses body text as metadata. */
+export function parseMessageText(
+  text: string,
+  privateChannelId = 'private',
+  recipientId = '',
+): Envelope & { has_more: boolean; nextAfter: number | null; nextBefore: number | null } {
+  const channels = new Map<string, Envelope['channels'][number]>();
+  let current: Envelope['channels'][number]['messages'][number] | undefined;
+  const result = {
+    type: 'isles.messages',
+    channels: [] as Envelope['channels'],
+    has_more: false,
+    nextAfter: null as number | null,
+    nextBefore: null as number | null,
+  };
+  for (const line of text.split('\n')) {
+    if (line.startsWith('[') && line.endsWith(']')) {
+      if (current) current.body = current.body.replace(/\n+$/, '');
+      current = undefined;
+      const fields = Object.fromEntries(
+        line
+          .slice(1, -1)
+          .split(', ')
+          .map((field) => {
+            const colon = field.indexOf(': ');
+            return [field.slice(0, colon), field.slice(colon + 2)];
+          }),
+      );
+      if (fields.has_more) result.has_more = fields.has_more === 'true';
+      if (!fields.channel) continue;
+      const id = fields.channel === 'private' ? privateChannelId : fields.channel;
+      const channel = channels.get(id) ?? {
+        channel_id: id,
+        kind: fields.channel === 'private' ? 'private' : 'group',
+        name: null,
+        skipped_unread: 0,
+        messages: [],
+      };
+      channels.set(id, channel);
+      if (fields.skipped_unread) channel.skipped_unread = Number(fields.skipped_unread);
+      if (fields.next_after) result.nextAfter = Number(fields.next_after);
+      if (fields.next_before) result.nextBefore = Number(fields.next_before);
+      if (!fields.seq) continue;
+      const sender = fields.from!;
+      current = {
+        seq: Number(fields.seq),
+        sender: sender.startsWith('agent:')
+          ? { type: 'agent', id: sender.slice(6) }
+          : { type: sender, id: sender },
+        body: '',
+        mentions_you: (fields.mentions ?? '').split('|').includes(recipientId),
+      };
+      channel.messages.push(current);
+    } else if (current)
+      current.body += `${current.body ? '\n' : ''}${line.startsWith('\\') ? line.slice(1) : line}`;
+  }
+  if (current) current.body = current.body.replace(/\n+$/, '');
+  result.channels = [...channels.values()];
+  return result;
 }

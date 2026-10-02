@@ -2,14 +2,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { agentRoot } from '../src/codex/environment.js';
-import { MockHarness, testCatalog } from './helpers.js';
+import { MockHarness, testCatalog, parseMessageText } from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -54,6 +54,35 @@ async function fixture() {
 }
 
 describe('durable runtime with simulated Codex', () => {
+  it('refuses to run when native discovery does not load the workspace guidance, without replacing the thread', async () => {
+    const { app, harness } = await fixture();
+    harness.missingGuidance = true;
+    const agent = await app.isles.runtime.createAgent({
+      name: 'Missing guidance',
+      model: 'test-model',
+      reasoningEffort: 'max',
+    });
+    await expect.poll(() => app.isles.store.publicAgent(agent.id).status).toBe('error');
+    const failed = app.isles.store.publicAgent(agent.id);
+    expect(failed.error).toContain('未确认加载工作目录的 AGENTS.md');
+    expect(failed.threadId).toBe(`native-${agent.id}`);
+    expect(harness.turns).toBe(0);
+    harness.missingGuidance = false;
+    await app.isles.runtime.resume(agent.id);
+    await expect.poll(() => app.isles.store.publicAgent(agent.id).status).toBe('ready');
+    expect(app.isles.store.publicAgent(agent.id).threadId).toBe(failed.threadId);
+    expect(harness.turns).toBe(0);
+    expect(
+      harness.clients
+        .flatMap((client) => client.calls)
+        .filter((call) => call.method === 'thread/start'),
+    ).toHaveLength(1);
+    expect(harness.latest(agent.id).calls[0]).toMatchObject({
+      method: 'thread/resume',
+      params: { threadId: failed.threadId },
+    });
+  });
+
   it('deduplicates saved messages, merges busy private input into the next turn, and never puts native output in chat', async () => {
     const { app, harness, create, deliveries, ready } = await fixture();
     const agent = await create();
@@ -64,7 +93,7 @@ describe('durable runtime with simulated Codex', () => {
     });
     app.isles.runtime.send(agent.channelId, { body: '第二条', clientId: 'second' });
     app.isles.runtime.send(agent.channelId, { body: '第三条', clientId: 'third' });
-    expect(duplicate.id).toBe(one.id);
+    expect(duplicate.seq).toBe(one.seq);
     expect(harness.turns).toBe(1);
     expect(deliveries(agent.channelId, agent.id)).toEqual(['accepted', 'queued', 'queued']);
     harness.latest(agent.id).complete();
@@ -76,7 +105,7 @@ describe('durable runtime with simulated Codex', () => {
     const detail = app.isles.store.agentDetail(agent.id);
     expect(detail.runs).toHaveLength(2);
     expect(detail.runs.every((r) => r.threadId === agent.threadId)).toBe(true);
-    expect(detail.runs.map((r) => r.inputs[0]!.messageIds.length).sort()).toEqual([1, 2]);
+    expect(detail.runs.map((r) => r.inputs[0]!.messageSeqs.length).sort()).toEqual([1, 2]);
     expect(detail.runs.flatMap((r) => r.items).map((i) => i.text)).toContain(
       '原生详情，不是正式回复',
     );
@@ -166,7 +195,7 @@ describe('durable runtime with simulated Codex', () => {
     expect(
       store
         .agentDetail(agent.id)
-        .runs.filter((r) => r.inputs.some((i) => i.messageIds.includes(accepted.id))),
+        .runs.filter((r) => r.inputs.some((i) => i.messageSeqs.includes(accepted.seq))),
     ).toHaveLength(1);
     harness.latest(agent.id).complete();
   });
@@ -223,7 +252,7 @@ describe('durable runtime with simulated Codex', () => {
     ).toHaveLength(1);
   });
 
-  it('persists startup rules once without a model turn and rejects a second owner before recovery writes', async () => {
+  it('persists a neutral initialization once without a model turn and rejects a second owner before recovery writes', async () => {
     const { app, harness, create, open } = await fixture();
     const agent = await create();
     expect(harness.latest(agent.id).calls.map((c) => c.method)).toEqual([
@@ -231,7 +260,12 @@ describe('durable runtime with simulated Codex', () => {
       'thread/inject_items',
     ]);
     const rules = JSON.stringify(harness.latest(agent.id).calls[1]!.params);
-    expect(rules).toContain('Only call send_message when you think a reply is needed.');
+    expect(rules).toContain('Isles session initialized.');
+    expect(rules).not.toContain('Only call send_message');
+    expect(harness.latest(agent.id).calls[0]!.params).not.toHaveProperty('developerInstructions');
+    expect(await readFile(join(agent.workspace, 'AGENTS.md'), 'utf8')).toContain(
+      'Only call send_message when you think a reply is needed.',
+    );
     expect(app.isles.store.agentDetail(agent.id).runs).toEqual([]);
     expect(app.isles.store.listMessages(agent.channelId)).toEqual([]);
     app.isles.runtime.send(agent.channelId, { body: '仍在执行', clientId: 'live' });
@@ -286,8 +320,8 @@ describe('durable runtime with simulated Codex', () => {
   it('lets native sub-agents run and ask the human while their main turn is active', async () => {
     const { app, harness, create } = await fixture();
     const agent = await create();
-    const rules = JSON.stringify(harness.latest(agent.id).calls.map((c) => c.params));
-    expect(rules).toContain('Native sub-agents are your own capability');
+    const rules = await readFile(join(agent.workspace, 'AGENTS.md'), 'utf8');
+    expect(rules).toContain('Native sub-agents remain your own capability');
     expect(rules).not.toMatch(/Do not spawn|multi_agent/);
     app.isles.runtime.send(agent.channelId, { body: '交给子代理', clientId: 'delegate' });
     const client = harness.latest(agent.id);
@@ -327,7 +361,7 @@ describe('durable runtime with simulated Codex', () => {
     expect(harness.bodies(a.id)[0]!.at(-1)).toBe('一起看看');
     const forB = harness.inputs.find((i) => i.agentId === b.id)!.envelope.channels;
     expect(forB).toHaveLength(1);
-    expect(forB[0]).toMatchObject({ channel_id: room.id, kind: 'group', name: '讨论组' });
+    expect(forB[0]).toMatchObject({ channel_id: room.id, kind: 'group' });
     expect(forB[0]!.messages[0]!.sender.type).toBe('system');
     expect(forB[0]!.messages[1]!.mentions_you).toBe(true);
     expect(harness.bodies(c.id)).toEqual([]);
@@ -343,7 +377,6 @@ describe('durable runtime with simulated Codex', () => {
     expect(harness.inputs.at(-1)!.envelope.channels[0]!.messages[0]!.sender).toMatchObject({
       type: 'agent',
       id: a.id,
-      name: 'A',
     });
     expect(harness.bodies(a.id)).toHaveLength(1);
 
@@ -470,7 +503,7 @@ describe('durable runtime with simulated Codex', () => {
       app.isles.runtime.send(room.id, {
         body: '跨频道回复',
         clientId: randomUUID(),
-        replyTo: say(b.channelId, '另一频道').id,
+        replyTo: 9999,
       }),
     ).toThrow('只能回复同一频道中的消息');
     response = await app.inject({
@@ -554,10 +587,12 @@ describe('durable runtime with simulated Codex', () => {
     expect(saved).toHaveLength(1);
     expect(saved[0]).toMatchObject({ senderId: agent.id, body: input.body, mentions: [other.id] });
     expect(JSON.stringify(app.isles.store.agentDetail(agent.id))).not.toContain(token);
-    const history = JSON.parse(
+    const history = parseMessageText(
       (await call(client, 'read_messages', { channelId: shared.id })).text,
+      agent.channelId,
+      agent.id,
     );
-    expect(history.messages.at(-1)).toMatchObject({
+    expect(history.channels[0]!.messages.at(-1)).toMatchObject({
       body: input.body,
       sender: { type: 'agent', id: agent.id },
     });

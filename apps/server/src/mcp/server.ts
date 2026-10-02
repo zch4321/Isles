@@ -8,10 +8,17 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { agentRoot } from '../codex/environment.js';
 import { HttpError } from '../errors.js';
-import { agentView, channelView, directoryOf, unreadEnvelope } from '../runtime/envelope.js';
+import {
+  channelLabel,
+  channelView,
+  directoryOf,
+  formatChannelMessages,
+  formatMessages,
+} from '../runtime/envelope.js';
 import type { Runtime } from '../runtime/runtime.js';
 
 const agentIds = z.array(z.string().uuid()).max(50);
+const messageChannel = z.union([z.literal('private'), z.string().uuid()]);
 
 export function registerMcp(app: FastifyInstance, runtime: Runtime) {
   app.route<{ Params: { id: string } }>({
@@ -34,7 +41,9 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
       )
         throw new HttpError(401, 'MCP Agent 身份无效');
       const id = agent.id;
-      const server = new McpServer({ name: 'isles', version: '0.3.0' });
+      const server = new McpServer({ name: 'isles', version: '0.4.0' });
+      const resolveChannel = (channelId: string) =>
+        channelId === 'private' ? agent.channelId : channelId;
       // Membership and permissions are read again on every call, not from this connection.
       const member = (channelId: string) => {
         store.getChannel(channelId);
@@ -43,6 +52,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
       const result = (value: unknown) => ({
         content: [{ type: 'text' as const, text: JSON.stringify(value) }],
       });
+      const textResult = (text: string) => ({ content: [{ type: 'text' as const, text }] });
       const channel = (channelId: string) => {
         const directory = directoryOf(store.listAgents());
         const value = store.publicChannel(channelId);
@@ -60,11 +70,11 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         'send_message',
         {
           description:
-            'Publish an official message to a private chat or group you belong to. Everyone in a group sees it. Sender is bound by the server. Use a stable clientId to deduplicate retries.',
+            'Publish an official message to a channel you belong to; private aliases your private chat. replyTo is a sequence in that same channel. Sender is bound by the server. Use a stable clientId to deduplicate retries. Returns channel_id and seq.',
           inputSchema: {
-            channelId: z.string().uuid(),
+            channelId: messageChannel,
             body: z.string().trim().min(1).max(32_000),
-            replyTo: z.string().uuid().optional(),
+            replyTo: z.number().int().positive().optional(),
             mentions: agentIds
               .optional()
               .describe('IDs of channel members this message specifically addresses.'),
@@ -73,6 +83,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
           annotations: { destructiveHint: false, openWorldHint: false },
         },
         ({ channelId, body, replyTo, mentions, clientId }) => {
+          channelId = resolveChannel(channelId);
           member(channelId);
           const message = runtime.publish(id, channelId, {
             body,
@@ -80,16 +91,16 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
             replyTo,
             mentions,
           });
-          return result({ message_id: message.id, seq: message.seq, channel_id: channelId });
+          return result({ seq: message.seq, channel_id: channelId });
         },
       );
       server.registerTool(
         'read_messages',
         {
           description:
-            'Read saved history of a channel you belong to, including paused groups, in ascending sequence order. Without after/before it returns the latest page; continue with nextAfter or nextBefore when present. Only messages actually returned are recorded as received by you and will not be automatically delivered again.',
+            'Read saved history, including paused groups, as the text blocks documented in AGENTS.md. private aliases your private chat. Without after/before return the latest page; use next_after or next_before markers for paging. Only returned messages are recorded as received by you and will not be automatically delivered again.',
           inputSchema: {
-            channelId: z.string().uuid(),
+            channelId: messageChannel,
             after: z.number().int().min(0).optional(),
             before: z.number().int().min(1).optional(),
             limit: z.number().int().min(1).max(100).default(50),
@@ -97,6 +108,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
           annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         },
         ({ channelId, after, before, limit }) => {
+          channelId = resolveChannel(channelId);
           member(channelId);
           if (after !== undefined && before !== undefined)
             throw new HttpError(400, '不能同时指定 after 和 before');
@@ -108,17 +120,12 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
           const forward = after !== undefined;
           const page = forward ? all.slice(0, limit) : all.slice(-limit);
           const more = all.length > limit;
-          const directory = directoryOf(store.listAgents());
-          const response = result({
-            ...channelView(store.getChannel(channelId)),
-            messages: page.map((m) => agentView(m, id, directory)),
-            nextAfter: forward && more ? page.at(-1)!.seq : null,
-            nextBefore: !forward && more ? page[0]!.seq : null,
-          });
-          store.markMessagesReceived(
-            id,
-            page.map((m) => m.id),
-          );
+          const storedChannel = store.getChannel(channelId);
+          let text = formatChannelMessages(id, storedChannel, page) || '[history: empty]';
+          if (more)
+            text += `\n\n[channel: ${channelLabel(id, storedChannel)}, ${forward ? 'next_after' : 'next_before'}: ${forward ? page.at(-1)!.seq : page[0]!.seq}]`;
+          const response = textResult(text);
+          store.markMessagesReceived(id, page);
           return response;
         },
       );
@@ -126,19 +133,20 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         'receive_messages',
         {
           description:
-            'Receive queued messages during your current turn, oldest first and grouped by channel. Omit channelId to check all your channels, including paused groups. Returns immediately, even if empty; call again when has_more is true. Only returned messages are recorded as received and will not trigger another turn. Older messages skipped from automatic input remain available through read_messages.',
+            'Receive queued messages during your current turn as the text blocks documented in AGENTS.md. Omit channelId for all your channels, including paused groups; private aliases your private chat. Returns immediately. Call again on [has_more: true]. Only returned messages are marked received and will not trigger another turn. Skipped history remains available through read_messages.',
           inputSchema: {
-            channelId: z.string().uuid().optional(),
+            channelId: messageChannel.optional(),
             limit: z.number().int().min(1).max(100).default(50),
           },
           annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         },
         ({ channelId, limit }) => {
-          const { input, hasMore } = runtime.receiveMessages(id, { channelId, limit });
-          return result({
-            ...unreadEnvelope(id, input, directoryOf(store.listAgents())),
-            has_more: hasMore,
+          const { input, hasMore } = runtime.receiveMessages(id, {
+            channelId: channelId === undefined ? undefined : resolveChannel(channelId),
+            limit,
           });
+          const text = formatMessages(id, input) || '[unread: none]';
+          return textResult(text + (hasMore ? '\n\n[has_more: true]' : ''));
         },
       );
       server.registerTool(

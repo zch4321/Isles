@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Message, QuestionAnswer } from '@isles/contracts';
+import { messageKey, type Message, type QuestionAnswer } from '@isles/contracts';
 import { useMutation, useQueryClient } from '@tanstack/vue-query';
 import { CircleAlert, Clock3, LoaderCircle, Pause, RefreshCw, X } from '@lucide/vue';
 import { computed, ref } from 'vue';
@@ -50,7 +50,7 @@ const olderExhausted = ref(false);
 const messages = computed(() => {
   const merged = new Map(
     [...older.value, ...(detail.data.value?.messages ?? [])].map((message) => [
-      message.id,
+      messageKey(message),
       message,
     ]),
   );

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { findCodexExecutable, type CodexExecutable } from './executable.js';
 import { Redactor } from '../errors.js';
 import type { AgentRecord } from '../storage/store.js';
+import { prepareGuidance } from '../runtime/guidance.js';
 
 export interface NativeOptions {
   binary?: string;
@@ -130,10 +131,14 @@ export class NativeEnvironment {
         if (typeof provider?.env_key === 'string') this.redactor.add(process.env[provider.env_key]);
     }
   }
-  /** Prepares the workspace and returns the environment of the Agent's native process. */
-  async launch(agent: AgentRecord): Promise<Record<string, string>> {
+  async prepareWorkspace(agent: AgentRecord) {
     await mkdir(agent.workspace, { recursive: true });
     await writeFile(join(agent.workspace, '.isles-root'), 'Isles Agent workspace\n');
+    await prepareGuidance(agent);
+  }
+  /** Prepares the workspace and returns the environment of the Agent's native process. */
+  async launch(agent: AgentRecord): Promise<Record<string, string>> {
+    await this.prepareWorkspace(agent);
     await this.learnSecrets();
     return { CODEX_HOME: this.home, [MCP_TOKEN_ENV]: await this.token(agentRoot(agent)) };
   }

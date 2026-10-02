@@ -37,7 +37,12 @@ describe('Codex native boundaries', () => {
     process.env.ISLES_TEST_PROVIDER_KEY = 'test-provider-secret';
     const before = await readdir(home);
     const environment = new NativeEnvironment({ home });
-    const agent = { id: 'agent-1', workspace } as AgentRecord;
+    const agent = {
+      id: 'agent-1',
+      name: 'Test Agent',
+      channelId: 'private-1',
+      workspace,
+    } as AgentRecord;
     const env = await environment.launch(agent);
     expect(env.CODEX_HOME).toBe(home);
     const token = env[MCP_TOKEN_ENV]!;

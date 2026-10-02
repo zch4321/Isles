@@ -1,3 +1,4 @@
+import { messageKey } from '@isles/contracts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -8,13 +9,15 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { agentRoot } from '../src/codex/environment.js';
-import { MockHarness, testCatalog, type Envelope } from './helpers.js';
+import { MockHarness, testCatalog, parseMessageText, type Envelope } from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.reverse()) await cleanup();
   cleanups.length = 0;
 });
+
+const identities = new WeakMap<Client, { privateChannelId: string; agentId: string }>();
 
 type App = Awaited<ReturnType<typeof buildApp>>;
 type Inbox = Envelope & { has_more: boolean };
@@ -36,16 +39,39 @@ async function connect(app: App, agentId: string) {
     }) as Transport,
   );
   cleanups.push(() => client.close());
+  identities.set(client, {
+    privateChannelId: app.isles.store.getAgent(agentId).channelId,
+    agentId,
+  });
   return client;
 }
 
 async function call<T>(client: Client, name: string, args: Record<string, unknown> = {}) {
   const response = await client.callTool({ name, arguments: args });
   expect(response.isError).not.toBe(true);
-  return JSON.parse((response.content as { text: string }[])[0]!.text) as T;
+  const identity = identities.get(client)!;
+  const parsed = parseMessageText(
+    (response.content as { text: string }[])[0]!.text,
+    identity.privateChannelId,
+    identity.agentId,
+  );
+  return (
+    name === 'read_messages'
+      ? {
+          ...parsed.channels[0],
+          messages: parsed.channels[0]?.messages ?? [],
+          nextAfter: parsed.nextAfter,
+          nextBefore: parsed.nextBefore,
+        }
+      : parsed
+  ) as T;
 }
 const receivedIds = (inbox: Inbox) =>
-  inbox.channels.flatMap((channel) => channel.messages.map((message) => message.message_id));
+  inbox.channels.flatMap((channel) =>
+    channel.messages.map((message) =>
+      messageKey({ channelId: channel.channel_id, seq: message.seq }),
+    ),
+  );
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'isles-inbox-'));
@@ -75,15 +101,54 @@ async function fixture() {
     app.isles.runtime.send(channelId, { body, clientId: randomUUID() });
   const group = (name: string, memberIds: string[]) =>
     app.isles.runtime.createGroup('user', { name, memberIds });
-  const status = (channelId: string, messageId: string, agentId: string) =>
+  const status = (channelId: string, seq: number, agentId: string) =>
     app.isles.store
       .listMessages(channelId)
-      .find((message) => message.id === messageId)!
+      .find((message) => message.seq === seq)!
       .deliveries.find((delivery) => delivery.agentId === agentId)?.status;
   return { app, harness, open, create, say, group, status };
 }
 
 describe('MCP inbox delivery', () => {
+  it('binds the private alias and resolves numeric replies within the target channel', async () => {
+    const { app, create, say, group } = await fixture();
+    const a = await create('A');
+    const first = say(a.channelId, 'Private first');
+    const room = group('Group', [a.id]);
+    const client = await connect(app, a.id);
+    const send = async (channelId: string, body: string, replyTo: unknown, clientId: string) =>
+      client.callTool({ name: 'send_message', arguments: { channelId, body, replyTo, clientId } });
+    const privateReply = await send('private', 'Private reply', first.seq, 'reply');
+    expect(privateReply.isError).not.toBe(true);
+    expect(JSON.parse((privateReply.content as { text: string }[])[0]!.text)).toEqual({
+      channel_id: a.channelId,
+      seq: 2,
+    });
+    expect((await send(room.id, 'Group reply', 1, 'reply')).isError).not.toBe(true);
+    expect(app.isles.store.listMessages(a.channelId)[1]).toMatchObject({
+      channelId: a.channelId,
+      seq: 2,
+      replyTo: 1,
+      body: 'Private reply',
+    });
+    expect(app.isles.store.listMessages(room.id)[1]).toMatchObject({
+      channelId: room.id,
+      seq: 2,
+      replyTo: 1,
+      body: 'Group reply',
+    });
+    await send('private', 'Private reply', first.seq, 'reply');
+    expect(app.isles.store.listMessages(a.channelId)).toHaveLength(2);
+    expect((await send('private', 'Bad reply', randomUUID(), 'bad')).isError).toBe(true);
+    expect((await send('private', 'Missing sequence', 999, 'missing')).isError).toBe(true);
+    const history = await call<History>(client, 'read_messages', { channelId: 'private' });
+    expect(history.channel_id).toBe(a.channelId);
+    expect(history.messages.map((message) => message.body)).toEqual([
+      'Private first',
+      'Private reply',
+    ]);
+  });
+
   it('receives only returned messages for the caller and immediately schedules only the unread remainder', async () => {
     const { app, harness, create, say, group, status } = await fixture();
     const a = await create('A');
@@ -97,30 +162,29 @@ describe('MCP inbox delivery', () => {
     const cursor = app.isles.store.cursor();
 
     const inbox = await call<Inbox>(client, 'receive_messages', { channelId: room.id, limit: 1 });
-    expect(receivedIds(inbox)).toEqual([one.id]);
+    expect(receivedIds(inbox)).toEqual([messageKey(one)]);
     expect(inbox.has_more).toBe(true);
     expect(inbox.channels[0]).toMatchObject({
       channel_id: room.id,
       kind: 'group',
-      name: '讨论',
       skipped_unread: 0,
     });
     // The extra pagination lookahead row is never acknowledged.
-    expect(status(room.id, one.id, a.id)).toBe('received');
-    expect(status(room.id, two.id, a.id)).toBe('queued');
-    expect(status(room.id, one.id, b.id)).toBe('queued');
+    expect(status(room.id, one.seq, a.id)).toBe('received');
+    expect(status(room.id, two.seq, a.id)).toBe('queued');
+    expect(status(room.id, one.seq, b.id)).toBe('queued');
     const history = await call<History>(client, 'read_messages', {
       channelId: room.id,
       after: one.seq,
       limit: 1,
     });
-    expect(history.messages.map((message) => message.message_id)).toEqual([two.id]);
+    expect(history.messages.map((message) => message.seq)).toEqual([two.seq]);
     expect(history.nextAfter).toBe(two.seq);
-    expect(status(room.id, two.id, a.id)).toBe('received');
-    expect(status(room.id, three.id, a.id)).toBe('queued');
+    expect(status(room.id, two.seq, a.id)).toBe('received');
+    expect(status(room.id, three.seq, a.id)).toBe('queued');
     // Reading input already assigned to a native run does not change its lifecycle.
     await call(client, 'read_messages', { channelId: room.id, before: one.seq, limit: 1 });
-    expect(status(room.id, initial.id, a.id)).toBe('accepted');
+    expect(status(room.id, initial.seq, a.id)).toBe('accepted');
     expect(app.isles.store.eventsAfter(cursor)).toMatchObject([
       { type: 'delivery', agentId: a.id, channelId: room.id, data: { status: 'received' } },
       { type: 'delivery', agentId: a.id, channelId: room.id, data: { status: 'received' } },
@@ -157,7 +221,7 @@ describe('MCP inbox delivery', () => {
             (delivery) => delivery.agentId === a.id && delivery.status === 'queued',
           ),
         )
-        .map((message) => message.id),
+        .map((message) => messageKey(message)),
     );
     const client = await connect(app, a.id);
     const pages = await Promise.all([
@@ -170,7 +234,7 @@ describe('MCP inbox delivery', () => {
     expect(pages.at(-1)!.has_more).toBe(false);
     expect(pages.flatMap(receivedIds).sort()).toEqual(expected.sort());
     expect(await call<Inbox>(client, 'receive_messages')).toMatchObject({
-      type: 'isles.unread',
+      type: 'isles.messages',
       channels: [],
       has_more: false,
     });
@@ -194,10 +258,10 @@ describe('MCP inbox delivery', () => {
     const read = say(room.id, '主动读到');
     const client = await connect(app, a.id);
     const history = await call<History>(client, 'read_messages', { channelId: room.id, limit: 1 });
-    expect(history.messages.map((message) => message.message_id)).toEqual([read.id]);
+    expect(history.messages.map((message) => message.seq)).toEqual([read.seq]);
     expect(history.nextBefore).toBe(read.seq);
-    expect(status(room.id, unread.id, a.id)).toBe('queued');
-    expect(status(room.id, read.id, a.id)).toBe('received');
+    expect(status(room.id, unread.seq, a.id)).toBe('queued');
+    expect(status(room.id, read.seq, a.id)).toBe('received');
     harness.latest(a.id).complete();
     await expect.poll(() => app.isles.store.publicAgent(a.id).status).toBe('ready');
     expect(harness.turns).toBe(1);
@@ -208,7 +272,7 @@ describe('MCP inbox delivery', () => {
     await expect.poll(() => reopened.isles.store.publicAgent(a.id).status).toBe('ready');
     expect(reopened.isles.store.publicAgent(a.id).threadId).toBe(a.threadId);
     expect(
-      reopened.isles.store.listMessages(room.id).find((message) => message.id === read.id)!
+      reopened.isles.store.listMessages(room.id).find((message) => message.seq === read.seq)!
         .deliveries,
     ).toEqual([{ agentId: a.id, status: 'received' }]);
     expect(harness.turns).toBe(1);
@@ -244,11 +308,11 @@ describe('MCP inbox delivery', () => {
     expect(
       (await client.callTool({ name: 'receive_messages', arguments: { limit: 0 } })).isError,
     ).toBe(true);
-    expect(status(a.channelId, pending.id, a.id)).toBe('queued');
-    expect(status(shared.id, removed.id, a.id)).toBe('cancelled');
+    expect(status(a.channelId, pending.seq, a.id)).toBe('queued');
+    expect(status(shared.id, removed.seq, a.id)).toBe('cancelled');
     await app.isles.runtime.stop(a.id);
     expect((await client.callTool({ name: 'receive_messages', arguments: {} })).isError).toBe(true);
-    expect(status(a.channelId, pending.id, a.id)).toBe('queued');
+    expect(status(a.channelId, pending.seq, a.id)).toBe('queued');
     expect(app.isles.store.publicAgent(a.id).desiredState).toBe('stopped');
   });
 });

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Agent, Channel, Message } from '@isles/contracts';
+import { messageKey, type Agent, type Channel, type Message } from '@isles/contracts';
 import { ArrowDown, LoaderCircle } from '@lucide/vue';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import GroupAvatar from './GroupAvatar.vue';
@@ -63,22 +63,26 @@ type Entry =
     };
 
 const entries = computed(() => {
-  const byId = new Map(props.messages.map((message) => [message.id, message]));
+  const bySeq = new Map(props.messages.map((message) => [message.seq, message]));
   const list: Entry[] = [];
   let previous: Message | undefined;
   for (const message of props.messages) {
     const newDay = !previous || !sameDay(previous.createdAt, message.createdAt);
     if (newDay)
-      list.push({ kind: 'date', key: `date-${message.id}`, label: dateLabel(message.createdAt) });
+      list.push({
+        kind: 'date',
+        key: `date-${messageKey(message)}`,
+        label: dateLabel(message.createdAt),
+      });
     if (message.sender === 'system') {
-      list.push({ kind: 'system', key: message.id, message });
+      list.push({ kind: 'system', key: messageKey(message), message });
       previous = message;
       continue;
     }
-    const target = message.replyTo ? byId.get(message.replyTo) : undefined;
+    const target = message.replyTo ? bySeq.get(message.replyTo) : undefined;
     list.push({
       kind: 'message',
-      key: message.id,
+      key: messageKey(message),
       message,
       continued:
         !newDay &&
@@ -87,10 +91,10 @@ const entries = computed(() => {
         Date.parse(message.createdAt) - Date.parse(previous.createdAt) < GROUP_WINDOW,
       // A reply to the message right above it is clear from position alone.
       reply:
-        message.replyTo && message.replyTo !== previous?.id
+        message.replyTo && message.replyTo !== previous?.seq
           ? {
               label: target ? `${nameOf(target)}：${excerpt(target.body)}` : '更早的消息',
-              targetId: target?.id,
+              targetId: target ? messageKey(target) : undefined,
             }
           : undefined,
     });
@@ -124,7 +128,8 @@ onBeforeUnmount(() => resizes.disconnect());
 watch(
   () => props.messages.at(-1),
   async (last, previous) => {
-    if (last?.id === previous?.id || last?.sender !== 'user') return;
+    if (!last || (previous && messageKey(last) === messageKey(previous)) || last.sender !== 'user')
+      return;
     await nextTick();
     scrollToBottom();
   },
@@ -213,7 +218,7 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
           </div>
           <p
             v-else-if="entry.kind === 'system'"
-            :id="`message-${entry.message.id}`"
+            :id="`message-${messageKey(entry.message)}`"
             data-sender="system"
             class="mx-auto my-2 max-w-md text-center text-xs leading-relaxed text-balance text-muted-foreground"
           >
@@ -231,7 +236,7 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
             :reply="entry.reply"
             :mentions="mentionNames(entry.message)"
             :delivery="deliveryOf(entry.message)"
-            :highlighted="highlighted === entry.message.id"
+            :highlighted="highlighted === messageKey(entry.message)"
             @jump="jumpTo"
           />
         </template>

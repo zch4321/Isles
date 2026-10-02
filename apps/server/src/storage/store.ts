@@ -1,4 +1,4 @@
-import { agentSchema } from '@isles/contracts';
+import { agentSchema, channelSchema, messageKey } from '@isles/contracts';
 import type {
   Agent,
   AgentDetail,
@@ -7,6 +7,7 @@ import type {
   DeliveryStatus,
   IslesEvent,
   Message,
+  MessageRef,
   QuestionAnswer,
   QuestionDefinition,
   Run,
@@ -14,7 +15,7 @@ import type {
   RunStatus,
   UserQuestion,
 } from '@isles/contracts';
-import { and, asc, desc, eq, gt, inArray, lt, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -54,7 +55,7 @@ export interface NewAgent {
 export interface MessageInput {
   body: string;
   clientId: string;
-  replyTo?: string | undefined;
+  replyTo?: number | undefined;
   mentions?: string[] | undefined;
 }
 /** One channel's share of a merged input. */
@@ -69,6 +70,21 @@ export interface ClaimedChannel {
 const RECENT_PER_CHANNEL = 10;
 const USER = 'user';
 const now = () => new Date().toISOString();
+
+const deliveryMessageJoin = and(
+  eq(deliveries.channelId, messages.channelId),
+  eq(deliveries.seq, messages.seq),
+);
+function deliveryRefs(refs: MessageRef[]) {
+  const channels = new Map<string, number[]>();
+  for (const ref of refs)
+    channels.set(ref.channelId, [...(channels.get(ref.channelId) ?? []), ref.seq]);
+  return or(
+    ...[...channels].map(([channelId, seqs]) =>
+      and(eq(deliveries.channelId, channelId), inArray(deliveries.seq, seqs)),
+    ),
+  );
+}
 
 export class Store {
   private emitter = new EventEmitter();
@@ -235,11 +251,11 @@ export class Store {
       .orderBy(desc(messages.seq))
       .limit(1)
       .all();
-    return {
+    return channelSchema.parse({
       ...channel,
       memberIds: this.memberIds(id),
       lastMessage: this.withDeliveries(last)[0] ?? null,
-    };
+    });
   }
   listChannels(): Channel[] {
     return this.db
@@ -373,26 +389,26 @@ export class Store {
   // Messages
 
   private withDeliveries(rows: (typeof messages.$inferSelect)[]): Message[] {
-    const ids = rows.map((r) => r.id);
     const byMessage = new Map<string, Message['deliveries']>();
-    if (ids.length)
+    if (rows.length)
       for (const d of this.db
         .select({
-          messageId: deliveries.messageId,
+          channelId: deliveries.channelId,
+          seq: deliveries.seq,
           agentId: deliveries.agentId,
           status: deliveries.status,
         })
         .from(deliveries)
-        .where(inArray(deliveries.messageId, ids))
+        .where(deliveryRefs(rows))
         .all())
-        byMessage.set(d.messageId, [
-          ...(byMessage.get(d.messageId) ?? []),
+        byMessage.set(messageKey(d), [
+          ...(byMessage.get(messageKey(d)) ?? []),
           { agentId: d.agentId, status: d.status },
         ]);
     return rows.map((r) => ({
       ...r,
       mentions: JSON.parse(r.mentions) as string[],
-      deliveries: byMessage.get(r.id) ?? [],
+      deliveries: byMessage.get(messageKey(r)) ?? [],
     }));
   }
   listMessages(
@@ -414,15 +430,15 @@ export class Store {
     return this.withDeliveries(recent ? rows.reverse() : rows);
   }
   /** Record only the messages actually returned, without changing existing run outcomes. */
-  private recordReceipt(agentId: string, messageIds: string[]) {
-    if (!messageIds.length) return;
+  private recordReceipt(agentId: string, refs: MessageRef[]) {
+    if (!refs.length) return;
     const updated = this.db
       .update(deliveries)
       .set({ status: 'received', updatedAt: now() })
       .where(
         and(
           eq(deliveries.agentId, agentId),
-          inArray(deliveries.messageId, messageIds),
+          deliveryRefs(refs),
           inArray(deliveries.status, ['queued', 'skipped']),
         ),
       )
@@ -431,8 +447,8 @@ export class Store {
     for (const channelId of new Set(updated.map((d) => d.channelId)))
       this.event('delivery', { agentId, channelId }, { status: 'received' });
   }
-  markMessagesReceived(agentId: string, messageIds: string[]) {
-    this.change(() => this.recordReceipt(agentId, messageIds));
+  markMessagesReceived(agentId: string, refs: MessageRef[]) {
+    this.change(() => this.recordReceipt(agentId, refs));
   }
   /** Pull queued messages into the current native turn; pagination never discards unread. */
   receiveMessages(
@@ -443,7 +459,7 @@ export class Store {
       const rows = this.db
         .select({ message: messages, channel: channels })
         .from(deliveries)
-        .innerJoin(messages, eq(deliveries.messageId, messages.id))
+        .innerJoin(messages, deliveryMessageJoin)
         .innerJoin(channels, eq(deliveries.channelId, channels.id))
         .innerJoin(
           channelMembers,
@@ -462,7 +478,7 @@ export class Store {
       const page = rows.slice(0, query.limit);
       this.recordReceipt(
         agentId,
-        page.map((r) => r.message.id),
+        page.map((r) => r.message),
       );
       const byChannel = new Map<string, ClaimedChannel>();
       const received = this.withDeliveries(page.map((r) => r.message));
@@ -480,12 +496,12 @@ export class Store {
     input: MessageInput & { mentions: string[] },
   ) {
     const seq = this.db
-      .select({ n: sql<number>`coalesce(max(${messages.seq}), 0) + 1` })
-      .from(messages)
-      .where(eq(messages.channelId, channelId))
-      .get()!.n;
+      .update(channels)
+      .set({ nextMessageSeq: sql`${channels.nextMessageSeq} + 1` })
+      .where(eq(channels.id, channelId))
+      .returning({ seq: sql<number>`${channels.nextMessageSeq} - 1` })
+      .get()!.seq;
     const message = {
-      id: randomUUID(),
       channelId,
       seq,
       sender: sender.type,
@@ -503,7 +519,7 @@ export class Store {
         this.db
           .insert(deliveries)
           .values({
-            messageId: message.id,
+            seq,
             agentId,
             channelId,
             status: 'queued',
@@ -511,7 +527,7 @@ export class Store {
           })
           .run();
     const channel = this.getChannel(channelId);
-    this.event('message', { channelId, agentId: channel.agentId }, { messageId: message.id, seq });
+    this.event('message', { channelId, agentId: channel.agentId }, { seq });
     return message;
   }
   private systemMessage(channelId: string, body: string) {
@@ -552,7 +568,11 @@ export class Store {
         return this.withDeliveries([existing])[0]!;
       }
       if (input.replyTo) {
-        const parent = this.db.select().from(messages).where(eq(messages.id, input.replyTo)).get();
+        const parent = this.db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.channelId, channelId), eq(messages.seq, input.replyTo)))
+          .get();
         if (!parent || parent.channelId !== channel.id)
           throw new HttpError(400, '只能回复同一频道中的消息');
       }
@@ -571,9 +591,9 @@ export class Store {
   hasPendingMessages(agentId: string): boolean {
     return Boolean(
       this.db
-        .select({ messageId: deliveries.messageId })
+        .select({ seq: deliveries.seq })
         .from(deliveries)
-        .innerJoin(messages, eq(deliveries.messageId, messages.id))
+        .innerJoin(messages, deliveryMessageJoin)
         .innerJoin(channels, eq(deliveries.channelId, channels.id))
         .where(
           and(
@@ -597,7 +617,7 @@ export class Store {
       const rows = this.db
         .select({ message: messages, channel: channels })
         .from(deliveries)
-        .innerJoin(messages, eq(deliveries.messageId, messages.id))
+        .innerJoin(messages, deliveryMessageJoin)
         .innerJoin(channels, eq(deliveries.channelId, channels.id))
         .where(
           and(
@@ -615,37 +635,37 @@ export class Store {
         entry.rows.push(row);
         byChannel.set(row.channel.id, entry);
       }
-      const included: string[] = [];
-      const skipped: string[] = [];
-      const claims: { channel: ChannelRecord; ids: string[]; skipped: number }[] = [];
+      const included: MessageRef[] = [];
+      const skipped: MessageRef[] = [];
+      const claims: { channel: ChannelRecord; refs: MessageRef[]; skipped: number }[] = [];
       for (const { channel, rows: unread } of byChannel.values()) {
-        const ids: string[] = [];
+        const refs: MessageRef[] = [];
         let skippedHere = 0;
         unread.forEach(({ message }, index) => {
           const addressed =
             channel.kind === 'private'
               ? message.sender === 'user'
               : (JSON.parse(message.mentions) as string[]).includes(agentId);
-          if (addressed || index >= unread.length - RECENT_PER_CHANNEL) ids.push(message.id);
+          if (addressed || index >= unread.length - RECENT_PER_CHANNEL) refs.push(message);
           else {
-            skipped.push(message.id);
+            skipped.push(message);
             skippedHere++;
           }
         });
-        included.push(...ids);
-        claims.push({ channel, ids, skipped: skippedHere });
+        included.push(...refs);
+        claims.push({ channel, refs, skipped: skippedHere });
       }
       const id = randomUUID();
       this.db
         .insert(runs)
         .values({ id, agentId, threadId, status: 'starting', createdAt: now() })
         .run();
-      const mark = (ids: string[], set: Partial<typeof deliveries.$inferInsert>) => {
-        if (ids.length)
+      const mark = (refs: MessageRef[], set: Partial<typeof deliveries.$inferInsert>) => {
+        if (refs.length)
           this.db
             .update(deliveries)
             .set({ ...set, updatedAt: now() })
-            .where(and(eq(deliveries.agentId, agentId), inArray(deliveries.messageId, ids)))
+            .where(and(eq(deliveries.agentId, agentId), deliveryRefs(refs)))
             .run();
       };
       mark(included, { status: 'submitting', runId: id });
@@ -653,14 +673,14 @@ export class Store {
       this.event('run', { agentId }, { runId: id });
       for (const claim of claims)
         this.event('delivery', { agentId, channelId: claim.channel.id }, { runId: id });
-      const messagesById = new Map(
-        this.withDeliveries(rows.map((r) => r.message)).map((m) => [m.id, m]),
+      const messagesByKey = new Map(
+        this.withDeliveries(rows.map((r) => r.message)).map((m) => [messageKey(m), m]),
       );
       return {
         run: this.getRun(id),
         input: claims.map((claim) => ({
           channel: claim.channel,
-          messages: claim.ids.map((m) => messagesById.get(m)!),
+          messages: claim.refs.map((m) => messagesByKey.get(messageKey(m))!),
           skipped: claim.skipped,
         })),
       };
@@ -732,15 +752,15 @@ export class Store {
     if (!row) throw new HttpError(404, '执行不存在');
     const inputs: Run['inputs'] = [];
     for (const d of this.db
-      .select({ channelId: deliveries.channelId, messageId: deliveries.messageId })
+      .select({ channelId: deliveries.channelId, seq: deliveries.seq })
       .from(deliveries)
-      .innerJoin(messages, eq(deliveries.messageId, messages.id))
+      .innerJoin(messages, deliveryMessageJoin)
       .where(eq(deliveries.runId, id))
       .orderBy(asc(messages.createdAt), asc(messages.seq))
       .all()) {
       const group = inputs.find((i) => i.channelId === d.channelId);
-      if (group) group.messageIds.push(d.messageId);
-      else inputs.push({ channelId: d.channelId, messageIds: [d.messageId] });
+      if (group) group.messageSeqs.push(d.seq);
+      else inputs.push({ channelId: d.channelId, messageSeqs: [d.seq] });
     }
     const items = this.db
       .select({

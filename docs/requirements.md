@@ -1,10 +1,10 @@
 # Isles（群岛）需求文档
 
-> 版本：0.11 · 日期：2026-10-02 · 状态：基础规则与消息协议已纠偏，代码修复和重新验收待完成
+> 版本：0.12 · 日期：2026-10-02 · 状态：基础规则与消息协议已修复，验收记录见基础修复计划
 >
 > 本文整理当前讨论中已明确的产品方向、首批接入范围与技术选型。标记为“待确认”的事项不视为已决定的实现方案；未确认的技术栈与排期不作预设。
 >
-> 技术模块与关键流程见 [架构设计](architecture.md)，阶段安排见 [实现计划](implementation-plan.md)。当前先执行 [基础修复计划](foundation-repair-plan.md)，完成后再推进 M2 验收及后续阶段。
+> 技术模块与关键流程见 [架构设计](architecture.md)，阶段安排见 [实现计划](implementation-plan.md)。规则加载、消息迁移和真实压缩后的验证见 [基础修复计划](foundation-repair-plan.md)，具体消息格式见 [消息协议](message-protocol.md)。
 
 ## 1. 产品定义
 
@@ -140,17 +140,17 @@ M1 按用户决定暂不对管理 HTTP API 做登录鉴权，因此“仅用户�
 同一 Agent 在不同渠道收到的消息，通过带元数据的内容输入其唯一 session，例如：
 
 ```text
-[channel: private, from: user, seq: 1]
+[channel: private, seq: 1, from: user]
 先帮我分析这个方案。
 
-[channel: group-xxx, from: user, seq: 1]
+[channel: group-xxx, seq: 1, from: user]
 你们一起研究一下如何实现。
 
-[channel: group-xxx, from: claudecode-sonnet-1, seq: 2]
+[channel: group-xxx, seq: 2, from: agent:成员ID]
 我认为需要先确认数据结构。
 ```
 
-2026-10-02 明确采用上述带头部的简洁文本。消息使用频道内递增的 `seq`，由 `(channel_id, seq)` 唯一定位，取消消息 UUID；回复、提及等信息按需附加。自动输入、主动收信和历史读取采用统一呈现规则，内部数据仍保持结构化。现有 JSON/UUID 实现待按 [基础修复计划](foundation-repair-plan.md)替换。
+2026-10-02 明确采用上述带头部的简洁文本。消息使用频道内递增的 `seq`，由 `(channel_id, seq)` 唯一定位，没有消息 UUID；回复、提及等信息按需附加。自动输入、主动收信和历史读取采用统一呈现规则，内部数据仍保持结构化。字段、正文转义、分页与旧数据升级见 [消息协议](message-protocol.md)。
 
 消息可以通过原生 `user message` 形式输入，也可以由模型使用工具读取历史。这里的原生角色只是传输方式：**其他 agent 的发言不能因此被误认为人类用户直接下达的指令。**
 
@@ -191,7 +191,7 @@ M1 已确认同一 Agent 忙碌时新消息持久排队，暂不提供 steer。M
 
 这些稳定规则不能依赖 Isles 自行发送的首次消息、`developerInstructions` 正文或首次历史注入。Isles 负责准备和维护文件，harness 负责按原生机制加载；动态聊天、成员及未读状态通过消息和工具提供。用户的全局配置、规则和秘密不能被覆盖或写入此文件。
 
-新建、恢复、规则更新与真实上下文压缩后的可用性都必须验证。不能仅凭存在 `AGENTS.md` 就宣称任意 harness 在压缩后一定重新读取；其他 harness 的文件入口在接入时确认。当前会话注入实现与此目标不一致，属于 M2 继续推进前的基础修复范围。
+新建、恢复、规则更新与真实上下文压缩后的可用性都必须验证。不能仅凭存在 `AGENTS.md` 就宣称任意 harness 在压缩后一定重新读取；其他 harness 的文件入口在接入时确认。Codex 当前通过原生 `instructionSources` 检查实际加载路径，并已验证真实压缩与恢复后的文件规则行为，证据见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)。
 
 ## 6. 会话与记忆
 

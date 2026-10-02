@@ -51,7 +51,7 @@ export const sendMessageSchema = z
   .object({
     body: z.string().trim().min(1).max(32_000),
     clientId: z.string().min(1).max(120),
-    replyTo: z.string().uuid().optional(),
+    replyTo: z.number().int().positive().optional(),
     mentions: z.array(z.string().uuid()).max(50).optional(),
   })
   .strict();
@@ -88,15 +88,22 @@ export const agentSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
 });
-export const messageSchema = z.object({
-  id: z.string().uuid(),
+export const messageRefSchema = z.object({
   channelId: z.string().uuid(),
-  seq: z.number().int(),
+  seq: z.number().int().positive(),
+});
+export type MessageRef = z.infer<typeof messageRefSchema>;
+/** A derived UI/map key, never a second stored message identifier. */
+export const messageKey = (message: MessageRef) => `${message.channelId}:${message.seq}`;
+
+export const messageSchema = z.object({
+  channelId: z.string().uuid(),
+  seq: z.number().int().positive(),
   sender: z.enum(['user', 'agent', 'system']),
   senderId: z.string(),
   body: z.string(),
   clientId: z.string(),
-  replyTo: z.string().nullable(),
+  replyTo: z.number().int().positive().nullable(),
   mentions: z.array(z.string()),
   createdAt: z.string(),
   deliveries: z.array(z.object({ agentId: z.string(), status: deliveryStatusSchema })),
@@ -131,7 +138,9 @@ export const runSchema = z.object({
   createdAt: z.string(),
   finishedAt: z.string().nullable(),
   /** Messages submitted in this run, grouped as the Agent saw them. */
-  inputs: z.array(z.object({ channelId: z.string(), messageIds: z.array(z.string()) })),
+  inputs: z.array(
+    z.object({ channelId: z.string(), messageSeqs: z.array(z.number().int().positive()) }),
+  ),
   items: z.array(runItemSchema),
 });
 export const questionDefinitionSchema = z.object({
