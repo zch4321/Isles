@@ -16,6 +16,52 @@ async function createAgent(page: Page, name: string) {
 const noHorizontalScroll = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
 
+test('saves the Codex executable path in the creation dialog and restores automatic discovery', async ({
+  page,
+}, testInfo) => {
+  let unavailable = true;
+  await page.route('**/api/codex/status*', (route) =>
+    unavailable
+      ? route.fulfill({
+          json: {
+            available: false,
+            authenticated: false,
+            version: null,
+            binaryPath: null,
+            error: '未找到本机 Codex，请指定可执行文件。',
+          },
+        })
+      : route.continue(),
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.getByRole('button', { name: '新建 Agent', exact: true }).first().click();
+  const path = page.getByLabel('Codex 可执行文件路径');
+  await expect(path).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('未找到本机 Codex');
+  await path.fill('C:\\Codex Custom\\codex.exe');
+  unavailable = false;
+  await page.getByRole('button', { name: '保存并检测', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: '路径设置已保存' })).toBeVisible();
+  await page.reload();
+  await page.getByRole('button', { name: '新建 Agent', exact: true }).first().click();
+  if (!(await path.isVisible()))
+    await page.getByRole('button', { name: 'Codex 路径设置', exact: true }).click();
+  await expect(path).toHaveValue('C:\\Codex Custom\\codex.exe');
+  await path.fill('');
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/codex/config') && response.request().method() === 'PUT',
+    ),
+    page.getByRole('button', { name: '保存并检测', exact: true }).click(),
+  ]);
+  expect((await response.json()).binaryPath).toBeNull();
+  expect(await noHorizontalScroll(page)).toBe(false);
+  await page.screenshot({ path: testInfo.outputPath('codex-path-mobile.png'), fullPage: true });
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+});
+
 test('opens the workspace and connects through the Web proxy to SQLite-backed health', async ({
   page,
 }, testInfo) => {

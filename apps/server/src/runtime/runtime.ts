@@ -68,9 +68,10 @@ export class Runtime {
     this.factory =
       factory ??
       (async (agent, handlers) => {
+        const executable = await environment.executable();
         const env = await environment.launch(agent);
         const client = new StdioClient(
-          environment.binary,
+          executable,
           agent.workspace,
           env,
           handlers,

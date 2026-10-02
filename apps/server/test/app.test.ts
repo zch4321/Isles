@@ -27,6 +27,37 @@ async function fixture(withWeb = false) {
 }
 
 describe('application bootstrap', () => {
+  it('saves Codex paths across restart and immediately invalidates a failed detection', async () => {
+    const { app, directory } = await fixture();
+    const firstPath = join(directory, 'missing-first.exe');
+    const secondPath = join(directory, 'missing-second.exe');
+    const save = (binaryPath: string | null) =>
+      app.inject({ method: 'PUT', url: '/api/codex/config', payload: { binaryPath } });
+    expect((await save(firstPath)).json().binaryPath).toBe(firstPath);
+    expect((await app.inject('/api/codex/status')).json().error).toContain(firstPath);
+    await save(secondPath);
+    expect((await app.inject('/api/codex/status')).json().error).toContain(secondPath);
+    const invalid = await app.inject({
+      method: 'PUT',
+      url: '/api/codex/config',
+      payload: { binaryPath: '' },
+    });
+    expect(invalid.statusCode).toBe(400);
+    await app.close();
+    const restored = await buildApp({ dataDir: directory });
+    cleanups.push(() => restored.close());
+    expect((await restored.inject('/api/codex/config')).json().binaryPath).toBe(secondPath);
+    expect(
+      (
+        await restored.inject({
+          method: 'PUT',
+          url: '/api/codex/config',
+          payload: { binaryPath: null },
+        })
+      ).json().binaryPath,
+    ).toBeNull();
+  });
+
   it('connects the API to an on-disk SQLite database in WAL mode', async () => {
     const { app, directory } = await fixture();
     const response = await app.inject({ method: 'GET', url: '/api/health' });

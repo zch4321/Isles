@@ -43,7 +43,9 @@ describe('Codex native boundaries', () => {
     const token = env[MCP_TOKEN_ENV]!;
     expect(token).toMatch(/^[0-9a-f]{64}$/);
     expect(await environment.token(agentRoot(agent))).toBe(token);
-    expect((await stat(join(agentRoot(agent), 'isles-mcp-token'))).mode & 0o777).toBe(0o600);
+    // Windows does not implement POSIX permission bits; retain the mode assertion on Unix.
+    if (process.platform !== 'win32')
+      expect((await stat(join(agentRoot(agent), 'isles-mcp-token'))).mode & 0o777).toBe(0o600);
     expect(await readFile(join(workspace, '.isles-root'), 'utf8')).toContain('Isles');
     // Only the workspace and token belong to Isles; the human's home is left as it was.
     expect(await readdir(home)).toEqual(before);

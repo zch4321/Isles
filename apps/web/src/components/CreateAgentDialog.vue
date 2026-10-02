@@ -4,6 +4,7 @@ import { LoaderCircle, Plus, RefreshCw } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
 import { createAgent, fetchCodex, fetchModels } from '@/api/isles';
 import { invalidateAll } from '@/api/queries';
+import CodexPathSettings from '@/components/CodexPathSettings.vue';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -23,7 +24,7 @@ const open = defineModel<boolean>('open', { required: true });
 const emit = defineEmits<{ created: [channelId: string] }>();
 
 const queryClient = useQueryClient();
-const codex = useQuery({ queryKey: ['codex'], queryFn: fetchCodex, enabled: open });
+const codex = useQuery({ queryKey: ['codex'], queryFn: () => fetchCodex(), enabled: open });
 const models = useQuery({ queryKey: ['models'], queryFn: fetchModels, enabled: open });
 
 const form = ref({ name: '', model: '', reasoningEffort: '', canCreateGroups: false });
@@ -34,14 +35,13 @@ const current = computed(() =>
 watch(
   models.data,
   (value) => {
-    if (form.value.model || !value) return;
+    if (!value || value.models.some((model) => model.model === form.value.model)) return;
     const model = value.models.find((m) => m.isDefault) ?? value.models[0];
-    if (model)
-      form.value = {
-        ...form.value,
-        model: model.model,
-        reasoningEffort: model.defaultReasoningEffort,
-      };
+    form.value = {
+      ...form.value,
+      model: model?.model ?? '',
+      reasoningEffort: model?.defaultReasoningEffort ?? '',
+    };
   },
   { immediate: true },
 );
@@ -59,9 +59,14 @@ const statusText = computed(() => {
   if (ready.value) return `Codex ${codex.data.value?.version ?? ''} 已就绪`;
   return 'Codex 尚未就绪';
 });
-function recheck() {
-  void codex.refetch();
-  void models.refetch();
+async function recheck() {
+  try {
+    await queryClient.invalidateQueries({ queryKey: ['codex'], refetchType: 'none' });
+    await queryClient.fetchQuery({ queryKey: ['codex'], queryFn: () => fetchCodex(true) });
+    await models.refetch();
+  } catch {
+    /* The query error is shown below. */
+  }
 }
 
 const create = useMutation({
@@ -94,7 +99,10 @@ function focusName(event: Event) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="sm:max-w-md" @open-auto-focus="focusName">
+    <DialogContent
+      class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md"
+      @open-auto-focus="focusName"
+    >
       <DialogHeader>
         <DialogTitle>新建 Codex Agent</DialogTitle>
         <DialogDescription>
@@ -131,6 +139,11 @@ function focusName(event: Event) {
       >
         {{ problem }}
       </p>
+
+      <CodexPathSettings
+        :failed="Boolean(codex.data.value && !codex.data.value.available)"
+        :binary-path="codex.data.value?.binaryPath ?? null"
+      />
 
       <form class="grid gap-4" @submit.prevent="create.mutate(form)">
         <div class="grid gap-2">

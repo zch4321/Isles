@@ -4,6 +4,7 @@ import {
   channelDetailSchema,
   channelSchema,
   codexStatusSchema,
+  codexConfigurationSchema,
   messagePageSchema,
   messageSchema,
   modelSchema,
@@ -39,7 +40,11 @@ export async function api<T>(
   return schema.parse(body);
 }
 
-export const fetchCodex = () => api('/codex/status', codexStatusSchema);
+export const fetchCodex = (refresh = false) =>
+  api(`/codex/status${refresh ? '?refresh=true' : ''}`, codexStatusSchema);
+export const fetchCodexConfiguration = () => api('/codex/config', codexConfigurationSchema);
+export const saveCodexConfiguration = (binaryPath: string | null) =>
+  api('/codex/config', codexConfigurationSchema, { binaryPath }, 'PUT');
 export const fetchModels = () => api('/codex/models', z.object({ models: z.array(modelSchema) }));
 
 export const fetchAgents = () =>

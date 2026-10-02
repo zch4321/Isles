@@ -10,6 +10,10 @@ Web 界面采用工作台布局：左侧分为“群聊”和“Agents”两组�
 
 ## 开发
 
+创建 Agent 时会自动检测本机 Codex。发现顺序为启动配置 `ISLES_CODEX_BIN`、界面保存的路径、PATH、桌面应用附带的 CLI 与常见 CLI 安装目录。Windows 支持 `%LOCALAPPDATA%/OpenAI/Codex/bin/<版本目录>/codex.exe`，macOS 支持系统或用户 Applications 中的 Codex.app；桌面版本目录变化后重新检测即可发现。候选程序必须能返回有效的 `codex-cli` 版本，Windows 的 npm/pnpm 启动脚本通过对应 JS 入口运行，不需要启用 shell。
+
+自动发现失败时，在“新建 Codex Agent → Codex 路径设置”填写完整路径并点击“保存并检测”。路径保存在当前数据目录的 `codex-settings.json`，所有 Agent 共用，服务重启后保留；留空恢复自动发现。环境变量覆盖项优先于界面设置，填错的显式路径会报告错误而不静默切换安装。更改路径影响后续启动，不中断正在执行的原生进程，也不改变已有 session 绑定。
+
 建议使用 Node.js 24.15+ LTS，也支持 Node.js 26；具体范围见根目录 `package.json`。项目使用 pnpm 12.4.1，并保留依赖锁文件以便重现安装。
 
 SQLite 驱动包含原生模块。项目已提供 `node-gyp`，本机还需要 Python 3 和 C/C++ 构建工具；macOS 使用 Xcode Command Line Tools。
@@ -25,15 +29,15 @@ pnpm dev
 
 配置通过环境变量传入：
 
-| 变量                      | 默认值                             | 说明                                                   |
-| ------------------------- | ---------------------------------- | ------------------------------------------------------ |
-| `ISLES_SERVER_PORT`       | `4310`                             | 后端端口，前端代理同时使用该值。                       |
-| `ISLES_WEB_PORT`          | `5173`                             | Vite 开发端口。                                        |
-| `ISLES_DATA_DIR`          | `.isles`                           | 数据目录；相对路径从仓库根目录解析，也支持绝对路径。   |
-| `ISLES_CODEX_BIN`         | `codex`                            | 原生 Codex 可执行文件，也可用绝对路径。                |
-| `ISLES_CODEX_HOME`        | 当前 `CODEX_HOME`，否则 `~/.codex` | 所有 Agent 共用的 Codex 目录；Isles 不修改其中的配置。 |
-| `ISLES_GROUP_QUIET_MS`    | `10000`                            | 群消息防抖：该群安静多久后唤醒成员。                   |
-| `ISLES_GROUP_MAX_WAIT_MS` | `30000`                            | 群消息防抖：最早一条未读最多等待多久。                 |
+| 变量                      | 默认值                             | 说明                                                       |
+| ------------------------- | ---------------------------------- | ---------------------------------------------------------- |
+| `ISLES_SERVER_PORT`       | `4310`                             | 后端端口，前端代理同时使用该值。                           |
+| `ISLES_WEB_PORT`          | `5173`                             | Vite 开发端口。                                            |
+| `ISLES_DATA_DIR`          | `.isles`                           | 数据目录；相对路径从仓库根目录解析，也支持绝对路径。       |
+| `ISLES_CODEX_BIN`         | 自动发现                           | 覆盖界面设置和自动发现；可填写完整路径或 PATH 中的命令名。 |
+| `ISLES_CODEX_HOME`        | 当前 `CODEX_HOME`，否则 `~/.codex` | 所有 Agent 共用的 Codex 目录；Isles 不修改其中的配置。     |
+| `ISLES_GROUP_QUIET_MS`    | `10000`                            | 群消息防抖：该群安静多久后唤醒成员。                       |
+| `ISLES_GROUP_MAX_WAIT_MS` | `30000`                            | 群消息防抖：最早一条未读最多等待多久。                     |
 
 默认数据库为 `.isles/isles.sqlite`，使用 WAL 模式。该目录已排除在 Git 之外。M2 重新生成了基线迁移，不兼容 M1 的数据目录：遇到 M1 数据时服务会拒绝启动并提示，需要停止服务并删除该目录（或改用新的 `ISLES_DATA_DIR`）。
 
@@ -48,6 +52,8 @@ Web 和管理 HTTP API 暂无登录鉴权，仅供本机使用，不承诺把人
 同一数据目录仅允许一个 Isles 服务。独立的 `runtime-lock.sqlite` 持有进程锁，冲突在迁移/恢复前明确拒绝；正常关闭或进程退出后由 SQLite/操作系统释放。使用另一数据目录可并行运行另一份服务。
 
 ## 检查与构建
+
+浏览器测试默认使用 Playwright 对应的 Chromium；若本机已安装 Chrome，可在启动测试的环境中设置 `ISLES_TEST_BROWSER_CHANNEL=chrome` 后执行 `pnpm test:e2e`，复用本机浏览器。
 
 ```sh
 pnpm check

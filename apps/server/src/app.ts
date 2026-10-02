@@ -3,6 +3,7 @@ import {
   addMembersSchema,
   answerQuestionSchema,
   createAgentSchema,
+  codexConfigurationUpdateSchema,
   createGroupSchema,
   sendMessageSchema,
   updateAgentSchema,
@@ -48,7 +49,10 @@ export async function buildApp(options: AppOptions) {
     releaseDataLock();
     throw error;
   }
-  const environment = new NativeEnvironment(options.native);
+  const environment = new NativeEnvironment({
+    ...options.native,
+    settingsFile: join(options.dataDir, 'codex-settings.json'),
+  });
   const store = new Store(database, options.dataDir);
   const catalog = options.catalog ?? new NativeCatalog(environment, options.dataDir);
   const runtime = new Runtime(store, catalog, environment, options.clientFactory, options.schedule);
@@ -107,7 +111,17 @@ export async function buildApp(options: AppOptions) {
     return { status: 'ok', service: 'isles', database: 'ready' };
   });
 
-  app.get('/api/codex/status', () => catalog.status());
+  app.get<{ Querystring: { refresh?: string } }>('/api/codex/status', (request) => {
+    if (request.query.refresh === 'true') catalog.invalidate?.();
+    return catalog.status();
+  });
+  app.get('/api/codex/config', () => environment.configuration());
+  app.put('/api/codex/config', async (request) => {
+    const { binaryPath } = codexConfigurationUpdateSchema.parse(request.body);
+    const configuration = await environment.configure(binaryPath);
+    catalog.invalidate?.();
+    return configuration;
+  });
   app.get('/api/codex/models', async () => ({ models: await catalog.models() }));
   app.get('/api/agents', () => ({ agents: store.listAgents(), cursor: store.cursor() }));
   app.post('/api/agents', async (request, reply) =>

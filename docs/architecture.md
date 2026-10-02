@@ -361,6 +361,8 @@ M1 已确定 Codex 使用 `danger-full-access` 和 `approvalPolicy: never`，不
 
 ### 9.2 首批原生接口
 
+Codex 的可执行文件发现与平台协议分开处理：先按显式配置、PATH 和已知安装目录查找并验证 CLI 版本，再将统一的命令与参数交给版本检测和 app-server 启动。Windows npm/pnpm 启动脚本解析为 Node 与 Codex JS 入口，保持 stdio 直连。Isles 自己的 `codex-settings.json` 保存界面路径设置，不写入用户的 Codex 配置目录；更新或手动重新检测会失效模型目录缓存，正在运行的 Agent 仍使用原进程和 session。
+
 下表的接入路径与顺序已确定。Codex M1 已完成本地真实原生链路验证，Kimi 与 Claude 尚未接入。首先以 Codex 完成主要产品链路，然后接入 Kimi，最后接入 Claude Agent SDK。实施时锁定版本，保存该版本的协议依据并运行适配测试。
 
 | Harness     | 接入接口                                | 已查明的接口边界                                                                                                                               |

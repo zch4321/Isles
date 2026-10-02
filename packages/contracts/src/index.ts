@@ -186,7 +186,16 @@ export const codexStatusSchema = z.object({
   available: z.boolean(),
   authenticated: z.boolean(),
   version: z.string().nullable(),
+  binaryPath: z.string().nullable(),
   error: z.string().nullable(),
+});
+export const codexConfigurationUpdateSchema = z
+  .object({
+    binaryPath: z.string().trim().min(1).max(32_768).nullable(),
+  })
+  .strict();
+export const codexConfigurationSchema = codexConfigurationUpdateSchema.extend({
+  environmentBinaryPath: z.string().nullable(),
 });
 export const eventSchema = z.object({
   id: z.number().int(),

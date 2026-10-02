@@ -12,6 +12,7 @@ export const testCatalog: Catalog = {
   status: async () => ({
     available: true,
     authenticated: true,
+    binaryPath: null,
     version: 'mock-codex',
     error: null,
   }),

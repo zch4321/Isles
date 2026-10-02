@@ -10,6 +10,9 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:55173',
     trace: 'retain-on-failure',
+    ...(process.env.ISLES_TEST_BROWSER_CHANNEL
+      ? { channel: process.env.ISLES_TEST_BROWSER_CHANNEL }
+      : {}),
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: [

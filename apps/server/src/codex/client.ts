@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   NativeRpcError,
@@ -8,6 +9,7 @@ import {
   type RequestId,
 } from './protocol.js';
 import type { Redactor } from '../errors.js';
+import type { NativeCommand } from './executable.js';
 
 export class StdioClient implements NativeClient {
   private child: ChildProcessWithoutNullStreams;
@@ -20,17 +22,19 @@ export class StdioClient implements NativeClient {
   private closing = false;
   private terminated: Promise<void>;
   constructor(
-    binary: string,
+    binary: string | NativeCommand,
     workspace: string,
     env: Record<string, string>,
     private handlers: NativeHandlers,
     private redactor: Redactor,
   ) {
-    this.child = spawn(binary, ['app-server', '--listen', 'stdio://'], {
+    const command = typeof binary === 'string' ? { file: binary, args: [] } : binary;
+    this.child = spawn(command.file, [...command.args, 'app-server', '--listen', 'stdio://'], {
       cwd: workspace,
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
+      windowsHide: true,
     });
     // Stderr is intentionally drained and never stored: native diagnostics can
     // contain config/auth material and are not formal execution items.
@@ -129,7 +133,25 @@ export class StdioClient implements NativeClient {
         /* Already exited. */
       }
     };
-    signal('SIGTERM');
+    this.child.stdin.end();
+    if (
+      process.platform === 'win32' &&
+      this.child.pid &&
+      this.child.exitCode === null &&
+      this.child.signalCode === null
+    ) {
+      // npm launchers can own a native Codex child. Stop only this client's tree,
+      // so closing the launcher cannot leave the app-server holding its stdio open.
+      const taskkill = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+      execFile(
+        taskkill,
+        ['/PID', String(this.child.pid), '/T', '/F'],
+        { windowsHide: true },
+        (error) => {
+          if (error) signal('SIGTERM');
+        },
+      );
+    } else signal('SIGTERM');
     const timer = setTimeout(() => signal('SIGKILL'), 2_000);
     await this.terminated;
     clearTimeout(timer);

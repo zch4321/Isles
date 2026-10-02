@@ -20,34 +20,44 @@ const modelsSchema = z.object({
 export interface Catalog {
   status(): Promise<CodexStatus>;
   models(): Promise<Model[]>;
+  invalidate?(): void;
 }
 export class NativeCatalog implements Catalog {
   private cache: { status: CodexStatus; models: Model[]; time: number } | undefined;
   private fetching: Promise<{ status: CodexStatus; models: Model[] }> | undefined;
+  private revision = 0;
   constructor(
     private environment: NativeEnvironment,
     private dataDir: string,
   ) {}
+  invalidate() {
+    this.cache = undefined;
+    this.fetching = undefined;
+    this.revision++;
+  }
   private async read() {
     if (this.cache && Date.now() - this.cache.time < 30_000) return this.cache;
     if (this.fetching) return this.fetching;
-    this.fetching = this.fetch();
+    const revision = this.revision;
+    const fetching = this.fetch();
+    this.fetching = fetching;
     try {
-      const result = await this.fetching;
-      this.cache = { ...result, time: Date.now() };
+      const result = await fetching;
+      if (this.revision === revision) this.cache = { ...result, time: Date.now() };
       return result;
     } finally {
-      this.fetching = undefined;
+      if (this.fetching === fetching) this.fetching = undefined;
     }
   }
   private async fetch() {
     let version: string | null = null;
     let client: StdioClient | undefined;
     try {
-      version = await this.environment.version();
+      const executable = await this.environment.executable(true);
+      version = executable.version;
       await this.environment.learnSecrets();
       client = new StdioClient(
-        this.environment.binary,
+        executable,
         this.dataDir,
         { CODEX_HOME: this.environment.home },
         {
@@ -79,6 +89,7 @@ export class NativeCatalog implements Catalog {
           available: true,
           authenticated,
           version,
+          binaryPath: this.environment.binaryPath,
           error: authenticated ? null : '本机 Codex 尚未认证，请先在原生 CLI 完成登录。',
         },
         models,
@@ -89,6 +100,7 @@ export class NativeCatalog implements Catalog {
           available: false,
           authenticated: false,
           version,
+          binaryPath: this.environment.binaryPath,
           error: this.environment.redactor.text(error),
         },
         models: [],
