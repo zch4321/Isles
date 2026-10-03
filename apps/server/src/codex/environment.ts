@@ -1,28 +1,20 @@
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join } from 'node:path';
+import type { ConfigManager } from '@isles/config';
 import { parse } from 'smol-toml';
-import { z } from 'zod';
 import { findCodexExecutable, type CodexExecutable } from './executable.js';
 import { Redactor } from '../errors.js';
 import type { AgentRecord } from '../storage/store.js';
 import { prepareGuidance } from '../runtime/guidance.js';
 
-export interface NativeOptions {
-  binary?: string;
-  home?: string;
-  settingsFile?: string;
-}
 /** Environment variable the native MCP client reads the Agent's bearer token from. */
 export const MCP_TOKEN_ENV = 'ISLES_MCP_TOKEN';
-/** The Isles-owned directory of an Agent, holding its workspace and MCP token. */
-export const agentRoot = (agent: Pick<AgentRecord, 'workspace'>) => dirname(agent.workspace);
+/** Agent credentials belong to application data, independently of working files. */
+export const agentRoot = (dataDir: string, agent: Pick<AgentRecord, 'id'>) =>
+  join(dataDir, 'agents', agent.id);
 
-const settingsSchema = z.object({ binaryPath: z.string().trim().min(1).nullable() });
 export class NativeEnvironment {
-  private readonly override: string | undefined;
-  private readonly settingsFile: string | undefined;
   private discovery: Promise<CodexExecutable> | undefined;
   private selected: CodexExecutable | undefined;
   /**
@@ -30,16 +22,13 @@ export class NativeEnvironment {
    * plugins and long-term memories; each keeps its own thread, so context is never shared.
    */
   readonly home: string;
+  readonly dataDir: string;
+  readonly sharedDir: string;
   readonly redactor = new Redactor();
-  constructor(options: NativeOptions = {}) {
-    this.override = options.binary?.trim() || process.env.ISLES_CODEX_BIN?.trim() || undefined;
-    this.settingsFile = options.settingsFile;
-    this.home = resolve(
-      options.home ??
-        process.env.ISLES_CODEX_HOME ??
-        process.env.CODEX_HOME ??
-        join(homedir(), '.codex'),
-    );
+  constructor(readonly config: ConfigManager) {
+    this.home = config.current.codexHome;
+    this.dataDir = config.current.dataDir;
+    this.sharedDir = config.current.sharedDir;
   }
   async version() {
     return (await this.executable(true)).version;
@@ -47,25 +36,14 @@ export class NativeEnvironment {
   get binaryPath() {
     return this.selected?.path ?? null;
   }
-  private async savedSettings() {
-    if (!this.settingsFile) return { binaryPath: null };
-    try {
-      return settingsSchema.parse(JSON.parse(await readFile(this.settingsFile, 'utf8')));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { binaryPath: null };
-      throw new Error('无法读取 Codex 路径设置，请在界面中重新保存。', { cause: error });
-    }
-  }
-  async configuration() {
-    return { ...(await this.savedSettings()), environmentBinaryPath: this.override ?? null };
+  configuration() {
+    return this.config.codexConfiguration();
   }
   async configure(binaryPath: string | null) {
-    if (!this.settingsFile) throw new Error('未配置 Codex 设置的保存位置');
-    await mkdir(dirname(this.settingsFile), { recursive: true });
-    await this.privateFile(this.settingsFile, JSON.stringify({ binaryPath }, null, 2) + '\n');
+    const configuration = await this.config.configureCodexBinary(binaryPath);
     this.discovery = undefined;
     this.selected = undefined;
-    return this.configuration();
+    return configuration;
   }
   async executable(refresh = false): Promise<CodexExecutable> {
     if (refresh) {
@@ -73,10 +51,7 @@ export class NativeEnvironment {
       this.selected = undefined;
     }
     if (!this.discovery) {
-      this.discovery = (async () => {
-        const binary = this.override ?? (await this.savedSettings()).binaryPath;
-        return findCodexExecutable({ binary });
-      })();
+      this.discovery = findCodexExecutable({ binary: this.config.current.codexBinaryPath });
     }
     const discovery = this.discovery;
     try {
@@ -133,14 +108,18 @@ export class NativeEnvironment {
   }
   async prepareWorkspace(agent: AgentRecord) {
     await mkdir(agent.workspace, { recursive: true });
+    await mkdir(this.sharedDir, { recursive: true });
     await writeFile(join(agent.workspace, '.isles-root'), 'Isles Agent workspace\n');
-    await prepareGuidance(agent);
+    await prepareGuidance(agent, this.sharedDir);
   }
   /** Prepares the workspace and returns the environment of the Agent's native process. */
   async launch(agent: AgentRecord): Promise<Record<string, string>> {
     await this.prepareWorkspace(agent);
     await this.learnSecrets();
-    return { CODEX_HOME: this.home, [MCP_TOKEN_ENV]: await this.token(agentRoot(agent)) };
+    return {
+      CODEX_HOME: this.home,
+      [MCP_TOKEN_ENV]: await this.token(agentRoot(this.dataDir, agent)),
+    };
   }
   /**
    * Settings layered over the shared config for one Agent's thread. Dotted keys override

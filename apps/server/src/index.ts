@@ -1,10 +1,11 @@
+import { ConfigManager } from '@isles/config';
 import { buildApp } from './app.js';
-import { readConfig } from './config.js';
+import { webRoot } from './config.js';
 
-const config = readConfig();
+const config = new ConfigManager();
 const app = await buildApp({
-  dataDir: config.dataDir,
-  webRoot: config.webRoot,
+  config,
+  webRoot,
   logger: true,
 });
 
@@ -24,7 +25,7 @@ process.once('SIGINT', () => void shutdown());
 process.once('SIGTERM', () => void shutdown());
 
 try {
-  await app.listen({ host: config.host, port: config.port });
+  await app.listen({ host: config.current.host, port: config.current.port });
 } catch (error) {
   app.log.error(error);
   process.exitCode = 1;

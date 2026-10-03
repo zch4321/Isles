@@ -90,7 +90,7 @@ export class Store {
   private emitter = new EventEmitter();
   constructor(
     readonly database: IslesDatabase,
-    private dataDir: string,
+    private workspaceDir: string,
   ) {}
   private get db() {
     return this.database.db;
@@ -163,7 +163,7 @@ export class Store {
     const id = randomUUID();
     const channelId = randomUUID();
     return this.change(() => {
-      const root = join(this.dataDir, 'agents', id);
+      const root = join(this.workspaceDir, 'agents', id);
       this.db
         .insert(agents)
         .values({

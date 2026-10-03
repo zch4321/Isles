@@ -4,6 +4,8 @@
 >
 > 一个 `gpt-6.1-sol / max` 子 agent 实现和自测；主 agent 独立审查、调用真实 Codex 并操作浏览器验收。阶段范围见 [M1 实施计划](m1-implementation-plan.md)。
 
+> 本文仅记录 M1 当时的验收事实，不代表当前 TOML 配置、data/workspace 布局或旧数据转换通过验收。当前首发前不兼容政策见 [需求](requirements.md#12-首次发布前的数据政策)。
+
 ## 1. 环境与范围
 
 - macOS arm64，Node.js `26.8.2`，pnpm `12.4.1`，Codex CLI `0.158.0`。

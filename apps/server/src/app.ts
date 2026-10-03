@@ -1,4 +1,5 @@
 import fastifyStatic from '@fastify/static';
+import { ConfigurationError, type ConfigManager } from '@isles/config';
 import {
   addMembersSchema,
   answerQuestionSchema,
@@ -13,10 +14,11 @@ import {
 import { sql } from 'drizzle-orm';
 import Fastify, { LogController } from 'fastify';
 import { existsSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { NativeCatalog, type Catalog } from './codex/catalog.js';
-import { NativeEnvironment, type NativeOptions } from './codex/environment.js';
+import { NativeEnvironment } from './codex/environment.js';
 import { HttpError } from './errors.js';
 import { registerMcp } from './mcp/server.js';
 import { Runtime, type ClientFactory } from './runtime/runtime.js';
@@ -25,17 +27,18 @@ import { acquireDataLock } from './storage/lock.js';
 import { Store } from './storage/store.js';
 
 export interface AppOptions {
-  dataDir: string;
+  config: ConfigManager;
   webRoot?: string;
   logger?: boolean;
-  native?: NativeOptions;
   catalog?: Catalog;
   clientFactory?: ClientFactory;
   runtimeUrl?: string;
 }
 
 export async function buildApp(options: AppOptions) {
-  const releaseDataLock = acquireDataLock(options.dataDir);
+  const { dataDir, workspaceDir, sharedDir } = options.config.current;
+  await mkdir(sharedDir, { recursive: true });
+  const releaseDataLock = acquireDataLock(dataDir);
   const app = Fastify({
     logger: options.logger ?? false,
     bodyLimit: 100_000,
@@ -43,18 +46,22 @@ export async function buildApp(options: AppOptions) {
   });
   let database;
   try {
-    database = openDatabase(options.dataDir);
+    database = openDatabase(dataDir);
   } catch (error) {
     releaseDataLock();
     throw error;
   }
-  const environment = new NativeEnvironment({
-    ...options.native,
-    settingsFile: join(options.dataDir, 'codex-settings.json'),
-  });
-  const store = new Store(database, options.dataDir);
-  const catalog = options.catalog ?? new NativeCatalog(environment, options.dataDir);
-  const runtime = new Runtime(store, catalog, environment, options.clientFactory);
+  const environment = new NativeEnvironment(options.config);
+  const store = new Store(database, workspaceDir);
+  const catalog = options.catalog ?? new NativeCatalog(environment, dataDir);
+  let runtime: Runtime;
+  try {
+    runtime = new Runtime(store, catalog, environment, options.clientFactory);
+  } catch (error) {
+    database.sqlite.close();
+    releaseDataLock();
+    throw error;
+  }
   if (options.runtimeUrl) runtime.start(options.runtimeUrl);
   app.decorate('isles', { runtime, store });
 
@@ -64,6 +71,8 @@ export async function buildApp(options: AppOptions) {
   });
 
   app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof ConfigurationError)
+      return reply.code(400).send({ error: environment.redactor.text(error.message) });
     if (error instanceof z.ZodError)
       return reply.code(400).send({
         error: '请求参数无效',
@@ -248,7 +257,12 @@ export async function buildApp(options: AppOptions) {
   registerMcp(app, runtime);
 
   if (options.webRoot && existsSync(join(options.webRoot, 'index.html'))) {
-    await app.register(fastifyStatic, { root: options.webRoot });
+    try {
+      await app.register(fastifyStatic, { root: options.webRoot });
+    } catch (error) {
+      await app.close();
+      throw error;
+    }
     app.setNotFoundHandler((request, reply) => {
       const pathname = request.url.split('?')[0] ?? request.url;
       if (

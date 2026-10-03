@@ -8,6 +8,7 @@ import { StdioClient } from '../src/codex/client.js';
 import { agentRoot, MCP_TOKEN_ENV, NativeEnvironment } from '../src/codex/environment.js';
 import { Redactor } from '../src/errors.js';
 import type { AgentRecord } from '../src/storage/store.js';
+import { testConfig } from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -25,7 +26,7 @@ describe('Codex native boundaries', () => {
   it('runs every Agent in the shared Codex home without copying or writing it, keeping the MCP token out of config', async () => {
     const dir = await directory();
     const home = join(dir, 'codex-home');
-    const workspace = join(dir, 'agents', 'agent-1', 'workspace');
+    const workspace = join(dir, 'workspace', 'agents', 'agent-1', 'workspace');
     await mkdir(home);
     const auth = JSON.stringify({
       tokens: { access_token: 'test-access-secret', refresh_token: 'test-refresh-secret' },
@@ -36,7 +37,7 @@ describe('Codex native boundaries', () => {
     await writeFile(join(home, 'config.toml'), config);
     process.env.ISLES_TEST_PROVIDER_KEY = 'test-provider-secret';
     const before = await readdir(home);
-    const environment = new NativeEnvironment({ home });
+    const environment = new NativeEnvironment(testConfig(dir, { ISLES_CODEX_HOME: home }));
     const agent = {
       id: 'agent-1',
       name: 'Test Agent',
@@ -47,16 +48,20 @@ describe('Codex native boundaries', () => {
     expect(env.CODEX_HOME).toBe(home);
     const token = env[MCP_TOKEN_ENV]!;
     expect(token).toMatch(/^[0-9a-f]{64}$/);
-    expect(await environment.token(agentRoot(agent))).toBe(token);
+    expect(await environment.token(agentRoot(dir, agent))).toBe(token);
     // Windows does not implement POSIX permission bits; retain the mode assertion on Unix.
     if (process.platform !== 'win32')
-      expect((await stat(join(agentRoot(agent), 'isles-mcp-token'))).mode & 0o777).toBe(0o600);
+      expect((await stat(join(agentRoot(dir, agent), 'isles-mcp-token'))).mode & 0o777).toBe(0o600);
     expect(await readFile(join(workspace, '.isles-root'), 'utf8')).toContain('Isles');
     // Only the workspace and token belong to Isles; the human's home is left as it was.
     expect(await readdir(home)).toEqual(before);
     expect(await readFile(join(home, 'config.toml'), 'utf8')).toBe(config);
     expect(await readFile(join(home, 'auth.json'), 'utf8')).toBe(auth);
-    expect((await readdir(agentRoot(agent))).sort()).toEqual(['isles-mcp-token', 'workspace']);
+    expect((await readdir(agentRoot(dir, agent))).sort()).toEqual(['isles-mcp-token']);
+    expect(await readFile(join(workspace, 'AGENTS.md'), 'utf8')).toContain(
+      JSON.stringify(environment.sharedDir),
+    );
+    expect(await readdir(environment.sharedDir)).toEqual([]);
     const thread = environment.threadConfig(agent, 'http://127.0.0.1:1');
     expect(thread).toMatchObject({
       'mcp_servers.isles': {

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "3e0477e8-5880-420e-a210-e7a3207ed229",
+  "id": "c5c4c168-611f-493d-9cb0-66801295a2cb",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "agents": {
@@ -241,6 +241,14 @@
           "autoincrement": false,
           "default": false
         },
+        "next_message_seq": {
+          "name": "next_message_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        },
         "created_by": {
           "name": "created_by",
           "type": "text",
@@ -293,9 +301,9 @@
     "deliveries": {
       "name": "deliveries",
       "columns": {
-        "message_id": {
-          "name": "message_id",
-          "type": "text",
+        "seq": {
+          "name": "seq",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
@@ -356,15 +364,6 @@
         }
       },
       "foreignKeys": {
-        "deliveries_message_id_messages_id_fk": {
-          "name": "deliveries_message_id_messages_id_fk",
-          "tableFrom": "deliveries",
-          "tableTo": "messages",
-          "columnsFrom": ["message_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "deliveries_agent_id_agents_id_fk": {
           "name": "deliveries_agent_id_agents_id_fk",
           "tableFrom": "deliveries",
@@ -382,12 +381,21 @@
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "deliveries_channel_id_seq_messages_channel_id_seq_fk": {
+          "name": "deliveries_channel_id_seq_messages_channel_id_seq_fk",
+          "tableFrom": "deliveries",
+          "tableTo": "messages",
+          "columnsFrom": ["channel_id", "seq"],
+          "columnsTo": ["channel_id", "seq"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
-        "deliveries_message_id_agent_id_pk": {
-          "columns": ["message_id", "agent_id"],
-          "name": "deliveries_message_id_agent_id_pk"
+        "deliveries_channel_id_seq_agent_id_pk": {
+          "columns": ["channel_id", "seq", "agent_id"],
+          "name": "deliveries_channel_id_seq_agent_id_pk"
         }
       },
       "uniqueConstraints": {},
@@ -467,13 +475,6 @@
     "messages": {
       "name": "messages",
       "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
         "channel_id": {
           "name": "channel_id",
           "type": "text",
@@ -518,7 +519,7 @@
         },
         "reply_to": {
           "name": "reply_to",
-          "type": "text",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -540,11 +541,6 @@
         }
       },
       "indexes": {
-        "messages_sequence": {
-          "name": "messages_sequence",
-          "columns": ["channel_id", "seq"],
-          "isUnique": true
-        },
         "messages_dedupe": {
           "name": "messages_dedupe",
           "columns": ["channel_id", "sender", "sender_id", "client_id"],
@@ -560,11 +556,30 @@
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "messages_channel_id_reply_to_messages_channel_id_seq_fk": {
+          "name": "messages_channel_id_reply_to_messages_channel_id_seq_fk",
+          "tableFrom": "messages",
+          "tableTo": "messages",
+          "columnsFrom": ["channel_id", "reply_to"],
+          "columnsTo": ["channel_id", "seq"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
-      "compositePrimaryKeys": {},
+      "compositePrimaryKeys": {
+        "messages_channel_id_seq_pk": {
+          "columns": ["channel_id", "seq"],
+          "name": "messages_channel_id_seq_pk"
+        }
+      },
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "messages_positive_seq": {
+          "name": "messages_positive_seq",
+          "value": "\"messages\".\"seq\" > 0"
+        }
+      }
     },
     "questions": {
       "name": "questions",

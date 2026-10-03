@@ -1,4 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const browserConfigFile = join(mkdtempSync(join(tmpdir(), 'isles-vite-test-')), 'config.toml');
+writeFileSync(browserConfigFile, '[server]\nport = 54310\n[dev]\nport = 55173\n');
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -22,7 +28,7 @@ export default defineConfig({
       url: 'http://127.0.0.1:54310/api/health',
       reuseExistingServer: false,
       timeout: 60_000,
-      env: { ISLES_SERVER_PORT: '54310' },
+      env: { ISLES_SERVER_PORT: '54310', ISLES_CONFIG_FILE: browserConfigFile },
     },
     {
       command: 'pnpm --filter @isles/web dev',
@@ -32,6 +38,7 @@ export default defineConfig({
       env: {
         ISLES_SERVER_PORT: '54310',
         ISLES_WEB_PORT: '55173',
+        ISLES_CONFIG_FILE: browserConfigFile,
       },
     },
   ],

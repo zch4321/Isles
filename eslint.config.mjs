@@ -5,7 +5,13 @@ import vue from 'eslint-plugin-vue';
 
 export default defineConfigWithVueTs(
   {
-    ignores: ['**/dist/**', '.isles/**', 'playwright-report/**', 'test-results/**'],
+    ignores: [
+      '**/dist/**',
+      '.isles/**',
+      '.isles-legacy-*/**',
+      'playwright-report/**',
+      'test-results/**',
+    ],
   },
   js.configs.recommended,
   vue.configs['flat/recommended'],

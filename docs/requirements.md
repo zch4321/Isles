@@ -1,10 +1,10 @@
 # Isles（群岛）需求文档
 
-> 版本：0.12 · 日期：2026-10-02 · 状态：基础规则与消息协议已修复，验收记录见基础修复计划
+> 版本：0.13 · 日期：2026-10-03 · 状态：已确认 TOML 配置、目录拆分与首发前不兼容政策；本轮验收另行记录
 >
 > 本文整理当前讨论中已明确的产品方向、首批接入范围与技术选型。标记为“待确认”的事项不视为已决定的实现方案；未确认的技术栈与排期不作预设。
 >
-> 技术模块与关键流程见 [架构设计](architecture.md)，阶段安排见 [实现计划](implementation-plan.md)。规则加载、消息迁移和真实压缩后的验证见 [基础修复计划](foundation-repair-plan.md)，具体消息格式见 [消息协议](message-protocol.md)。
+> 技术模块与关键流程见 [架构设计](architecture.md)，阶段安排见 [实现计划](implementation-plan.md)。历史规则加载与真实压缩验证见 [基础修复计划](foundation-repair-plan.md)，具体消息格式见 [消息协议](message-protocol.md)。历史旧库迁移事实不构成当前兼容承诺。
 
 ## 1. 产品定义
 
@@ -21,12 +21,16 @@ Isles 是面向人类与多个 Agent 的聊天协作产品。用户像使用聊�
 - **首版采用 Web 形态**，用户通过浏览器管理 Agent、使用私聊和群聊。
 - **前端采用 Vue 3、Vite 和 TypeScript**，组件采用 shadcn-vue，样式采用 Tailwind CSS，服务端状态使用 TanStack Vue Query。
 - **后端采用 Node.js 与 Fastify**，通过 pnpm workspace 管理前端、后端及共享协议；浏览器接口采用 REST + SSE。
-- **数据库采用 SQLite，启用 WAL；数据访问采用 Drizzle ORM**，使用配套 Drizzle Kit 管理迁移。
+- **数据库采用 SQLite，启用 WAL；数据访问采用 Drizzle ORM**，使用配套 Drizzle Kit 管理当前 schema 基线。
 - **第一阶段接入 Codex、Kimi Code 和 Claude Code CLI**。DeepSeek Harness（DSH）不纳入第一阶段，后续是否支持另行决定。
 - **以原生接口为主，接入优先级为 Codex → Kimi Code → Claude Agent SDK**。Codex 使用 app-server，Kimi 使用原生 Server API，Claude 使用官方 SDK 持续流式输入。
 - Electron 桌面端和 IM 接入留待后续考虑，不纳入首版交付范围。
 - **首版采用单用户、单机部署**：Web 服务与所有 harness 在同一台电脑或服务器上运行，不要求跨机器调度执行。
 - M1 只监听本机，管理页面和 HTTP API 暂不做登录鉴权；Codex 使用 `danger-full-access` 与 `approvalPolicy: never`。远程访问与后续用户鉴权另行设计。
+
+### 1.2 首次发布前的数据政策
+
+在用户明确宣布发布第一个正式版本（v1）之前，不实现向后兼容、旧数据迁移或任何兼容性代码。数据库保持当前 schema 的全新基线；旧 `.isles` 由用户手动清理，旧 JSON 配置与旧数据库转换不再支持。同版本数据持久化、已有 Agent 工作区路径和固定 session 的恢复仍按现有产品约束执行。历史文档保留当时的验收事实，但不继续承诺旧版本升级。
 
 ## 2. 用户目标
 
@@ -150,7 +154,7 @@ M1 按用户决定暂不对管理 HTTP API 做登录鉴权，因此“仅用户�
 我认为需要先确认数据结构。
 ```
 
-2026-10-02 明确采用上述带头部的简洁文本。消息使用频道内递增的 `seq`，由 `(channel_id, seq)` 唯一定位，没有消息 UUID；回复、提及等信息按需附加。自动输入、主动收信和历史读取采用统一呈现规则，内部数据仍保持结构化。字段、正文转义、分页与旧数据升级见 [消息协议](message-protocol.md)。
+2026-10-02 明确采用上述带头部的简洁文本。消息使用频道内递增的 `seq`，由 `(channel_id, seq)` 唯一定位，没有消息 UUID；回复、提及等信息按需附加。自动输入、主动收信和历史读取采用统一呈现规则，内部数据仍保持结构化。字段、正文转义、分页与数据版本边界见 [消息协议](message-protocol.md)。
 
 消息可以通过原生 `user message` 形式输入，也可以由模型使用工具读取历史。这里的原生角色只是传输方式：**其他 agent 的发言不能因此被误认为人类用户直接下达的指令。**
 
@@ -241,20 +245,22 @@ M1 已确认同一 Agent 忙碌时新消息持久排队，暂不提供 steer。M
 - 调研资料、草稿、日志及临时文件。
 - 自己的工作说明和整理结果。
 
-例如：
+默认目录布局已于 2026-10-03 确认：
 
 ```text
-agents/
-  codex-gpt6astra-1/
-    workspace/
-    runtime/
-  codex-gpt6astra-2/
-    workspace/
-    runtime/
-shared/
+~/.Isles/
+  config.toml
+  data/
+    isles.sqlite
+    agents/<agent-id>/isles-mcp-token
+  workspace/
+    agents/<agent-id>/workspace/
+      AGENTS.md
+      .isles-root
+    shared/
 ```
 
-该目录树仅示意工作文件、原生运行状态和共享内容的归属，实际布局待设计。
+数据根目录与工作区根目录分别由 `[paths].data_dir`、`[paths].workspace_dir` 配置。路径支持 `~`、绝对路径及相对于配置文件所在目录的路径，不相对于安装目录或启动工作目录。修改工作区根目录只影响新建 Agent；同版本已有 Agent 继续使用持久化路径，共享根目录随配置更新，不搬移文件。Codex session 与长期记忆继续位于用户 Codex home。
 
 ### 7.2 代码库自主操作
 
@@ -268,17 +274,21 @@ shared/
 
 ### 7.3 共享内容
 
-提供共享文件区域或等价的产物访问机制，用于文档、图片、测试报告及其他协作资料。
+共享目录位于 `<workspace-root>/shared`，用于文档、图片、测试报告及其他协作资料。每个 Agent 的 `AGENTS.md` 写入该目录的绝对路径和使用约定：主动共享时将文件放到该目录，在消息中提供准确路径，其他 Agent 按该引用读取。该约定不增加产物发布 API 或文件迁移。
 
 共享内容需要能够被消息准确引用。不可变版本、内容哈希、共享目录的写入规则和跨机器传输方式均为待设计事项。
 
-独立目录首先是文件归属约定。若要求强制阻止 Agent 访问其他私有目录，需要另外配置容器、沙箱或权限隔离；具体隔离强度尚未决定。
+独立目录是文件归属约定。本轮不增加操作系统权限隔离或沙箱层，继续使用 `danger-full-access` 与 `approvalPolicy: never`。
 
 ## 8. Harness 与 MCP 接入
 
 ### 8.1 执行接口
 
 本机 Codex 应自动发现，不要求用户手动配置 PATH。用户可在创建 Agent 的界面保存可执行文件路径，留空恢复自动发现；启动环境中的显式配置可覆盖界面设置。无法找到或运行 Codex 时，应显示原因与配置入口。此行为于 2026-10-01 确认。
+
+Isles 配置默认位于 `~/.Isles/config.toml`，可通过 `ISLES_CONFIG_FILE` 指定另一份文件。确定的字段为 `[server].port`（默认 `4310`）、`[paths].data_dir`（默认 `data`）、`[paths].workspace_dir`（默认 `workspace`）、可选 `[codex].binary_path` 与 `home`、`[dev].port`（默认 `5173`）。现有 `ISLES_*` 环境覆盖优先于 TOML，TOML 优先于默认值。省略 Codex home 时使用 `CODEX_HOME`，否则为 `~/.codex`；省略 executable 时自动发现，显式无效 executable 必须报错。
+
+手动编辑配置文件后重启应用及开发服务。保留现有 Codex 路径设置界面，不增加其他配置 UI。`GET/PUT /api/codex/config` 读写 TOML，响应包含 `configFilePath`；PUT 只修改 `binary_path`，`null` 删除该项，立即刷新检测且不打断已有原生进程。写入前重读最新 TOML，保留其他字段值后序列化整份文件，注释与排版不保留。平台资源继续按安装目录定位。
 
 优先接入能够持续运行、双向交互的原生接口，例如 app-server、ACP、REST + WebSocket 或 HTTP + SSE，而不是以一次性 exec 作为主要执行模型。
 

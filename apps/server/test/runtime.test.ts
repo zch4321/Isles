@@ -2,14 +2,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { agentRoot } from '../src/codex/environment.js';
-import { MockHarness, testCatalog, parseMessageText } from './helpers.js';
+import { MockHarness, testCatalog, testConfig, parseMessageText } from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -22,7 +22,7 @@ async function fixture() {
   const harness = new MockHarness();
   const open = () =>
     buildApp({
-      dataDir: dir,
+      config: testConfig(dir),
       catalog: testCatalog,
       clientFactory: harness.factory,
       runtimeUrl: 'http://127.0.0.1:1',
@@ -54,6 +54,44 @@ async function fixture() {
 }
 
 describe('durable runtime with simulated Codex', () => {
+  it('keeps individual workspaces and data-backed tokens while sharing files across Agents', async () => {
+    const { app, dir, create, open } = await fixture();
+    const first = await create('Writer');
+    const second = await create('Reader');
+    const { environment } = app.isles.runtime;
+    expect(first.workspace).toBe(join(dir, 'workspace', 'agents', first.id, 'workspace'));
+    expect(second.workspace).toBe(join(dir, 'workspace', 'agents', second.id, 'workspace'));
+    const payloadPath = join(environment.sharedDir, 'handoff.txt');
+    await writeFile(payloadPath, 'Shared handoff');
+    for (const agent of [first, second]) {
+      const rules = await readFile(join(agent.workspace, 'AGENTS.md'), 'utf8');
+      expect(rules).toContain(JSON.stringify(environment.sharedDir));
+      expect(await readFile(payloadPath, 'utf8')).toBe('Shared handoff');
+      await environment.token(agentRoot(dir, agent));
+      expect(await readdir(agentRoot(dir, agent))).toEqual(['isles-mcp-token']);
+    }
+    await app.close();
+    const configFile = join(dir, 'config.toml');
+    await writeFile(configFile, '[paths]\nworkspace_dir = "next-workspace"\n');
+    const restored = await open();
+    cleanups.push(() => restored.close());
+    await expect.poll(() => restored.isles.store.publicAgent(first.id).status).toBe('ready');
+    expect(restored.isles.store.publicAgent(first.id)).toMatchObject({
+      workspace: first.workspace,
+      threadId: first.threadId,
+    });
+    expect(await readFile(join(first.workspace, 'AGENTS.md'), 'utf8')).toContain(
+      JSON.stringify(join(dir, 'next-workspace', 'shared')),
+    );
+    const third = await restored.isles.runtime.createAgent({
+      name: 'New Agent',
+      model: 'test-model',
+      reasoningEffort: 'max',
+    });
+    await expect.poll(() => restored.isles.store.publicAgent(third.id).status).toBe('ready');
+    expect(third.workspace).toBe(join(dir, 'next-workspace', 'agents', third.id, 'workspace'));
+    expect(await readFile(payloadPath, 'utf8')).toBe('Shared handoff');
+  });
   it('refuses to run when native discovery does not load the workspace guidance, without replacing the thread', async () => {
     const { app, harness } = await fixture();
     harness.missingGuidance = true;
@@ -534,7 +572,7 @@ describe('durable runtime with simulated Codex', () => {
     const shared = group('共享群', [agent.id, other.id]);
     const outside = group('无关群', [other.id]);
     const token = await app.isles.runtime.environment.token(
-      agentRoot(app.isles.store.getAgent(agent.id)),
+      agentRoot(app.isles.runtime.environment.dataDir, app.isles.store.getAgent(agent.id)),
     );
     const address = app.server.address();
     if (!address || typeof address === 'string') throw new Error('No listener');

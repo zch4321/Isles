@@ -35,6 +35,7 @@ CREATE TABLE `channels` (
 	`name` text,
 	`agent_id` text,
 	`paused` integer DEFAULT false NOT NULL,
+	`next_message_seq` integer DEFAULT 1 NOT NULL,
 	`created_by` text NOT NULL,
 	`created_at` text NOT NULL,
 	`updated_at` text NOT NULL,
@@ -44,17 +45,17 @@ CREATE TABLE `channels` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `channels_private_agent` ON `channels` (`agent_id`);--> statement-breakpoint
 CREATE TABLE `deliveries` (
-	`message_id` text NOT NULL,
+	`seq` integer NOT NULL,
 	`agent_id` text NOT NULL,
 	`channel_id` text NOT NULL,
 	`status` text NOT NULL,
 	`run_id` text,
 	`turn_id` text,
 	`updated_at` text NOT NULL,
-	PRIMARY KEY(`message_id`, `agent_id`),
-	FOREIGN KEY (`message_id`) REFERENCES `messages`(`id`) ON UPDATE no action ON DELETE no action,
+	PRIMARY KEY(`channel_id`, `seq`, `agent_id`),
 	FOREIGN KEY (`agent_id`) REFERENCES `agents`(`id`) ON UPDATE no action ON DELETE no action,
-	FOREIGN KEY (`channel_id`) REFERENCES `channels`(`id`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`channel_id`) REFERENCES `channels`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`channel_id`,`seq`) REFERENCES `messages`(`channel_id`,`seq`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE INDEX `deliveries_queue` ON `deliveries` (`agent_id`,`status`);--> statement-breakpoint
@@ -71,20 +72,21 @@ CREATE TABLE `events` (
 );
 --> statement-breakpoint
 CREATE TABLE `messages` (
-	`id` text PRIMARY KEY NOT NULL,
 	`channel_id` text NOT NULL,
 	`seq` integer NOT NULL,
 	`sender` text NOT NULL,
 	`sender_id` text NOT NULL,
 	`body` text NOT NULL,
 	`client_id` text NOT NULL,
-	`reply_to` text,
+	`reply_to` integer,
 	`mentions` text DEFAULT '[]' NOT NULL,
 	`created_at` text NOT NULL,
-	FOREIGN KEY (`channel_id`) REFERENCES `channels`(`id`) ON UPDATE no action ON DELETE no action
+	PRIMARY KEY(`channel_id`, `seq`),
+	FOREIGN KEY (`channel_id`) REFERENCES `channels`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`channel_id`,`reply_to`) REFERENCES `messages`(`channel_id`,`seq`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "messages_positive_seq" CHECK("messages"."seq" > 0)
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `messages_sequence` ON `messages` (`channel_id`,`seq`);--> statement-breakpoint
 CREATE UNIQUE INDEX `messages_dedupe` ON `messages` (`channel_id`,`sender`,`sender_id`,`client_id`);--> statement-breakpoint
 CREATE TABLE `questions` (
 	`id` text PRIMARY KEY NOT NULL,

@@ -1,6 +1,6 @@
 # Isles（群岛）架构设计
 
-> 版本：0.10 · 日期：2026-10-02 · 状态：已实现 AGENTS.md 原生加载、文本消息协议与频道序号迁移
+> 版本：0.11 · 日期：2026-10-03 · 状态：TOML 配置、目录拆分与共享目录已实现，见 [验收记录](config-workspace-acceptance.md)
 >
 > 产品语义以 [需求文档](requirements.md) 为准。本文整理技术选型、模块边界和关键运行流程；已实现范围与阶段验收见 [实现计划](implementation-plan.md)。
 >
@@ -34,7 +34,7 @@ Isles 是一个让人类与独立 Agent 通过私聊、群聊协作的应用。�
 | 前端框架     | Vue 3                                | 聊天、Agent 管理和运行状态界面。                                           |
 | 组件         | shadcn-vue                           | 基础组件源码纳入项目，按产品交互调整。                                     |
 | 样式         | Tailwind CSS                         | 布局、主题和组件样式。                                                     |
-| 数据访问     | Drizzle ORM                          | TypeScript 表结构、查询与事务；配套 Drizzle Kit 管理迁移。                 |
+| 数据访问     | Drizzle ORM                          | TypeScript 表结构、查询与事务；配套 Drizzle Kit 管理 schema 基线。         |
 | 首批 harness | Codex → Kimi Code → Claude Agent SDK | 以原生接口为主，Codex 为主要接入；DSH 与第三方 Claude ACP 不纳入第一阶段。 |
 
 ### 2.2 已确认的实施基线
@@ -93,7 +93,7 @@ flowchart TB
 | 应用服务与领域规则 | Agent 创建、成员关系、消息接收、权限检查、产物发布。          | 使用存储及 Runtime 接口，不依赖具体 harness 协议。 |
 | Runtime            | 输入排队、即时唤醒、固定 session 绑定、执行互斥、停止与恢复。 | 通过 adapter 使用原生能力，通过存储记录运行事实。  |
 | Adapters           | 原生协议、事件转换、会话恢复、取消和审批回传。                | 保留各 harness 的能力差异，不自行创建聊天频道。    |
-| 存储               | 表结构、事务、迁移、投递记录、事件和查询。                    | 承担持久化，不决定群聊如何分工。                   |
+| 存储               | 表结构、事务、基线初始化、投递记录、事件和查询。              | 承担持久化，不决定群聊如何分工。                   |
 | 工作目录与产物     | Agent 目录、原生状态位置、文件引用及共享操作。                | 目录归属与操作系统隔离分别处理。                   |
 
 Web API 和 MCP 是不同入口。二者共用应用服务，但调用者分别是人类身份和 Agent 身份，权限不能因进入同一个服务函数而混同。
@@ -125,8 +125,9 @@ apps/
       config/
     resources/
       AGENTS.template.md # 产品 Agent 的唯一环境与协议规则模板
-    migrations/          # 可审查的数据库迁移
+    migrations/          # 可审查的当前数据库初始化基线
 packages/
+  config/                # Node 专用 TOML 配置、路径解析与设置保存
   contracts/             # 前后端共享的业务请求、响应与事件定义
 docs/
   requirements.md
@@ -171,7 +172,7 @@ Agent 还需要投递进度。浏览器已读、模型通过历史工具看见�
 
 消息以 `(channel_id, seq)` 为主键，投递以 `(channel_id, seq, agent_id)` 为主键并通过复合外键关联消息；回复通过同频道的复合外键关联。`channels.next_message_seq` 在发送事务中分配并递增，不根据剩余消息重新计算，因此删除消息不会重用序号。客户端操作 ID 与调用者身份一起用于请求去重；相同操作 ID 携带不同内容时返回冲突，重试不分配新序号。
 
-`0001_message_sequences` 在事务中映射旧 UUID 回复、投递和事件；启动迁移前通过 `VACUUM INTO` 备份旧库，异常引用导致回滚并报告备份路径。历史与 thread 绑定保留，详见 [升级与回退说明](message-protocol.md#已有数据升级)。
+当前 schema 基线直接保存频道序号及上述复合关联；不转换旧 UUID 数据库。用户明确宣布发布 v1 前不实现旧数据迁移或兼容性代码，详见 [数据版本边界](message-protocol.md#数据版本边界)。同版本持久化与固定 thread 恢复继续有效。
 
 ### 5.3 消息身份与内容
 
@@ -370,7 +371,7 @@ M1 已确定 Codex 使用 `danger-full-access` 和 `approvalPolicy: never`，不
 
 ### 9.2 首批原生接口
 
-Codex 的可执行文件发现与平台协议分开处理：先按显式配置、PATH 和已知安装目录查找并验证 CLI 版本，再将统一的命令与参数交给版本检测和 app-server 启动。Windows npm/pnpm 启动脚本解析为 Node 与 Codex JS 入口，保持 stdio 直连。Isles 自己的 `codex-settings.json` 保存界面路径设置，不写入用户的 Codex 配置目录；更新或手动重新检测会失效模型目录缓存，正在运行的 Agent 仍使用原进程和 session。
+Codex 的可执行文件发现与平台协议分开处理：先按显式配置、PATH 和已知安装目录查找并验证 CLI 版本，再将统一的命令与参数交给版本检测和 app-server 启动。Windows npm/pnpm 启动脚本解析为 Node 与 Codex JS 入口，保持 stdio 直连。Isles 自己的 `config.toml` 的 `[codex].binary_path` 保存界面路径设置，不写入用户的 Codex 配置目录；更新或手动重新检测会失效模型目录缓存，正在运行的 Agent 仍使用原进程和 session。显式无效路径报错，不静默退回自动发现。
 
 下表的接入路径与顺序已确定。Codex M1 已完成本地真实原生链路验证，Kimi 与 Claude 尚未接入。首先以 Codex 完成主要产品链路，然后接入 Kimi，最后接入 Claude Agent SDK。实施时锁定版本，保存该版本的协议依据并运行适配测试。
 
@@ -382,7 +383,7 @@ Codex 的可执行文件发现与平台协议分开处理：先按显式配置�
 
 使用子进程启动持续运行的 server 后，后续交互通过原生协议完成。连接重建与 session 恢复分别处理，不能把每条消息变成一次新的 CLI 执行。
 
-Codex `0.159.2` 的空 thread 仍需初始化历史才能恢复：`thread/start(ephemeral: false)` 返回后立即保存原生 ID，再以 `thread/inject_items` 写入一条中性的 assistant 标记 `Isles session initialized.`。该标记不含规则，不调用模型、不产生 Isles run。规则加载只依靠工作目录 AGENTS.md，并校验原生返回的 `instructionSources`；恢复与创建均不传 Isles 的 `developerInstructions`。已有原生历史不改写，旧规则注入方式创建的 thread 已验证可使用新文件和文本协议继续运行。
+Codex `0.159.2` 的空 thread 仍需初始化历史才能恢复：`thread/start(ephemeral: false)` 返回后立即保存原生 ID，再以 `thread/inject_items` 写入一条中性的 assistant 标记 `Isles session initialized.`。该标记不含规则，不调用模型、不产生 Isles run。规则加载只依靠工作目录 AGENTS.md，并校验原生返回的 `instructionSources`；恢复与创建均不传 Isles 的 `developerInstructions`。已有原生历史不改写。2026-10-02 曾验证旧注入方式 thread 的恢复，这是历史证据，不要求保留旧版本兼容代码。
 
 DSH 不纳入第一阶段，原有 DSH ACP 能力限制不再作为首批实现的前提。三个 adapter 仍需分别验证事件、恢复、审批和 MCP 能力；历史与共享产物以协作工具提供的能力为基础。
 
@@ -410,7 +411,7 @@ Claude Code 执行核心不因 ACP 桥接开源而成为开源 harness，其官�
 
 每个 Agent 的工作目录中以 `AGENTS.md` 持久保存身份、环境、文本消息格式、协作工具、权限及收信规则。Isles 准备文件，harness 原生加载；稳定说明不能以 Isles 的首次消息、`developerInstructions` 正文或历史注入作为来源。动态消息和状态仍走消息与 MCP。
 
-`resources/AGENTS.template.md` 是唯一规则模板，`runtime/guidance.ts` 填入 Agent 身份与工作目录并维护 `<!-- isles:begin -->` / `<!-- isles:end -->` 托管段。首次发现已有文件时插入托管段；以后仅替换该段，保留段外用户内容。重复或不配对的标记会报错，不覆盖原文件。`NativeEnvironment.prepareWorkspace()` 在原生进程启动前准备该文件和 `.isles-root`，原生全局指导继续由 Codex 自己加载。
+`resources/AGENTS.template.md` 是唯一规则模板，`runtime/guidance.ts` 填入 Agent 身份、工作目录与共享目录绝对路径，并维护 `<!-- isles:begin -->` / `<!-- isles:end -->` 托管段。共享规则说明主动共享文件的位置与消息引用方式，不引入额外文件权限。首次发现已有文件时插入托管段；以后仅替换该段，保留段外用户内容。重复或不配对的标记会报错，不覆盖原文件。`NativeEnvironment.prepareWorkspace()` 在原生进程启动前准备该文件和 `.isles-root`，原生全局指导继续由 Codex 自己加载。
 
 Runtime 在 `thread/start` / `thread/resume` 响应中检查 workspace 的 AGENTS.md 路径。未发现加载证据就报错，不退回规则注入、不发起模型 turn；创建响应的 thread ID 仍先保存，以免后续恢复意外创建替代 thread。修改规则模板或段外用户说明后，下次启动/恢复进程时生效，不打断正在执行的 turn。
 
@@ -418,30 +419,41 @@ Runtime 在 `thread/start` / `thread/resume` 响应中检查 workspace 的 AGENT
 
 ## 10. 文件、记忆与持久化
 
-建议使用一个可配置的数据根目录，下面的布局只表示归属关系：
+Isles 配置、平台数据与 Agent 工作文件分别定位。默认布局为：
 
 ```text
-<data-root>/
-  isles.sqlite
-  agents/
-    <agent-id>/
+~/.Isles/
+  config.toml            # Isles 配置，与用户 Codex 配置分开
+  data/
+    isles.sqlite
+    runtime-lock.sqlite
+    agents/<agent-id>/
+      isles-mcp-token    # 该 Agent 的 MCP 身份
+  workspace/
+    agents/<agent-id>/
       workspace/         # Agent 自主组织的工作文件与仓库
         AGENTS.md        # Isles 托管规则与用户补充
         .isles-root      # 原生项目根标记
-      isles-mcp-token    # 该 Agent 的 MCP 身份
-  shared/
-    <artifact-id>/       # 显式共享的产物
+    shared/              # Agent 主动共享的文件
 ```
 
 SQLite 保存平台业务事实，harness 自己的目录保存 session 和 memory；Codex 使用用户的 `CODEX_HOME`，不在数据根目录下。单独恢复聊天数据库不能替代恢复原生 session。
 
+默认配置文件为 `~/.Isles/config.toml`，`ISLES_CONFIG_FILE` 可以指定另一份。字段为 `[server].port`（`4310`）、`[paths].data_dir`（`data`）、`[paths].workspace_dir`（`workspace`）、可选 `[codex].binary_path` 与 `home`、`[dev].port`（`5173`）。现有环境覆盖优先于 TOML，TOML 优先于默认值；省略 Codex home 时使用 `CODEX_HOME`，否则为 `~/.codex`。路径支持 `~` 与绝对路径，相对路径从配置文件所在目录解析，不依赖启动 cwd 或安装位置。
+
+配置模块提供服务、开发代理、数据库命令与 Runtime 共用的解析结果。平台规则模板、schema 基线文件与 Web 静态资源继续从安装目录加载，不能随着数据或工作区根目录改变。
+
+手动修改 TOML 后重启应用及开发服务。保留既有 Codex 路径 UI；`GET/PUT /api/codex/config` 改为读写 TOML，响应提供 `configFilePath`。PUT 只更新 `binary_path`，`null` 删除该项；写入前重读最新 TOML 保留其他字段值，再序列化整份文件，注释和排版不保留。保存后立即刷新发现与模型缓存，不中断已运行的原生进程，不热应用文件中的其他字段。
+
+工作区路径在创建 Agent 时持久化，修改配置的工作区根目录仅用于新 Agent；同版本已有 Agent 继续使用已保存路径。共享根目录随当前配置更新，不自动搬移旧共享文件。共享目录绝对路径与使用/引用规则写入每个 Agent 的 `AGENTS.md`。本轮不增加设置 UI、文件迁移或权限/沙箱层，仍使用 full access 与 never。
+
 Agent 可以共用 harness 的配置、插件与长期记忆，但不能共用或误恢复彼此的 session。adapter 必须验证 session 的存储与恢复在共用配置下仍按 Agent 独立。
 
-产物建议通过服务发布后获得稳定引用，再发送到频道。是否复制快照、允许原地修改、启用哈希或版本，需要用户确认；历史消息引用可变文件时不能承诺内容永久不变。
+当前产物通过共享目录和消息中的准确路径引用。通过服务发布后获得稳定引用、复制快照、内容哈希或版本管理仍需用户确认；历史消息引用可变文件时不能承诺内容永久不变。
 
 Agent 可自行 clone、开发和执行 Git 操作。凭据分发与 push、PR、merge、deploy 的授权分别处理，群内 leader 的指示不自动覆盖用户授权范围。
 
-迁移文件与 schema 一起审查和版本管理。数据库升级应有备份及失败处理；运行中的 SQLite 备份应使用一致性备份机制，不能假设只复制主数据库文件就包含 WAL 中的全部数据。完整恢复还需要协调原生状态目录与产物文件的一致性。
+当前 schema 与初始化基线一起审查和版本管理。用户明确宣布发布 v1 前，不实现向后兼容、旧数据库转换或旧 JSON 配置迁移；旧 `.isles` 由用户手动清理。完整备份与恢复仍需协调 SQLite WAL、原生状态目录与产物文件，不能假设只复制主数据库文件包含全部运行中数据。
 
 ## 11. Web 交互边界
 
@@ -463,7 +475,7 @@ UI 同样要说明：不同编号 Agent 具有独立上下文；同一 Agent 的
 
 原生接入顺序已确定为 Codex → Kimi Code → Claude Agent SDK。更具体的产品阶段建议见 [实现计划](implementation-plan.md)：
 
-1. 搭建工程、Web 外壳、服务启动、配置和迁移入口。
+1. 搭建工程、Web 外壳、服务启动、配置和数据库基线入口。
 2. 依据 Codex 官方文档和版本对应的协议类型直接接入，完成单 Agent 私聊、固定 session、停止和恢复闭环；必要联调随功能开展，不单列前置协议验证阶段。
 3. 以多个 Codex Agent 实现 MCP 群聊、权限、消息路由和协作。
 4. 依次接入 Kimi 和 Claude Agent SDK，复用同一组行为契约并记录能力差异。

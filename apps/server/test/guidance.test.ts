@@ -75,19 +75,21 @@ describe('native workspace guidance and text protocol', () => {
     const userContent = '# My instructions\r\nKeep this exact text.\r\n';
     await writeFile(path, userContent);
     const agent = agentAt(workspace);
-    await prepareGuidance(agent);
+    const sharedDir = join(root, 'shared');
+    await prepareGuidance(agent, sharedDir);
     const first = await readFile(path, 'utf8');
     expect(first.endsWith(userContent)).toBe(true);
     expect(first).toContain('Private channel with the human: private-a');
     expect(first).toContain('channel + seq');
+    expect(first).toContain(`Shared directory for all Isles Agents: ${JSON.stringify(sharedDir)}`);
     expect(first.match(/^<!-- isles:end -->$/gm)).toHaveLength(1);
     expect(first).not.toContain('{{');
     await utimes(path, new Date(1_000), new Date(1_000));
     const before = await stat(path);
-    await prepareGuidance(agent);
+    await prepareGuidance(agent, sharedDir);
     expect((await stat(path)).mtimeMs).toBe(before.mtimeMs);
     await writeFile(path, `# Prefix\n${first}`);
-    await prepareGuidance({ ...agent, name: 'Updated' });
+    await prepareGuidance({ ...agent, name: 'Updated' }, sharedDir);
     const updated = await readFile(path, 'utf8');
     expect(updated.startsWith('# Prefix\n')).toBe(true);
     expect(updated.endsWith(userContent)).toBe(true);
@@ -101,7 +103,9 @@ describe('native workspace guidance and text protocol', () => {
     const path = join(root, 'AGENTS.md');
     const broken = '<!-- isles:begin -->\nUser content with no closing marker';
     await writeFile(path, broken);
-    await expect(prepareGuidance(agentAt(root))).rejects.toThrow('托管段标记无效');
+    await expect(prepareGuidance(agentAt(root), join(root, 'shared'))).rejects.toThrow(
+      '托管段标记无效',
+    );
     expect(await readFile(path, 'utf8')).toBe(broken);
   });
 });

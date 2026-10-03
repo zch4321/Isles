@@ -169,6 +169,9 @@ importers:
       '@eslint/js':
         specifier: 10.0.1
         version: 10.0.1(eslint@10.11.0(jiti@2.7.0))
+      '@isles/config':
+        specifier: workspace:*
+        version: link:packages/config
       '@playwright/test':
         specifier: 1.63.0
         version: 1.63.0
@@ -208,6 +211,9 @@ importers:
       '@fastify/static':
         specifier: 10.1.5
         version: 10.1.5
+      '@isles/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       '@isles/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -279,6 +285,9 @@ importers:
         specifier: 4.6.5
         version: 4.6.5
     devDependencies:
+      '@isles/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       '@tailwindcss/vite':
         specifier: 4.3.3
         version: 4.3.3(vite@8.3.1(@types/node@24.19.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
@@ -303,6 +312,22 @@ importers:
       vue-tsc:
         specifier: 3.3.11
         version: 3.3.11(typescript@6.0.3)
+
+  packages/config:
+    dependencies:
+      smol-toml:
+        specifier: ^1.9.0
+        version: 1.9.0
+      zod:
+        specifier: 4.6.5
+        version: 4.6.5
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.0
+        version: 24.19.0
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
   packages/contracts:
     dependencies:

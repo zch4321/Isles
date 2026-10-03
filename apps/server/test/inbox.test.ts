@@ -9,7 +9,13 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { agentRoot } from '../src/codex/environment.js';
-import { MockHarness, testCatalog, parseMessageText, type Envelope } from './helpers.js';
+import {
+  MockHarness,
+  testCatalog,
+  testConfig,
+  parseMessageText,
+  type Envelope,
+} from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -28,7 +34,7 @@ type History = Envelope['channels'][number] & {
 
 async function connect(app: App, agentId: string) {
   const token = await app.isles.runtime.environment.token(
-    agentRoot(app.isles.store.getAgent(agentId)),
+    agentRoot(app.isles.runtime.environment.dataDir, app.isles.store.getAgent(agentId)),
   );
   const address = app.server.address();
   if (!address || typeof address === 'string') throw new Error('No listener');
@@ -79,7 +85,7 @@ async function fixture() {
   const harness = new MockHarness();
   const open = async () => {
     const app = await buildApp({
-      dataDir: dir,
+      config: testConfig(dir),
       catalog: testCatalog,
       clientFactory: harness.factory,
     });

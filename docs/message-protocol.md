@@ -2,7 +2,7 @@
 
 > 日期：2026-10-02 · 自动 turn 输入、MCP `receive_messages` 和 `read_messages` 共用此格式。
 >
-> Agent 运行时的说明由 [AGENTS.md 模板](../apps/server/resources/AGENTS.template.md)生成到它的工作目录，交给 harness 原生加载。本文说明接口与迁移边界，不通过首次聊天注入。
+> Agent 运行时的说明由 [AGENTS.md 模板](../apps/server/resources/AGENTS.template.md)生成到它的工作目录，交给 harness 原生加载。本文说明接口与数据版本边界，不通过首次聊天注入。
 
 ## 消息标识与头部
 
@@ -59,8 +59,8 @@ MCP `send_message`、`read_messages`、`receive_messages` 的 `channelId` 接受
 
 REST 消息对象包含 `channelId`、`seq` 和数字或空值的 `replyTo`，不再包含 `id`；执行记录的输入使用 `messageSeqs`。浏览器列表与定位使用由频道和序号派生的键。MCP/HTTP 外层仍使用各自的结构化协议，消息正文展示不再嵌套一整套 JSON 元数据。
 
-## 已有数据升级
+## 数据版本边界
 
-`0001_message_sequences` 在一个事务中转换旧消息 UUID、回复、投递和事件关联，保持频道序号、执行记录、接收状态及事件游标。旧 UUID 只存在于升级前的备份或原生历史中；新的模型输入和接口以频道与序号为准。
+当前数据库基线直接使用频道与序号，不转换旧消息 UUID、回复、投递或事件关联。在用户明确宣布发布 v1 前，不提供旧版本兼容或旧数据迁移；旧 `.isles` 由用户手动清理，旧 JSON 配置及旧数据库转换不再支持。参见 [首发前数据政策](requirements.md#12-首次发布前的数据政策)。
 
-检测到旧消息表时，启动先用 SQLite `VACUUM INTO` 在同一数据目录生成 `isles-before-channel-seq-*.sqlite` 一致性备份。迁移遇到无法映射的引用时回滚并报告备份路径，不清空数据。发生失败时服务不会启动；修复原库中的异常关联后重试，或停服后将备份恢复到独立数据目录再处理。成功升级后不要用旧代码继续写新数据库；如需回退到旧代码，停服并使用升级前的备份。
+2026-10-02 的旧库备份与转换曾经实现并验收，事实保留在 [基础修复历史记录](foundation-repair-plan.md#8-验收记录)。该路径现已撤销，不是当前启动行为或升级保证。

@@ -6,6 +6,7 @@ import { StdioClient } from '../src/codex/client.js';
 import { NativeEnvironment } from '../src/codex/environment.js';
 import { findCodexExecutable, type NativeCommand } from '../src/codex/executable.js';
 import { Redactor } from '../src/errors.js';
+import { testConfig } from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -205,19 +206,15 @@ else require('node:readline').createInterface({input:process.stdin}).on('line', 
   it('persists the UI path and restores discovery when cleared, with startup overrides taking priority', async () => {
     const { root } = await fixture();
     const script = await file(join(root, 'codex.js'), "console.log('codex-cli 0.159.2');");
-    const settingsFile = join(root, 'settings', 'codex.json');
-    const first = new NativeEnvironment({ home: root, settingsFile });
+    const first = new NativeEnvironment(testConfig(root));
     await first.configure(script);
-    const restored = new NativeEnvironment({ home: root, settingsFile });
+    const restored = new NativeEnvironment(testConfig(root));
     expect((await restored.executable()).path).toBe(script);
-    vi.stubEnv('ISLES_CODEX_BIN', script);
-    const overridden = new NativeEnvironment({ home: root, settingsFile });
+    const overridden = new NativeEnvironment(testConfig(root, { ISLES_CODEX_BIN: script }));
     await overridden.configure(join(root, 'missing.exe'));
     expect((await overridden.executable()).path).toBe(script);
     expect((await overridden.configuration()).environmentBinaryPath).toBe(script);
     await overridden.configure(null);
-    expect(
-      (await new NativeEnvironment({ home: root, settingsFile }).configuration()).binaryPath,
-    ).toBeNull();
+    expect(new NativeEnvironment(testConfig(root)).configuration().binaryPath).toBeNull();
   });
 });

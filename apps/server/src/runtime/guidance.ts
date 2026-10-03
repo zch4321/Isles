@@ -8,12 +8,13 @@ const end = '<!-- isles:end -->';
 const templateUrl = new URL('../../resources/AGENTS.template.md', import.meta.url);
 
 /** Update only the managed section, keeping user guidance before/after it byte-for-byte. */
-export async function prepareGuidance(agent: AgentRecord) {
+export async function prepareGuidance(agent: AgentRecord, sharedDir: string) {
   const template = await readFile(templateUrl, 'utf8');
   const values: Record<string, string> = {
     AGENT_NAME: JSON.stringify(agent.name),
     AGENT_ID: agent.id,
     WORKSPACE: JSON.stringify(agent.workspace),
+    SHARED_DIR: JSON.stringify(sharedDir),
     PRIVATE_CHANNEL_ID: agent.channelId,
   };
   const content = template.replace(/\{\{([A-Z_]+)\}\}/g, (_match, key: string) => {

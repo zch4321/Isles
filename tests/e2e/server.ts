@@ -1,9 +1,10 @@
 // Browser tests use a simulated native adapter and real REST/SSE/MCP/storage.
 // This executable is test-only and is never selected by the production server.
+import { ConfigManager } from '@isles/config';
 import { randomBytes } from 'node:crypto';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { buildApp } from '../../apps/server/src/app.js';
 import { agentRoot } from '../../apps/server/src/codex/environment.js';
 import {
@@ -14,19 +15,29 @@ import {
   type Envelope,
 } from '../../apps/server/test/helpers.js';
 
-const dataDir = await mkdtemp(join(tmpdir(), 'isles-e2e-'));
+const root = process.env.ISLES_CONFIG_FILE
+  ? dirname(resolve(process.env.ISLES_CONFIG_FILE))
+  : await mkdtemp(join(tmpdir(), 'isles-e2e-'));
+if (!root.startsWith(join(tmpdir(), 'isles-')))
+  throw new Error('Browser tests require a temporary config directory');
+const config = new ConfigManager({
+  configFilePath: join(root, 'config.toml'),
+  homeDir: root,
+  environment: { ISLES_SERVER_PORT: process.env.ISLES_SERVER_PORT ?? '54310' },
+});
+const { dataDir } = config.current;
 const harness = new MockHarness();
 const tokens = new Map<string, string>();
 const factory = harness.factory;
 harness.factory = async (agent, handlers, baseUrl) => {
   const token = tokens.get(agent.id) ?? randomBytes(32).toString('hex');
   tokens.set(agent.id, token);
-  await mkdir(agentRoot(agent), { recursive: true });
-  await writeFile(join(agentRoot(agent), 'isles-mcp-token'), token, { mode: 0o600 });
+  await mkdir(agentRoot(dataDir, agent), { recursive: true });
+  await writeFile(join(agentRoot(dataDir, agent), 'isles-mcp-token'), token, { mode: 0o600 });
   return factory(agent, handlers, baseUrl);
 };
 const app = await buildApp({
-  dataDir,
+  config,
   catalog: testCatalog,
   clientFactory: harness.factory,
 });
@@ -98,10 +109,10 @@ harness.onTurn = (client) => {
       void publish();
     }, 250);
 };
-await app.listen({ host: '127.0.0.1', port: Number(process.env.ISLES_SERVER_PORT ?? 54310) });
+await app.listen({ host: config.current.host, port: config.current.port });
 const close = async () => {
   await app.close();
-  await rm(dataDir, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true });
 };
 process.once('SIGTERM', () => {
   void close();

@@ -62,6 +62,13 @@ const save = useMutation({
         <p class="text-xs leading-relaxed text-muted-foreground">
           此设置供本机所有 Agent 使用，保存后重新检测。留空恢复自动发现。
         </p>
+        <p
+          v-if="configuration.data.value"
+          class="text-xs leading-relaxed break-all text-muted-foreground"
+        >
+          配置文件：{{ configuration.data.value.configFilePath }}。保存会重新生成
+          TOML，保留其他配置值；文件中的其他修改重启后生效。
+        </p>
       </div>
       <p v-if="binaryPath" class="text-xs leading-relaxed break-all text-muted-foreground">
         当前使用：{{ binaryPath }}

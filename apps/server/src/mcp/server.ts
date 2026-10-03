@@ -29,7 +29,12 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
       const agent = store.getAgent(request.params.id);
       let token: string;
       try {
-        token = (await readFile(join(agentRoot(agent), 'isles-mcp-token'), 'utf8')).trim();
+        token = (
+          await readFile(
+            join(agentRoot(runtime.environment.dataDir, agent), 'isles-mcp-token'),
+            'utf8',
+          )
+        ).trim();
       } catch {
         throw new HttpError(401, 'MCP Agent 身份无效');
       }

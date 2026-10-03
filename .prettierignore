@@ -1,6 +1,7 @@
 node_modules
 dist
 .isles
+.isles-legacy-*
 pnpm-lock.yaml
 playwright-report
 test-results

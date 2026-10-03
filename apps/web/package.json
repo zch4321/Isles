@@ -21,6 +21,7 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@isles/config": "workspace:*",
     "@tailwindcss/vite": "4.3.3",
     "@types/node": "24.19.0",
     "@vitejs/plugin-vue": "6.0.9",

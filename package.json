@@ -9,20 +9,21 @@
     "pnpm": ">=12.4.1 <13"
   },
   "scripts": {
-    "dev": "pnpm --filter @isles/contracts build && pnpm -r --parallel --stream dev",
+    "dev": "pnpm --filter @isles/config --filter @isles/contracts build && pnpm -r --parallel --stream dev",
     "build": "pnpm -r build",
     "start": "pnpm --filter @isles/server start",
-    "typecheck": "pnpm --filter @isles/contracts build && pnpm -r typecheck",
+    "typecheck": "pnpm --filter @isles/config --filter @isles/contracts build && pnpm -r typecheck",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "pnpm --filter @isles/contracts build && vitest run",
-    "test:e2e": "playwright test",
-    "db:generate": "pnpm --filter @isles/server db:generate",
-    "db:migrate": "pnpm --filter @isles/server db:migrate",
+    "test": "pnpm --filter @isles/config --filter @isles/contracts build && vitest run",
+    "test:e2e": "pnpm --filter @isles/config --filter @isles/contracts build && playwright test",
+    "db:generate": "pnpm --filter @isles/config build && pnpm --filter @isles/server db:generate",
+    "db:migrate": "pnpm --filter @isles/config build && pnpm --filter @isles/server db:migrate",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
+    "@isles/config": "workspace:*",
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.63.0",
     "@types/node": "24.19.0",

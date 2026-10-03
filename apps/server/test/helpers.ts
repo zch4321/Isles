@@ -1,3 +1,4 @@
+import { ConfigManager } from '@isles/config';
 import type { Catalog } from '../src/codex/catalog.js';
 import {
   NativeRpcError,
@@ -8,6 +9,14 @@ import {
 import type { ClientFactory } from '../src/runtime/runtime.js';
 import type { AgentRecord } from '../src/storage/store.js';
 import { join } from 'node:path';
+
+/** A complete app config that never reads or writes the user's real Isles home. */
+export const testConfig = (root: string, environment: NodeJS.ProcessEnv = {}) =>
+  new ConfigManager({
+    configFilePath: join(root, 'config.toml'),
+    homeDir: root,
+    environment: { ISLES_DATA_DIR: root, ...environment },
+  });
 
 export const testCatalog: Catalog = {
   status: async () => ({

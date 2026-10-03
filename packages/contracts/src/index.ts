@@ -207,6 +207,7 @@ export const codexConfigurationUpdateSchema = z
   .strict();
 export const codexConfigurationSchema = codexConfigurationUpdateSchema.extend({
   environmentBinaryPath: z.string().nullable(),
+  configFilePath: z.string(),
 });
 export const eventSchema = z.object({
   id: z.number().int(),
