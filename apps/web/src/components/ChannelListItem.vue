@@ -19,7 +19,12 @@ const title = computed(() => channelTitle(props.channel, props.directory));
 const summary = computed(() => {
   if (agent.value?.status === 'running') return { text: '正在处理…', active: true };
   const running = members.value.filter((m) => m.status === 'running').length;
-  if (props.channel.kind === 'group' && running && !props.channel.paused)
+  if (
+    props.channel.kind === 'group' &&
+    running &&
+    !props.channel.paused &&
+    !props.channel.deletedAt
+  )
     return { text: `${running} 位成员正在处理…`, active: true };
   return {
     text:
@@ -32,7 +37,7 @@ const summary = computed(() => {
 const held = computed(() =>
   agent.value
     ? agent.value.status !== 'deleted' && agent.value.desiredState === 'stopped'
-    : props.channel.paused,
+    : props.channel.paused && !props.channel.deletedAt,
 );
 </script>
 
@@ -58,7 +63,11 @@ const held = computed(() =>
       </span>
       <span class="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
         <span :class="['truncate', summary.active && 'text-primary']">{{ summary.text }}</span>
-        <span v-if="agent?.status === 'deleted'" class="ml-auto shrink-0 text-[11px]">已删除</span>
+        <span
+          v-if="agent?.status === 'deleted' || channel.deletedAt"
+          class="ml-auto shrink-0 text-[11px]"
+          >已删除</span
+        >
         <template v-if="held">
           <Pause class="ml-auto size-3.5 shrink-0" aria-hidden="true" /><span class="sr-only">{{
             agent ? '已停止' : '已暂停'

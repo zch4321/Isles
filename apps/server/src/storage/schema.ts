@@ -195,7 +195,9 @@ export const questions = sqliteTable('questions', {
 
 export const events = sqliteTable('events', {
   id: integer().primaryKey({ autoIncrement: true }),
-  type: text({ enum: ['agent', 'channel', 'message', 'delivery', 'run', 'question'] }).notNull(),
+  type: text({
+    enum: ['agent', 'channel', 'group_deleted', 'message', 'delivery', 'run', 'question'],
+  }).notNull(),
   agentId: text('agent_id').references(() => agents.id),
   channelId: text('channel_id').references(() => channels.id),
   data: text().notNull(),

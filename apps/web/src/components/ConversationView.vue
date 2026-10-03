@@ -37,6 +37,9 @@ const members = computed(() =>
   (channel.value?.memberIds ?? []).flatMap((id) => directory.value.get(id) ?? []),
 );
 const ready = computed(() => channel.value && (channel.value.kind === 'group' || agent.value));
+const deletedGroup = computed(
+  () => channel.value?.kind === 'group' && Boolean(channel.value.deletedAt),
+);
 const questions = computed(() => detail.data.value?.questions ?? []);
 const working = computed(() =>
   members.value.filter(
@@ -103,7 +106,7 @@ const send = useMutation({
 
 const draft = useDraft(() => props.channelId);
 async function submit() {
-  if (agent.value?.status === 'deleted') return;
+  if (deletedGroup.value || agent.value?.status === 'deleted') return;
   const body = draft.value.trim();
   if (!body || send.isPending.value) return;
   try {
@@ -126,6 +129,8 @@ const placeholder = computed(() => {
     : `在 ${channel.value?.name ?? '群聊'} 中发言，输入 @ 提及成员…`;
 });
 const notice = computed(() => {
+  if (deletedGroup.value)
+    return { held: true, text: '群聊已删除，聊天历史和工作文件已保留。当前对话仅供查看。' };
   if (agent.value?.status === 'deleted')
     return { held: true, text: 'Agent 已删除，聊天历史和工作文件已保留。当前对话仅供查看。' };
   if (channel.value?.paused)
@@ -205,7 +210,11 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
             <X />
           </Button>
         </div>
-        <section v-if="questions.length" aria-label="等待回答的问题" class="space-y-2">
+        <section
+          v-if="questions.length && !deletedGroup"
+          aria-label="等待回答的问题"
+          class="space-y-2"
+        >
           <QuestionForm
             v-for="question in questions"
             :key="question.id"
@@ -223,7 +232,7 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
           <Clock3 v-else class="size-3.5 shrink-0" aria-hidden="true" />{{ notice.text }}
         </p>
         <MessageComposer
-          v-if="agent?.status !== 'deleted'"
+          v-if="!deletedGroup && agent?.status !== 'deleted'"
           v-model="draft"
           :placeholder="placeholder"
           :sending="send.isPending.value"

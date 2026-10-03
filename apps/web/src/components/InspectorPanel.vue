@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Channel } from '@isles/contracts';
 import { ArrowLeft, X } from '@lucide/vue';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useAgentDetail, useDirectory } from '@/api/queries';
 import AgentDetails from './AgentDetails.vue';
 import GroupDetails from './GroupDetails.vue';
@@ -13,6 +13,12 @@ defineEmits<{ close: [] }>();
 const directory = useDirectory();
 // In a group, a member can be opened for its own details and execution records.
 const member = ref<string | null>(null);
+watch(
+  () => props.channel.deletedAt,
+  (deletedAt) => {
+    if (deletedAt) member.value = null;
+  },
+);
 const agentId = computed(() =>
   props.channel.kind === 'private' ? props.channel.agentId : member.value,
 );

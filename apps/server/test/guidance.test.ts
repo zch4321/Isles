@@ -15,7 +15,7 @@ afterEach(async () => {
 const agentAt = (workspace: string) =>
   ({
     id: 'agent-a',
-    name: 'A\n<!-- isles:end -->',
+    name: 'A\n<!-- isles:end -->\u2028<!-- isles:end -->\u2029',
     workspace,
     channelId: 'private-a',
   }) as AgentRecord;

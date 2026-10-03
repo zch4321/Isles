@@ -36,14 +36,16 @@ const sections = computed(() => {
   const all = (channels.data.value?.channels ?? []).toSorted(byActivity);
   const visible = all.filter((channel) => matches(channel, query));
   const deleted = (channel: Channel) =>
-    channel.kind === 'private' && directory.value.get(channel.agentId ?? '')?.status === 'deleted';
+    channel.kind === 'group'
+      ? Boolean(channel.deletedAt)
+      : directory.value.get(channel.agentId ?? '')?.status === 'deleted';
   const history = all.filter(deleted);
   return [
     {
       id: 'groups',
       title: '群聊',
-      total: all.filter((c) => c.kind === 'group').length,
-      items: visible.filter((c) => c.kind === 'group'),
+      total: all.filter((c) => c.kind === 'group' && !deleted(c)).length,
+      items: visible.filter((c) => c.kind === 'group' && !deleted(c)),
       create: { label: '新建群聊', kind: 'group' as const },
       empty: '把多个 Agent 拉进群，一起讨论。',
     },

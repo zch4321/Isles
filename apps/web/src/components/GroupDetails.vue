@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import type { Channel } from '@isles/contracts';
 import { useMutation, useQueryClient } from '@tanstack/vue-query';
-import { ChevronRight, LoaderCircle, UserMinus, UserPlus } from '@lucide/vue';
+import { ChevronRight, LoaderCircle, Trash2, UserMinus, UserPlus } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
 import { removeMember, updateChannel } from '@/api/isles';
 import { invalidateAll } from '@/api/queries';
 import GroupDialog from './GroupDialog.vue';
+import DeleteGroupDialog from './DeleteGroupDialog.vue';
 import ParticipantAvatar from './ParticipantAvatar.vue';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -39,13 +40,33 @@ const remove = useMutation({
   onSettled: () => invalidateAll(queryClient),
 });
 const adding = ref(false);
+const deleteOpen = ref(false);
+watch(
+  () => props.channel.deletedAt,
+  (deletedAt) => {
+    if (deletedAt) {
+      adding.value = false;
+      deleteOpen.value = false;
+    }
+  },
+);
 const error = computed(() => rename.error.value?.message ?? remove.error.value?.message);
 </script>
 
 <template>
   <div>
     <section class="space-y-3 border-b p-4">
-      <form class="grid gap-2" @submit.prevent="rename.mutate()">
+      <p
+        v-if="channel.deletedAt"
+        class="rounded-md border bg-muted/50 px-3 py-2.5 text-[13px] leading-relaxed"
+      >
+        此群聊已删除，无法恢复讨论。聊天历史和工作文件已保留，成员 Agent 仍可继续工作。
+      </p>
+      <div v-if="channel.deletedAt" class="grid gap-2">
+        <span class="text-[13px] font-semibold">群名</span>
+        <p class="text-[13px] break-words">{{ channel.name }}</p>
+      </div>
+      <form v-else class="grid gap-2" @submit.prevent="rename.mutate()">
         <label for="group-rename" class="text-[13px] font-semibold">群名</label>
         <div class="flex gap-2">
           <Input id="group-rename" v-model="name" required maxlength="80" autocomplete="off" />
@@ -61,14 +82,26 @@ const error = computed(() => rename.error.value?.message ?? remove.error.value?.
       </form>
       <dl class="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-[13px]">
         <dt class="text-muted-foreground">讨论</dt>
-        <dd>{{ channel.paused ? '已暂停自动投递，仍可主动读取' : '进行中' }}</dd>
+        <dd>
+          {{
+            channel.deletedAt
+              ? '已删除，历史仅供查看'
+              : channel.paused
+                ? '已暂停自动投递，仍可主动读取'
+                : '进行中'
+          }}
+        </dd>
         <dt class="text-muted-foreground">创建</dt>
         <dd>{{ creator }} · {{ formatDateTime(channel.createdAt) }}</dd>
+        <template v-if="channel.deletedAt">
+          <dt class="text-muted-foreground">删除</dt>
+          <dd>{{ formatDateTime(channel.deletedAt) }}</dd>
+        </template>
       </dl>
       <p v-if="error" role="alert" class="text-xs text-destructive">{{ error }}</p>
     </section>
 
-    <section class="p-4">
+    <section v-if="!channel.deletedAt" class="p-4">
       <div class="flex items-center gap-2">
         <h3 class="text-[13px] font-semibold">成员</h3>
         <span class="text-xs text-muted-foreground tabular-nums">{{ members.length }}</span>
@@ -116,6 +149,17 @@ const error = computed(() => rename.error.value?.message ?? remove.error.value?.
         群里还没有 Agent，添加成员后才会有人回复。
       </p>
     </section>
-    <GroupDialog v-model:open="adding" :channel="channel" />
+    <section v-if="!channel.deletedAt" class="border-t p-4">
+      <Button
+        type="button"
+        variant="outline"
+        class="w-full text-destructive hover:text-destructive"
+        @click="deleteOpen = true"
+      >
+        <Trash2 />删除群聊
+      </Button>
+    </section>
+    <GroupDialog v-if="!channel.deletedAt" v-model:open="adding" :channel="channel" />
+    <DeleteGroupDialog v-model:open="deleteOpen" :channel="channel" />
   </div>
 </template>

@@ -22,7 +22,7 @@ export function useDirectory() {
 }
 
 export const useChannels = () =>
-  useQuery({ queryKey: ['channels'], queryFn: fetchChannels, refetchInterval: 10_000 });
+  useQuery({ queryKey: ['channels'], queryFn: () => fetchChannels(true), refetchInterval: 10_000 });
 
 export function useChannelDetail(id: MaybeRefOrGetter<string>) {
   return useQuery({

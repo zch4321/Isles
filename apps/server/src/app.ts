@@ -169,7 +169,13 @@ export async function buildApp(options: AppOptions) {
       return { status: 'answered' };
     },
   );
-  app.get('/api/channels', () => ({ channels: store.listChannels(), cursor: store.cursor() }));
+  app.get('/api/channels', (request) => {
+    const { includeDeleted } = z
+      .object({ includeDeleted: z.enum(['true', 'false']).optional() })
+      .strict()
+      .parse(request.query);
+    return { channels: store.listChannels(includeDeleted === 'true'), cursor: store.cursor() };
+  });
   app.post('/api/channels', (request, reply) =>
     reply.code(201).send(runtime.createGroup('user', createGroupSchema.parse(request.body))),
   );
@@ -178,6 +184,9 @@ export async function buildApp(options: AppOptions) {
   );
   app.patch<{ Params: { id: string } }>('/api/channels/:id', (request) =>
     runtime.updateChannel(request.params.id, updateChannelSchema.parse(request.body)),
+  );
+  app.delete<{ Params: { id: string } }>('/api/channels/:id', (request) =>
+    runtime.deleteGroup(request.params.id),
   );
   app.post<{ Params: { id: string } }>('/api/channels/:id/members', (request) =>
     runtime.addMembers(request.params.id, 'user', addMembersSchema.parse(request.body).agentIds),

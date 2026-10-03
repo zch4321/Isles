@@ -75,7 +75,8 @@ export const updateChannelSchema = z
     name: z.string().trim().min(1).max(80).optional(),
     paused: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, { message: '请至少修改一个字段' });
 export const addMembersSchema = z
   .object({ agentIds: z.array(z.string().uuid()).min(1).max(50) })
   .strict();
@@ -125,6 +126,8 @@ export const channelSchema = z.object({
   /** The Agent of a private chat. */
   agentId: z.string().nullable(),
   paused: z.boolean(),
+  /** Terminal group deletion; retained history stays readable to the human. */
+  deletedAt: z.string().nullable(),
   createdBy: z.string(),
   memberIds: z.array(z.string()),
   lastMessage: messageSchema.nullable(),
@@ -220,7 +223,7 @@ export const codexConfigurationSchema = codexConfigurationUpdateSchema.extend({
 });
 export const eventSchema = z.object({
   id: z.number().int(),
-  type: z.enum(['agent', 'channel', 'message', 'delivery', 'run', 'question']),
+  type: z.enum(['agent', 'channel', 'group_deleted', 'message', 'delivery', 'run', 'question']),
   agentId: z.string().uuid().nullable(),
   channelId: z.string().uuid().nullable(),
   data: z.record(z.string(), z.unknown()),

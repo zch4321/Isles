@@ -80,14 +80,25 @@ const running = computed(() => props.members.filter((m) => m.status === 'running
         <div class="flex min-w-0 items-center gap-2">
           <h1 class="truncate text-[15px] font-semibold">{{ channel.name }}</h1>
           <span
-            v-if="channel.paused"
+            v-if="channel.deletedAt"
+            data-testid="group-status"
+            class="inline-flex shrink-0 items-center rounded-full border px-2 py-px text-[11px] leading-4 font-medium text-muted-foreground"
+            >已删除</span
+          >
+          <span
+            v-else-if="channel.paused"
             data-testid="group-status"
             class="inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-px text-[11px] leading-4 font-medium text-muted-foreground"
             ><Pause class="size-3" aria-hidden="true" />已暂停</span
           >
         </div>
         <p class="truncate text-xs text-muted-foreground">
-          {{ members.length }} 位成员<template v-if="running"> · {{ running }} 位执行中</template>
+          <template v-if="channel.deletedAt">聊天历史仅供查看</template>
+          <template v-else
+            >{{ members.length }} 位成员<template v-if="running">
+              · {{ running }} 位执行中</template
+            ></template
+          >
         </p>
       </div>
       <div class="flex -space-x-1.5 max-sm:hidden">
@@ -101,7 +112,7 @@ const running = computed(() => props.members.filter((m) => m.status === 'running
         />
       </div>
       <Button
-        v-if="channel.paused"
+        v-if="!channel.deletedAt && channel.paused"
         variant="outline"
         size="sm"
         aria-label="继续讨论"
@@ -111,7 +122,7 @@ const running = computed(() => props.members.filter((m) => m.status === 'running
         <LoaderCircle v-if="controlPending" class="animate-spin" /><Play v-else />继续
       </Button>
       <Button
-        v-else
+        v-else-if="!channel.deletedAt"
         variant="outline"
         size="sm"
         aria-label="暂停讨论"

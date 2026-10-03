@@ -30,6 +30,9 @@ const report = {
   tools: [] as { agentId: string; name: string; arguments: Record<string, unknown> }[],
   history: '',
   inbox: '',
+  deletedAt: null as string | null,
+  deletedHistory: [] as unknown[],
+  remainingHistory: '',
   checks: [] as string[],
   error: null as string | null,
 };
@@ -106,7 +109,12 @@ async function until(predicate: () => boolean, label: string) {
   }
   throw new Error(`Timed out: ${label}`);
 }
-async function tool(agent: Agent, name: string, args: Record<string, unknown> = {}) {
+async function tool(
+  agent: Agent,
+  name: string,
+  args: Record<string, unknown> = {},
+  expectError = false,
+) {
   const native = current().isles.runtime.environment;
   const token = (
     await readFile(join(agentRoot(native.dataDir, agent), 'isles-mcp-token'), 'utf8')
@@ -131,7 +139,7 @@ async function tool(agent: Agent, name: string, args: Record<string, unknown> = 
   const rpc = (await response.json()) as {
     result: { isError?: boolean; content: { text: string }[] };
   };
-  assert.ok(!rpc.result.isError, JSON.stringify(rpc.result));
+  assert.equal(Boolean(rpc.result.isError), expectError, JSON.stringify(rpc.result));
   return rpc.result.content[0]!.text;
 }
 async function configHash() {
@@ -169,6 +177,7 @@ try {
     report.agents.push({ id: agent.id, threadId: app.isles.store.publicAgent(agent.id).threadId });
     const rules = await readFile(join(agent.workspace, 'AGENTS.md'), 'utf8');
     assert.ok(rules.includes('Private channel with the human: private'));
+    assert.ok(rules.includes('The human can delete a group.'));
     assert.ok(
       !rules.includes('Agent ID:') &&
         !rules.includes('Private channel with the human: ' + agent.channelId),
@@ -261,6 +270,76 @@ try {
   report.checks.push(
     'history and paused inbox use names while directory responses preserve full IDs',
   );
+  const deletedAck = `DELETED_GROUP_ACK_${marker}`;
+  progress('group deletion preserves an in-flight native turn and private access');
+  const inFlight = app.isles.runtime.send(group.id, {
+    body: `Acceptance check: this group is about to be deleted externally. Do not post here. Query list_channels to confirm the remaining group, then send_message to private with body exactly ${deletedAck}. Your Agent remains available. End your turn.`,
+    clientId: randomUUID(),
+  });
+  await until(
+    () =>
+      app!.isles.store
+        .agentDetail(reader.id)
+        .runs.some((run) => run.status === 'running' && run.turnId !== null),
+    'native turn accepted before deletion',
+  );
+  const activeRunId = app.isles.store
+    .agentDetail(reader.id)
+    .runs.find((run) => run.status === 'running')!.id;
+  const deleted = await app.inject({ method: 'DELETE', url: `/api/channels/${group.id}` });
+  assert.equal(deleted.statusCode, 200, deleted.body);
+  report.deletedAt = deleted.json<{ deletedAt: string | null }>().deletedAt;
+  assert.ok(report.deletedAt);
+  assert.deepEqual(app.isles.store.publicChannel(group.id).memberIds, []);
+  assert.equal(app.isles.store.publicAgent(reader.id).desiredState, 'running');
+  assert.ok(
+    (await tool(reader, 'read_messages', { channelId: group.id }, true)).includes('群聊已删除'),
+  );
+  assert.ok(
+    (
+      await tool(
+        reader,
+        'send_message',
+        { channelId: group.id, body: 'Must be rejected after deletion.' },
+        true,
+      )
+    ).includes('群聊已删除'),
+  );
+  await until(
+    () =>
+      app!.isles.store
+        .listMessages(reader.channelId)
+        .some((message) => message.sender === 'agent' && message.body === deletedAck) &&
+      app!.isles.store.publicAgent(reader.id).status === 'ready',
+    'private reply after group deletion',
+  );
+  assert.equal(app.isles.store.getRun(activeRunId).status, 'completed');
+  assert.equal(
+    app.isles.store
+      .listMessages(group.id)
+      .find((message) => message.seq === inFlight.seq)!
+      .deliveries.find((delivery) => delivery.agentId === reader.id)!.status,
+    'cancelled',
+  );
+  const remaining = JSON.parse(await tool(reader, 'list_channels')).channels as {
+    channel_id: string;
+  }[];
+  assert.ok(!remaining.some((channel) => channel.channel_id === group.id));
+  assert.ok(remaining.some((channel) => channel.channel_id === other.id));
+  const resumeDeleted = await app.inject({
+    method: 'PATCH',
+    url: `/api/channels/${group.id}`,
+    payload: { paused: false },
+  });
+  assert.equal(resumeDeleted.statusCode, 410);
+  report.deletedHistory = app.isles.store.channelDetail(group.id).messages;
+  report.remainingHistory = await tool(reader, 'read_messages', {
+    channelId: other.id,
+    limit: 100,
+  });
+  report.checks.push(
+    'deleting a group revokes MCP access and cancels its delivery while the same native turn completes a private reply',
+  );
   const threadId = app.isles.store.publicAgent(reader.id).threadId;
   await app.close();
   app = undefined;
@@ -269,13 +348,18 @@ try {
   await until(() => app!.isles.store.publicAgent(reader.id).status === 'ready', 'reader restored');
   assert.equal(app.isles.store.publicAgent(reader.id).threadId, threadId);
   assert.equal(app.isles.store.publicAgent(peer.id).status, 'stopped');
+  assert.equal(app.isles.store.publicChannel(group.id).deletedAt, report.deletedAt);
+  assert.deepEqual(app.isles.store.channelDetail(group.id).messages, report.deletedHistory);
   assert.equal(
-    await tool(reader, 'read_messages', { channelId: group.id, limit: 100 }),
-    report.history,
+    await tool(reader, 'read_messages', { channelId: other.id, limit: 100 }),
+    report.remainingHistory,
+  );
+  assert.ok(
+    (await tool(reader, 'read_messages', { channelId: group.id }, true)).includes('群聊已删除'),
   );
   assert.equal(await configHash(), before);
   report.checks.push(
-    'same-thread restart preserves readable name history, stopped peer and unchanged shared Codex configuration',
+    'same-thread restart preserves deleted group history and access revocation, the remaining group, stopped peer and shared Codex configuration',
   );
   report.success = true;
 } catch (error) {

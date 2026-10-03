@@ -216,6 +216,9 @@ export class Runtime {
     this.mayOrganize(actor);
     return this.store.createGroup(actor, input.name, input.memberIds);
   }
+  deleteGroup(id: string) {
+    return this.store.deleteGroup(id);
+  }
   addMembers(channelId: string, actor: Actor, agentIds: string[]) {
     this.mayOrganize(actor);
     this.store.addMembers(channelId, actor, agentIds);

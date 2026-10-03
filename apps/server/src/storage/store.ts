@@ -15,7 +15,7 @@ import type {
   RunStatus,
   UserQuestion,
 } from '@isles/contracts';
-import { and, asc, desc, eq, gt, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, lt, ne, notExists, or, sql } from 'drizzle-orm';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -287,7 +287,28 @@ export class Store {
   private group(id: string): ChannelRecord {
     const channel = this.getChannel(id);
     if (channel.kind !== 'group') throw new HttpError(400, '私聊不能修改名称或成员');
+    if (this.groupDeletedAt(id)) throw new HttpError(410, '群聊已删除');
     return channel;
+  }
+  /** Permanent terminal marker; event retention must always preserve group_deleted rows. */
+  groupDeletedAt(id: string): string | null {
+    return (
+      this.db
+        .select({ createdAt: events.createdAt })
+        .from(events)
+        .where(and(eq(events.type, 'group_deleted'), eq(events.channelId, id)))
+        .orderBy(asc(events.id))
+        .limit(1)
+        .get()?.createdAt ?? null
+    );
+  }
+  private liveChannel() {
+    return notExists(
+      this.db
+        .select({ id: events.id })
+        .from(events)
+        .where(and(eq(events.type, 'group_deleted'), eq(events.channelId, channels.id))),
+    );
   }
   memberIds(channelId: string): string[] {
     return this.db
@@ -318,14 +339,16 @@ export class Store {
       .all();
     return channelSchema.parse({
       ...channel,
+      deletedAt: channel.kind === 'group' ? this.groupDeletedAt(id) : null,
       memberIds: this.memberIds(id),
       lastMessage: this.withDeliveries(last)[0] ?? null,
     });
   }
-  listChannels(): Channel[] {
+  listChannels(includeDeleted = false): Channel[] {
     return this.db
       .select({ id: channels.id })
       .from(channels)
+      .where(includeDeleted ? undefined : this.liveChannel())
       .orderBy(asc(channels.createdAt))
       .all()
       .map((r) => this.publicChannel(r.id));
@@ -334,7 +357,8 @@ export class Store {
     return this.db
       .select({ id: channelMembers.channelId })
       .from(channelMembers)
-      .where(eq(channelMembers.agentId, agentId))
+      .innerJoin(channels, eq(channelMembers.channelId, channels.id))
+      .where(and(eq(channelMembers.agentId, agentId), this.liveChannel()))
       .all()
       .map((r) => this.publicChannel(r.id));
   }
@@ -377,6 +401,36 @@ export class Store {
       this.event('channel', { channelId: id }, { created: true });
     });
     return this.publicChannel(id);
+  }
+  /** Retire only this group; merged native turns and member identities remain intact. */
+  deleteGroup(id: string): Channel {
+    return this.change(() => {
+      const channel = this.getChannel(id);
+      if (channel.kind !== 'group') throw new HttpError(400, '私聊不能删除');
+      if (this.groupDeletedAt(id)) return this.publicChannel(id);
+      this.systemMessage(id, '用户删除了群聊，聊天历史已保留。');
+      this.db
+        .update(channels)
+        .set({ paused: true, updatedAt: now() })
+        .where(eq(channels.id, id))
+        .run();
+      this.db.delete(channelMembers).where(eq(channelMembers.channelId, id)).run();
+      const cancelled = this.db
+        .update(deliveries)
+        .set({ status: 'cancelled', updatedAt: now() })
+        .where(
+          and(
+            eq(deliveries.channelId, id),
+            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'accepted']),
+          ),
+        )
+        .returning({ agentId: deliveries.agentId })
+        .all();
+      this.event('group_deleted', { channelId: id }, { paused: true });
+      for (const agentId of new Set(cancelled.map((d) => d.agentId)))
+        this.event('delivery', { agentId, channelId: id }, { status: 'cancelled' });
+      return this.publicChannel(id);
+    });
   }
   updateChannel(id: string, update: { name?: string | undefined; paused?: boolean | undefined }) {
     const channel = this.group(id);
@@ -496,6 +550,7 @@ export class Store {
   }
   /** Record only the messages actually returned, without changing existing run outcomes. */
   private recordReceipt(agentId: string, refs: MessageRef[]) {
+    refs = refs.filter((ref) => !this.groupDeletedAt(ref.channelId));
     if (!refs.length) return;
     const updated = this.db
       .update(deliveries)
@@ -534,6 +589,7 @@ export class Store {
           and(
             eq(deliveries.agentId, agentId),
             eq(deliveries.status, 'queued'),
+            this.liveChannel(),
             query.channelId === undefined ? undefined : eq(channels.id, query.channelId),
           ),
         )
@@ -604,6 +660,8 @@ export class Store {
   }
   saveMessage(channelId: string, sender: Sender, input: MessageInput): Message {
     const channel = this.getChannel(channelId);
+    if (channel.kind === 'group' && this.groupDeletedAt(channelId))
+      throw new HttpError(409, '群聊已删除，历史只读');
     if (channel.kind === 'private' && this.getAgent(channel.agentId!).status === 'deleted')
       throw new HttpError(409, '该 Agent 已删除，私聊历史只读');
     const senderId = sender.type === 'user' ? USER : sender.id;
@@ -667,6 +725,7 @@ export class Store {
             eq(deliveries.agentId, agentId),
             eq(deliveries.status, 'queued'),
             eq(channels.paused, false),
+            this.liveChannel(),
             ne(messages.sender, 'system'),
           ),
         )
@@ -691,6 +750,7 @@ export class Store {
             eq(deliveries.agentId, agentId),
             eq(deliveries.status, 'queued'),
             eq(channels.paused, false),
+            this.liveChannel(),
           ),
         )
         .orderBy(asc(channels.createdAt), asc(messages.seq))
@@ -753,18 +813,6 @@ export class Store {
       };
     });
   }
-  private runChannels(runId: string) {
-    return [
-      ...new Set(
-        this.db
-          .select({ channelId: deliveries.channelId })
-          .from(deliveries)
-          .where(eq(deliveries.runId, runId))
-          .all()
-          .map((r) => r.channelId),
-      ),
-    ];
-  }
   acceptRun(runId: string, turnId: string) {
     this.change(() => {
       const run = this.getRun(runId);
@@ -774,12 +822,15 @@ export class Store {
         .set({ turnId, status: run.status === 'waiting' ? 'waiting' : 'running' })
         .where(eq(runs.id, runId))
         .run();
-      this.db
+      const accepted = this.db
         .update(deliveries)
         .set({ turnId, status: 'accepted', updatedAt: now() })
-        .where(eq(deliveries.runId, runId))
-        .run();
-      for (const channelId of this.runChannels(runId))
+        .where(
+          and(eq(deliveries.runId, runId), inArray(deliveries.status, ['submitting', 'accepted'])),
+        )
+        .returning({ channelId: deliveries.channelId })
+        .all();
+      for (const channelId of new Set(accepted.map((d) => d.channelId)))
         this.event('delivery', { agentId: run.agentId, channelId }, { runId, status: 'accepted' });
       this.event('run', { agentId: run.agentId }, { runId });
     });
@@ -798,18 +849,21 @@ export class Store {
         .set({ status, error, finishedAt: now() })
         .where(eq(runs.id, runId))
         .run();
-      this.db
+      const finished = this.db
         .update(deliveries)
         .set({ status: delivery, updatedAt: now() })
-        .where(eq(deliveries.runId, runId))
-        .run();
+        .where(
+          and(eq(deliveries.runId, runId), inArray(deliveries.status, ['submitting', 'accepted'])),
+        )
+        .returning({ channelId: deliveries.channelId })
+        .all();
       this.db
         .update(questions)
         .set({ status: 'expired' })
         .where(and(eq(questions.runId, runId), eq(questions.status, 'pending')))
         .run();
       this.event('run', { agentId: run.agentId }, { runId, status });
-      for (const channelId of this.runChannels(runId))
+      for (const channelId of new Set(finished.map((d) => d.channelId)))
         this.event('delivery', { agentId: run.agentId, channelId }, { runId, status: delivery });
       this.event('question', { agentId: run.agentId }, { runId });
     });

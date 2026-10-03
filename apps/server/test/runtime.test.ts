@@ -1016,6 +1016,200 @@ describe('durable runtime with simulated Codex', () => {
     ).toMatch(/暂停了群讨论[\s\S]*继续了群讨论/);
   });
 
+  it('deletes one group without interrupting a merged turn, its question or later private work, and keeps history after restart', async () => {
+    const { app, harness, create, group, say, ready, open } = await fixture();
+    const agent = await create('Shared Agent');
+    await app.isles.runtime.stop(agent.id);
+    const removed = group('Delete this group', [agent.id]);
+    const retained = group('Keep this group', [agent.id]);
+    const groupInput = say(removed.id, 'Group input');
+    const privateInput = say(agent.channelId, 'Private input');
+    const retainedInput = say(retained.id, 'Other group input');
+    const file = join(agent.workspace, 'group-retained.txt');
+    const sharedFile = join(app.isles.runtime.environment.sharedDir, 'group-retained.txt');
+    await writeFile(file, 'personal');
+    await writeFile(sharedFile, 'shared');
+    expect(
+      (await app.inject({ method: 'PATCH', url: `/api/channels/${removed.id}`, payload: {} }))
+        .statusCode,
+    ).toBe(400);
+    await app.isles.runtime.resume(agent.id);
+    await expect.poll(() => harness.turns).toBe(1);
+    const client = harness.latest(agent.id);
+    client.question();
+    const question = app.isles.store.agentDetail(agent.id).questions[0]!;
+    const active = app.isles.store.agentDetail(agent.id).runs[0]!;
+    const response = await app.inject({ method: 'DELETE', url: `/api/channels/${removed.id}` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      id: removed.id,
+      name: removed.name,
+      deletedAt: expect.any(String),
+      paused: true,
+      memberIds: [],
+    });
+    expect(client.closed).toBe(false);
+    expect(client.calls.some((call) => call.method === 'turn/interrupt')).toBe(false);
+    expect(app.isles.store.publicAgent(agent.id)).toMatchObject({
+      status: 'running',
+      desiredState: 'running',
+      threadId: agent.threadId,
+      workspace: agent.workspace,
+    });
+    expect(app.isles.store.agentDetail(agent.id).questions).toContainEqual(question);
+    expect(app.isles.store.channelDetail(agent.channelId).questions).toContainEqual(question);
+    expect(app.isles.store.channelDetail(removed.id).questions).toEqual([]);
+    expect(
+      (await app.inject('/api/channels'))
+        .json()
+        .channels.map((channel: { id: string }) => channel.id),
+    ).not.toContain(removed.id);
+    expect(
+      (await app.inject('/api/channels?includeDeleted=true'))
+        .json()
+        .channels.map((channel: { id: string }) => channel.id),
+    ).toContain(removed.id);
+    expect((await app.inject('/api/channels?includeDeleted=invalid')).statusCode).toBe(400);
+    for (const payload of [{ name: 'Revive' }, { paused: false }])
+      expect(
+        (await app.inject({ method: 'PATCH', url: `/api/channels/${removed.id}`, payload }))
+          .statusCode,
+      ).toBe(410);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/api/channels/${removed.id}/messages`,
+          payload: { body: 'Rejected', clientId: 'deleted-group' },
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/api/channels/${removed.id}/members`,
+          payload: { agentIds: [agent.id] },
+        })
+      ).statusCode,
+    ).toBe(410);
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/channels/${removed.id}/members/${agent.id}`,
+        })
+      ).statusCode,
+    ).toBe(410);
+    expect(
+      (await app.inject({ method: 'DELETE', url: `/api/channels/${agent.channelId}` })).statusCode,
+    ).toBe(400);
+    expect(
+      (await app.inject({ method: 'DELETE', url: `/api/channels/${randomUUID()}` })).statusCode,
+    ).toBe(404);
+    const cursor = app.isles.store.cursor();
+    expect(
+      (await app.inject({ method: 'DELETE', url: `/api/channels/${removed.id}` })).json(),
+    ).toEqual(response.json());
+    expect(app.isles.store.cursor()).toBe(cursor);
+    app.isles.runtime.answer(agent.id, question.id, { answers: { choice: { answers: ['继续'] } } });
+    expect(client.responses.at(-1)).toMatchObject({ id: 700 });
+    say(agent.channelId, 'Next private input');
+    client.complete();
+    await expect.poll(() => harness.turns).toBe(2);
+    expect(harness.bodies(agent.id)[1]).toEqual(['Next private input']);
+    expect(app.isles.store.getRun(active.id)).toMatchObject({
+      status: 'completed',
+      inputs: active.inputs,
+    });
+    expect(
+      app.isles.store.listMessages(removed.id).find((message) => message.seq === groupInput.seq)!
+        .deliveries,
+    ).toEqual([{ agentId: agent.id, status: 'cancelled' }]);
+    for (const input of [privateInput, retainedInput])
+      expect(
+        app.isles.store.listMessages(input.channelId).find((message) => message.seq === input.seq)!
+          .deliveries,
+      ).toEqual([{ agentId: agent.id, status: 'completed' }]);
+    client.complete();
+    await ready(agent.id);
+    const history = (await app.inject(`/api/channels/${removed.id}`)).json().messages;
+    expect(history.map((message: { body: string }) => message.body)).toContain(groupInput.body);
+    expect(await readFile(file, 'utf8')).toBe('personal');
+    expect(await readFile(sharedFile, 'utf8')).toBe('shared');
+    await app.close();
+    const restored = await open();
+    cleanups.push(() => restored.close());
+    await expect.poll(() => restored.isles.store.publicAgent(agent.id).status).toBe('ready');
+    expect(restored.isles.store.publicAgent(agent.id).threadId).toBe(agent.threadId);
+    expect(restored.isles.store.publicChannel(removed.id).deletedAt).toBe(
+      response.json().deletedAt,
+    );
+    expect(restored.isles.store.channelDetail(removed.id).messages).toEqual(history);
+    expect(restored.isles.store.channelsOf(agent.id).map((channel) => channel.id)).toEqual([
+      agent.channelId,
+      retained.id,
+    ]);
+  });
+
+  it('revokes all MCP access to a deleted group while keeping the same Agent able to send and read its private chat', async () => {
+    const { app, harness, create, group, say, ready } = await fixture();
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const agent = await create('Member', true);
+    const removed = group('Deleted group', [agent.id]);
+    const retained = group('Live group', [agent.id]);
+    say(removed.id, 'Run before deletion');
+    const token = await app.isles.runtime.environment.token(
+      agentRoot(app.isles.runtime.environment.dataDir, agent),
+    );
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('No listener');
+    const client = new Client({ name: 'group-deletion-test', version: '1' });
+    await client.connect(
+      new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${address.port}/mcp/${agent.id}`),
+        { requestInit: { headers: { Authorization: `Bearer ${token}` } } },
+      ) as Transport,
+    );
+    cleanups.push(() => client.close());
+    app.isles.runtime.deleteGroup(removed.id);
+    for (const [name, args] of [
+      ['send_message', { channelId: removed.id, body: 'Rejected', clientId: 'closed-group' }],
+      ['read_messages', { channelId: removed.id }],
+      ['receive_messages', { channelId: removed.id }],
+      ['invite_to_group', { channelId: removed.id, agentIds: [agent.id] }],
+    ] as const)
+      expect((await client.callTool({ name, arguments: args })).isError).toBe(true);
+    const listed = await client.callTool({ name: 'list_channels' });
+    const ids = JSON.parse((listed.content as { text: string }[])[0]!.text).channels.map(
+      (channel: { channel_id: string }) => channel.channel_id,
+    );
+    expect(ids).toEqual([agent.channelId, retained.id]);
+    expect(
+      (
+        await client.callTool({
+          name: 'send_message',
+          arguments: {
+            channelId: 'private',
+            body: 'Private still works',
+            clientId: 'private-after-group',
+          },
+        })
+      ).isError,
+    ).not.toBe(true);
+    expect(
+      (await client.callTool({ name: 'read_messages', arguments: { channelId: 'private' } }))
+        .isError,
+    ).not.toBe(true);
+    expect(app.isles.store.listMessages(agent.channelId).at(-1)).toMatchObject({
+      senderId: agent.id,
+      body: 'Private still works',
+    });
+    harness.latest(agent.id).complete();
+    await ready(agent.id);
+    expect(app.isles.store.publicAgent(agent.id).threadId).toBe(agent.threadId);
+  });
+
   it('manages groups over HTTP: new members read history, removal cancels unread, outsiders are refused', async () => {
     const { app, create, say, deliveries } = await fixture();
     const a = await create('A');

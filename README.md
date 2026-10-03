@@ -8,11 +8,13 @@ Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原�
 
 当前已实现 M1 的 Codex 私聊闭环、M2 的 Codex 群聊与 Agent 基础管理。用户创建多个 Agent，与每个 Agent 私聊，或把几个 Agent 拉进群讨论；Agent 通过 Isles MCP 发布正式消息，原生输出只在执行详情展示。群内用户或 Agent 的发言立即唤醒其他空闲成员；忙碌成员独立积累未读，原生 turn 结束后立即合并剩余未读开始下一 turn，不做防抖、不等待其他成员结束。Agent 可以在当前 turn 内通过 `receive_messages` 主动收信，或通过 `read_messages` 读取历史，实际返回的消息不再自动投递；`@` 只公开标明特意对谁说。用户可以暂停群讨论、管理成员，并按 Agent 开启拉群权限。每个 Agent 在私聊和所有群中始终使用同一个原生 thread，消息与投递持久化，应用重启后继续。Agent 之间私聊、其他 harness 与用户登录留在后续阶段。
 
-Web 界面采用工作台布局：左侧分为“群聊”和“Agents”，有已删除 Agent 时增加“历史对话”，支持按名称、成员或模型搜索并查看最近消息；中间是按发送者分组的对话，Agent 消息渲染 Markdown（不加载图片、不执行 HTML），用户消息按原文显示并高亮 `@`，系统消息居中显示。群聊输入框输入 `@` 可选择成员。右侧检查器在私聊中显示 Agent 配置、拉群权限和执行记录，在群聊中显示成员（可添加、移出或查看任一成员的执行详情）；宽屏常驻、较窄时浮层打开。窄屏下在聊天列表与单个对话之间切换。界面跟随系统的亮色/暗色设置。输入框支持 Enter 发送、Shift + Enter 换行（也兼容 Ctrl / ⌘ + Enter），切换聊天会保留各自尚未发送的草稿；草稿仅保存在当前页面，刷新后清空。
+Web 界面采用工作台布局：左侧分为“群聊”和“Agents”，有已删除 Agent 或群聊时增加“历史对话”，支持按名称、成员或模型搜索并查看最近消息；中间是按发送者分组的对话，Agent 消息渲染 Markdown（不加载图片、不执行 HTML），用户消息按原文显示并高亮 `@`，系统消息居中显示。群聊输入框输入 `@` 可选择成员。右侧检查器在私聊中显示 Agent 配置、拉群权限和执行记录，在群聊中显示成员（可添加、移出或查看任一成员的执行详情）；宽屏常驻、较窄时浮层打开。窄屏下在聊天列表与单个对话之间切换。界面跟随系统的亮色/暗色设置。输入框支持 Enter 发送、Shift + Enter 换行（也兼容 Ctrl / ⌘ + Enter），切换聊天会保留各自尚未发送的草稿；草稿仅保存在当前页面，刷新后清空。
 
 在私聊或群成员的 Agent 详情中点击“编辑 Agent”，可修改名称、模型、推理等级和拉群权限。ID、工作目录及原生 thread 保持不变；运行中的 turn 使用原配置，下一次执行使用新模型和推理等级。停止的 Agent 修改后仍保持停止。名称与权限可在模型目录暂时不可用时修改，切换模型或等级需要原生目录确认支持。
 
 “删除 Agent”先停止执行，再退出所有群聊并从联系人移除。当前采用保留数据的删除方式：私聊、群聊发言、执行记录、个人工作目录、共享文件与原生 session 都保留；私聊在“历史对话”中只读展示，删除后不能恢复、编辑、继续发言或加入群聊，MCP 身份失效。删除需要确认，尚不提供永久清理文件或恢复已删除 Agent 的入口。
+
+群聊支持创建、列表与详情、改名、成员管理、暂停/继续及确认删除。“删除群聊”将它移至“历史对话”，移出所有成员、取消本群尚未结束的投递，并拒绝后续发言和 Agent 访问；人类可继续查看历史。成员 Agent 保持原运行状态与 thread，仍能在私聊和其他群工作，已经开始的原生任务可能继续完成。群聊历史、执行关联、个人工作目录和共享文件保留；当前不提供撤销删除或永久清理。行为与验证见 [群聊管理验收](docs/group-management-acceptance.md)。
 
 ## 开发
 
@@ -115,6 +117,8 @@ pnpm --filter @isles/server exec tsx test/verify-native-config.ts
 
 该入口使用临时配置、数据及工作区目录，核对 `instructionSources`、共享文件和同版本 thread 恢复，同时验证 Agent 改名、换模型/推理等级及运行中删除；报告保留在输出的临时目录。Agent 管理的验证与代码入口见 [验收记录](docs/agent-management-acceptance.md)。真实压缩、群聊和主动收信的历史验证及其边界见 [基础修复验收记录](docs/foundation-repair-plan.md#8-验收记录)，不当成本轮重复测试结果。
 
+群聊管理已通过 114 项自动化测试、12 项浏览器测试及真实 Codex 运行中删除/私聊继续/同 thread 重启验证，见 [验收记录](docs/group-management-acceptance.md)。名称寻址与群聊删除的真实验收入口为 `pnpm --filter @isles/server exec tsx test/verify-native-names.ts`，同样使用独立临时目录，不操作现有用户 Agent 或群聊。
+
 构建后可以由 Fastify 同时提供前端静态文件和 API：
 
 ```sh
@@ -143,6 +147,7 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 | `POST /api/agents/:id/stop`、`POST /api/agents/:id/resume`                    | 持久停止及原 thread 恢复。                                                                        |
 | `POST /api/agents/:id/questions/:questionId/answer`                           | 仅向仍有效的原生请求回答。                                                                        |
 | `GET/POST /api/channels`、`GET/PATCH /api/channels/:id`                       | 频道列表（含成员与最后一条消息）、建群、频道快照、群改名与暂停/继续。                             |
+| `DELETE /api/channels/:id`                                                    | 删除群聊，保留历史和文件；不停止成员 Agent。                                                      |
 | `POST /api/channels/:id/members`、`DELETE /api/channels/:id/members/:agentId` | 添加、移出群成员。                                                                                |
 | `GET/POST /api/channels/:id/messages`                                         | 有界历史与幂等发送；读取支持 `after`/`before`、`limit`，发送可带 `mentions`、`replyTo`。          |
 | `GET /api/events`                                                             | SSE 持久游标补读；`Last-Event-ID` 或 `after`，非 SSE 响应为有界事件页。                           |
@@ -151,6 +156,8 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 普通事件页的 `cursor` 是本页最后返回 ID，`latestCursor` 是当前库的最大 ID；续读使用 `cursor`。SSE 断线自动重连，Web 同时补读权威快照以恢复聊天与状态。原生文本不会自动进入正式聊天。
 
 `GET /api/agents` 默认排除已删除 Agent；`?includeDeleted=true` 用于历史发送者目录。Agent PATCH 仅更新提供的字段，空请求或不支持的模型/等级返回 `400`；不接受修改 ID、工作区或 thread。DELETE 成功返回已删除 Agent，重复删除保持相同状态。已删除 Agent 的详情仍可读取，编辑/停止/恢复返回 `410`，私聊写入返回 `409`，MCP 请求返回 `401`。
+
+`GET /api/channels` 默认排除已删除群；`?includeDeleted=true` 包含保留的群历史。频道响应增加 `deletedAt`，未删除频道为 `null`。群 PATCH 仅接受名称与暂停状态，空请求返回 `400`；DELETE 返回删除后的频道，重复删除幂等，私聊 DELETE 返回 `400`。已删除群的详情和历史仍可由人类读取，改名、暂停/继续和成员修改返回 `410`，发消息返回 `409`；Agent 的 MCP 调用拒绝读写该群。删除状态记录在永久保留的 `group_deleted` 事件中，不能当作普通 SSE 回放历史清理。
 
 消息对象以 `channelId` + `seq` 定位，不再包含消息 `id`；`replyTo` 为同频道数字序号，执行输入为 `messageSeqs`。MCP 发言、收信和历史工具还接受 `channelId: "private"`，由服务端解析为调用 Agent 自己的私聊频道。完整字段、正文边界和分页标记见[消息协议](docs/message-protocol.md)。
 

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { Agent } from '@isles/contracts';
+import type { Agent, Channel } from '@isles/contracts';
 
 const composer = (page: Page) => page.getByRole('textbox', { name: '消息输入' });
 async function send(page: Page, body: string) {
@@ -533,4 +533,183 @@ test('deletes an Agent from contacts and groups while retaining read-only histor
     animations: 'disabled',
   });
   expect(errors).toEqual([]);
+});
+
+test('deletes a group into read-only history without changing its member Agent', async ({
+  page,
+}, testInfo) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto('/');
+  await createAgent(page, '群删除验证 Agent');
+  await send(page, '群删除前的私聊');
+  await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+    'MCP 回复：群删除前的私聊',
+  );
+  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
+  const original = list.agents.find((agent) => agent.name === '群删除验证 Agent')!;
+
+  await page.getByRole('button', { name: '新建群聊', exact: true }).click();
+  await page.getByLabel('群名').fill('待删除的群聊');
+  await page.getByRole('checkbox', { name: /群删除验证 Agent/ }).check();
+  await page.getByRole('button', { name: '创建群聊', exact: true }).click();
+  await send(page, '保留群聊回复');
+  const groupFeed = page.locator('[aria-label="群聊消息"]');
+  await expect(groupFeed.getByRole('article', { name: '群删除验证 Agent的消息' })).toContainText(
+    'MCP 回复：保留群聊回复',
+  );
+  await page.getByRole('button', { name: '群聊详情', exact: true }).click();
+  const inspector = page.getByTestId('inspector');
+  await inspector.getByLabel('群名').fill('改名后删除的群聊');
+  await inspector.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '改名后删除的群聊', level: 1 })).toBeVisible();
+  const channels = (await (await page.request.get('/api/channels')).json()) as {
+    channels: Channel[];
+  };
+  const group = channels.channels.find((channel) => channel.name === '改名后删除的群聊')!;
+  await inspector.getByRole('button', { name: '删除群聊', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '删除群聊', exact: true });
+  await expect(dialog).toContainText('群聊历史、个人工作目录及共享文件都会保留');
+  await expect(dialog).toContainText('成员 Agent 不会被停止或删除');
+  await expect(dialog.getByRole('button', { name: '取消', exact: true })).toBeFocused();
+  await dialog.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(inspector.getByRole('list', { name: '群成员' }).getByRole('listitem')).toHaveCount(
+    1,
+  );
+  const unchanged = (await (await page.request.get(`/api/channels/${group.id}`)).json()) as {
+    channel: Channel;
+  };
+  expect(unchanged.channel.deletedAt).toBeNull();
+
+  // Deleting a paused group must remove both pause and continue controls.
+  await page.getByRole('button', { name: '暂停讨论', exact: true }).click();
+  await expect(page.getByTestId('group-status')).toHaveText('已暂停');
+  await inspector.getByRole('button', { name: '删除群聊', exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await noHorizontalScroll(page)).toBe(false);
+  await page.screenshot({
+    path: testInfo.outputPath('delete-group-mobile.png'),
+    fullPage: true,
+    animations: 'disabled',
+  });
+  const [deleted] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/channels/${group.id}`) &&
+        response.request().method() === 'DELETE',
+    ),
+    dialog.getByRole('button', { name: '确认删除', exact: true }).click(),
+  ]);
+  expect(deleted.status()).toBe(200);
+  expect(await deleted.json()).toMatchObject({ id: group.id, name: group.name, memberIds: [] });
+  await expect(dialog).not.toBeVisible();
+  await expect(inspector).toContainText('此群聊已删除，无法恢复讨论');
+  await expect(inspector.getByLabel('群名')).toHaveCount(0);
+  await expect(inspector.getByRole('list', { name: '群成员' })).toHaveCount(0);
+  await expect(inspector.getByRole('button', { name: '添加成员', exact: true })).toHaveCount(0);
+  await expect(inspector.getByRole('button', { name: '删除群聊', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '关闭详情', exact: true }).click();
+  await expect(page.getByTestId('group-status')).toHaveText('已删除');
+  await expect(composer(page)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '继续讨论', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '暂停讨论', exact: true })).toHaveCount(0);
+  await expect(groupFeed.getByRole('article', { name: '群删除验证 Agent的消息' })).toContainText(
+    'MCP 回复：保留群聊回复',
+  );
+  await page.getByRole('button', { name: '返回聊天列表', exact: true }).click();
+  await expect(
+    page
+      .getByRole('navigation', { name: '群聊', exact: true })
+      .getByRole('button')
+      .filter({ hasText: group.name! }),
+  ).toHaveCount(0);
+  const history = page
+    .getByRole('navigation', { name: '历史对话', exact: true })
+    .getByRole('button')
+    .filter({ hasText: group.name! });
+  await expect(history).toContainText('已删除');
+  await expect(history.getByText('已暂停', { exact: true })).toHaveCount(0);
+  await history.click();
+  await page.reload();
+  await expect(page.getByRole('heading', { name: group.name!, level: 1 })).toBeVisible();
+  await expect(page.getByTestId('group-status')).toHaveText('已删除');
+  await expect(composer(page)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '继续讨论', exact: true })).toHaveCount(0);
+  await expect(groupFeed.getByRole('article', { name: '群删除验证 Agent的消息' })).toContainText(
+    'MCP 回复：保留群聊回复',
+  );
+  expect(await noHorizontalScroll(page)).toBe(false);
+  await page.screenshot({
+    path: testInfo.outputPath('deleted-group-history-mobile.png'),
+    fullPage: true,
+    animations: 'disabled',
+  });
+  await page.getByRole('button', { name: '群聊详情', exact: true }).click();
+  await expect(inspector).toContainText('此群聊已删除，无法恢复讨论');
+  await expect(inspector.getByText('创建', { exact: true })).toBeVisible();
+  await expect(inspector.getByText('删除', { exact: true })).toBeVisible();
+  await expect(inspector.getByRole('textbox')).toHaveCount(0);
+  await expect(inspector.getByRole('list', { name: '群成员' })).toHaveCount(0);
+  await expect(inspector.getByRole('button', { name: '添加成员', exact: true })).toHaveCount(0);
+  await expect(inspector.getByRole('button', { name: '删除群聊', exact: true })).toHaveCount(0);
+  expect(await noHorizontalScroll(page)).toBe(false);
+  await page.screenshot({
+    path: testInfo.outputPath('deleted-group-details-mobile.png'),
+    fullPage: true,
+    animations: 'disabled',
+  });
+  await page.getByRole('button', { name: '关闭详情', exact: true }).click();
+
+  await page.getByRole('button', { name: '返回聊天列表', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Agents', exact: true })
+    .getByRole('button')
+    .filter({ hasText: original.name })
+    .click();
+  await expect(page.getByTestId('agent-status')).toHaveText('可用');
+  await send(page, '群删除后的私聊');
+  await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+    'MCP 回复：群删除后的私聊',
+  );
+  const detail = (await (await page.request.get(`/api/agents/${original.id}`)).json()) as {
+    agent: Agent;
+  };
+  expect(detail.agent).toMatchObject({
+    status: 'ready',
+    desiredState: original.desiredState,
+    threadId: original.threadId,
+    workspace: original.workspace,
+    channelId: original.channelId,
+  });
+  expect(errors).toEqual([]);
+});
+
+test('returns an inspected group member to read-only group details after external deletion', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await createAgent(page, '外部群删除 Agent');
+  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
+  const agent = list.agents.find((item) => item.name === '外部群删除 Agent')!;
+  const created = await page.request.post('/api/channels', {
+    data: { name: '外部删除群聊', memberIds: [agent.id] },
+  });
+  expect(created.status()).toBe(201);
+  const channel = (await created.json()) as Channel;
+  await page.getByRole('button', { name: '刷新聊天列表', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: '群聊', exact: true })
+    .getByRole('button')
+    .filter({ hasText: channel.name! })
+    .click();
+  await page.getByRole('button', { name: '群聊详情', exact: true }).click();
+  const inspector = page.getByTestId('inspector');
+  await inspector.getByRole('button', { name: `查看 ${agent.name} 的详情`, exact: true }).click();
+  await expect(inspector.getByRole('heading', { name: agent.name, exact: true })).toBeVisible();
+  expect((await page.request.delete(`/api/channels/${channel.id}`)).status()).toBe(200);
+  await expect(inspector.getByRole('heading', { name: '群聊详情', exact: true })).toBeVisible();
+  await expect(inspector).toContainText('此群聊已删除，无法恢复讨论');
+  await expect(inspector.getByRole('button', { name: '返回群聊详情', exact: true })).toHaveCount(0);
+  await expect(inspector.getByRole('button', { name: '编辑 Agent', exact: true })).toHaveCount(0);
 });

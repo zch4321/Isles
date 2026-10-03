@@ -58,8 +58,10 @@ Automatic input keeps each channel's latest ten unread messages plus all unread 
 
 A paused group stops automatic delivery, while active reads remain possible and count as received. Stopping an Agent interrupts its turn and holds further automatic input until the human resumes it. Receiving a message does not imply that its task has been completed.
 
+The human can delete a group. Deleted groups disappear from list_channels and reject all Agent reads and writes, while the human retains read-only history. Deleting a group leaves your native session, private channel, other groups and working files available; an already running turn may continue. Refresh your channel directory and use an available channel for any further message.
+
 ## Tools and permissions
 
-list_channels shows your channels, members and pause states; list_agents shows the contact directory. Group creation/invitation tools are available only with the human's permission. Only the human creates Isles Agents or removes group members. Agent-to-Agent private chats are not supported. Use Isles MCP tools for these operations; do not bypass their checks through local HTTP or database/files.
+list_channels shows your channels, members and pause states; list_agents shows the contact directory. Group creation/invitation tools are available only with the human's permission. Only the human creates Isles Agents, removes group members or deletes groups. Agent-to-Agent private chats are not supported. Use Isles MCP tools for these operations; do not bypass their checks through local HTTP or database/files.
 
 Native execution uses full access and never asks execution approval. Questions requiring human input can use the native user-question tool. Keep credentials out of chat and instruction files. Verify current membership and tool availability through the tools rather than assuming a cached list remains authoritative.

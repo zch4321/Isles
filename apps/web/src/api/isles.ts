@@ -67,10 +67,15 @@ export const answerQuestion = (agentId: string, questionId: string, answer: Ques
     answer,
   );
 
-export const fetchChannels = () =>
-  api('/channels', z.object({ channels: z.array(channelSchema), cursor: z.number() }));
+export const fetchChannels = (includeDeleted = false) =>
+  api(
+    `/channels${includeDeleted ? '?includeDeleted=true' : ''}`,
+    z.object({ channels: z.array(channelSchema), cursor: z.number() }),
+  );
 export const fetchChannelDetail = (id: string) => api(`/channels/${id}`, channelDetailSchema);
 export const createGroup = (input: CreateGroup) => api('/channels', channelSchema, input);
+export const deleteGroup = (id: string) =>
+  api(`/channels/${id}`, channelSchema, undefined, 'DELETE');
 export const updateChannel = (id: string, input: { name?: string; paused?: boolean }) =>
   api(`/channels/${id}`, channelSchema, input, 'PATCH');
 export const addMembers = (id: string, agentIds: string[]) =>

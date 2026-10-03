@@ -6,14 +6,16 @@ import type { AgentRecord } from '../storage/store.js';
 const begin = '<!-- isles:begin -->';
 const end = '<!-- isles:end -->';
 const templateUrl = new URL('../../resources/AGENTS.template.md', import.meta.url);
+const quote = (value: string) =>
+  JSON.stringify(value).replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
 
 /** Update only the managed section, keeping user guidance before/after it byte-for-byte. */
 export async function prepareGuidance(agent: AgentRecord, sharedDir: string) {
   const template = await readFile(templateUrl, 'utf8');
   const values: Record<string, string> = {
-    AGENT_NAME: JSON.stringify(agent.name),
-    WORKSPACE: JSON.stringify(agent.workspace),
-    SHARED_DIR: JSON.stringify(sharedDir),
+    AGENT_NAME: quote(agent.name),
+    WORKSPACE: quote(agent.workspace),
+    SHARED_DIR: quote(sharedDir),
   };
   const content = template.replace(/\{\{([A-Z_]+)\}\}/g, (_match, key: string) => {
     if (values[key] === undefined) throw new Error(`Unknown guidance placeholder: ${key}`);

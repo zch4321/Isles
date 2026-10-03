@@ -63,6 +63,8 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
       // Membership and permissions are read again on every call, not from this connection.
       const member = (channelId: string) => {
         store.getChannel(channelId);
+        if (store.groupDeletedAt(channelId) !== null)
+          throw new HttpError(410, '群聊已删除，不能继续访问');
         if (!store.isMember(channelId, id)) throw new HttpError(403, '只能访问自己所在的频道');
       };
       const result = (value: unknown) => ({
