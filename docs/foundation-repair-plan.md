@@ -94,8 +94,8 @@
 
 ## 7. 当前工作状态
 
-- `main` 已包含旧的 Codex 路径修复 `bbd0b37`；不回滚已存在的群聊代码。
-- `feat/agent-inbox` 的 `420736c` 保存即时收信实现，`b6e812f` 保存本计划的纠偏决定；本轮基础修复沿用同一分支与草稿 PR #1。
+- `main` 已包含 Codex 路径修复 `bbd0b37`，以及 2026-10-03 合入的即时收信 `420736c`、计划纠偏 `b6e812f` 和基础修复 `339c7f5`；原群聊代码保留。
+- 上述基础修复对应 PR #1。此后 Isles 开发直接在主线修改、检查、提交并 push，不再另走功能分支与 PR 流程。
 - 已移除 `Runtime.instructions()` 和 Isles 的 `developerInstructions`。唯一模板位于 `apps/server/resources/AGENTS.template.md`，文件维护位于 `runtime/guidance.ts`，新建及恢复用原生 `instructionSources` 校验实际加载。
 - 已统一自动输入与 MCP 的文本格式，消息、回复、投递、执行输入、事件及前端定位均使用频道与序号。旧 M2 数据先备份再事务迁移；原生历史和 thread 绑定保留。
 - M3 Kimi、M4 Claude 与 M5 扩展未在本轮实施。

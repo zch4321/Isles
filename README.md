@@ -131,4 +131,4 @@ schema 位于 `apps/server/src/storage/schema.ts`，迁移记录位于 `apps/ser
 - [消息协议](docs/message-protocol.md)
 - [基础修复与验收](docs/foundation-repair-plan.md)
 
-分支与提交遵循 conventional 规范，不使用 `codex/` 前缀。shadcn-vue Button 源码的上游许可见 [组件许可](apps/web/src/components/ui/LICENSE.shadcn-vue.txt)。
+本项目后续开发直接在 `main` 修改，完成相应检查后提交并 push，不另建功能分支、不走 PR 流程。提交遵循 conventional 规范；如用户另行要求使用分支，分支同样遵循 conventional 规范，不使用 `codex/` 前缀。shadcn-vue Button 源码的上游许可见 [组件许可](apps/web/src/components/ui/LICENSE.shadcn-vue.txt)。
