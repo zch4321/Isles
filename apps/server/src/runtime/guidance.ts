@@ -12,10 +12,8 @@ export async function prepareGuidance(agent: AgentRecord, sharedDir: string) {
   const template = await readFile(templateUrl, 'utf8');
   const values: Record<string, string> = {
     AGENT_NAME: JSON.stringify(agent.name),
-    AGENT_ID: agent.id,
     WORKSPACE: JSON.stringify(agent.workspace),
     SHARED_DIR: JSON.stringify(sharedDir),
-    PRIVATE_CHANNEL_ID: agent.channelId,
   };
   const content = template.replace(/\{\{([A-Z_]+)\}\}/g, (_match, key: string) => {
     if (values[key] === undefined) throw new Error(`Unknown guidance placeholder: ${key}`);

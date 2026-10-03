@@ -9,7 +9,6 @@ import { z } from 'zod';
 import { agentRoot } from '../codex/environment.js';
 import { HttpError } from '../errors.js';
 import {
-  channelLabel,
   channelView,
   directoryOf,
   formatChannelMessages,
@@ -17,8 +16,17 @@ import {
 } from '../runtime/envelope.js';
 import type { Runtime } from '../runtime/runtime.js';
 
-const agentIds = z.array(z.string().uuid()).max(50);
-const messageChannel = z.union([z.literal('private'), z.string().uuid()]);
+const agentIds = z
+  .array(z.string().uuid())
+  .max(50)
+  .describe(
+    'Full Agent IDs from list_agents or list_channels. Names and short IDs are display only.',
+  );
+const messageChannel = z
+  .union([z.literal('private'), z.string().uuid()])
+  .describe(
+    'Full channel ID from list_channels, or private for your chat with the human. Names and short IDs are display only.',
+  );
 
 export function registerMcp(app: FastifyInstance, runtime: Runtime) {
   app.route<{ Params: { id: string } }>({
@@ -78,14 +86,14 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         'send_message',
         {
           description:
-            'Publish an official message to a channel you belong to; private aliases your private chat. replyTo is a sequence in that same channel. Sender is bound by the server. Use a stable clientId to deduplicate retries. Returns channel_id and seq.',
+            'Publish an official message to a channel you belong to; private aliases your private chat. Use the full channel ID from list_channels for a group. replyTo is a sequence in that same channel. Sender is bound by the server. Use a stable clientId to deduplicate retries. Returns seq in the targeted channel.',
           inputSchema: {
             channelId: messageChannel,
             body: z.string().trim().min(1).max(32_000),
             replyTo: z.number().int().positive().optional(),
             mentions: agentIds
               .optional()
-              .describe('IDs of channel members this message specifically addresses.'),
+              .describe('Full Agent IDs of channel members this message specifically addresses.'),
             clientId: z.string().min(1).max(120).optional(),
           },
           annotations: { destructiveHint: false, openWorldHint: false },
@@ -99,7 +107,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
             replyTo,
             mentions,
           });
-          return result({ seq: message.seq, channel_id: channelId });
+          return result({ seq: message.seq });
         },
       );
       server.registerTool(
@@ -129,9 +137,10 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
           const page = forward ? all.slice(0, limit) : all.slice(-limit);
           const more = all.length > limit;
           const storedChannel = store.getChannel(channelId);
-          let text = formatChannelMessages(id, storedChannel, page) || '[history: empty]';
+          const labels = runtime.messageLabels(id);
+          let text = formatChannelMessages(labels, storedChannel, page) || '[history: empty]';
           if (more)
-            text += `\n\n[channel: ${channelLabel(id, storedChannel)}, ${forward ? 'next_after' : 'next_before'}: ${forward ? page.at(-1)!.seq : page[0]!.seq}]`;
+            text += `\n\n[channel: ${labels.channel(storedChannel)}, ${forward ? 'next_after' : 'next_before'}: ${forward ? page.at(-1)!.seq : page[0]!.seq}]`;
           const response = textResult(text);
           store.markMessagesReceived(id, page);
           return response;
@@ -153,7 +162,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
             channelId: channelId === undefined ? undefined : resolveChannel(channelId),
             limit,
           });
-          const text = formatMessages(id, input) || '[unread: none]';
+          const text = formatMessages(runtime.messageLabels(id), input) || '[unread: none]';
           return textResult(text + (hasMore ? '\n\n[has_more: true]' : ''));
         },
       );
@@ -161,7 +170,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         'list_channels',
         {
           description:
-            'List the channels you belong to: your private chat with the user and your groups, with their members and paused state.',
+            'List your channels with full channel IDs, names, members and paused state. Match the names/short suffixes shown in messages to these records, then use a full ID for group tool calls.',
           annotations: { readOnlyHint: true, openWorldHint: false },
         },
         () => result({ channels: store.channelsOf(id).map((c) => channel(c.id)) }),
@@ -170,7 +179,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         'list_agents',
         {
           description:
-            'List every Isles Agent as a contact directory, with its harness and model. Agents are independent and do not share context.',
+            'List active Isles Agents with full IDs, names, harnesses and models. Match the names/short suffixes shown in messages to these records and use full IDs for mentions or invitations. Agents are independent and do not share context.',
           annotations: { readOnlyHint: true, openWorldHint: false },
         },
         () =>

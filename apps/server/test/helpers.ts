@@ -7,7 +7,8 @@ import {
   type RequestId,
 } from '../src/codex/protocol.js';
 import type { ClientFactory } from '../src/runtime/runtime.js';
-import type { AgentRecord } from '../src/storage/store.js';
+import type { AgentRecord, Store } from '../src/storage/store.js';
+import type { Agent, Channel } from '@isles/contracts';
 import { join } from 'node:path';
 
 /** A complete app config that never reads or writes the user's real Isles home. */
@@ -83,7 +84,12 @@ export class MockClient implements NativeClient {
       const input = params.input as { text: string }[];
       this.harness.inputs.push({
         agentId: this.agent.id,
-        envelope: parseMessageText(input[0]!.text, this.agent.channelId, this.agent.id),
+        envelope: parseMessageText(
+          input[0]!.text,
+          this.agent.channelId,
+          this.agent.id,
+          this.harness.directory(),
+        ),
       });
       this.handlers.notification('turn/started', {
         threadId: this.threadId,
@@ -157,6 +163,14 @@ export interface Envelope {
   }[];
 }
 export class MockHarness {
+  private store: Store | undefined;
+  useStore(store: Store) {
+    this.store = store;
+  }
+  directory(): MessageDirectory {
+    if (!this.store) throw new Error('Bind the fixture Store before delivering native input');
+    return { agents: this.store.listAgents(true), channels: this.store.listChannels() };
+  }
   clients: MockClient[] = [];
   persistedThreads = new Set<string>();
   turns = 0;
@@ -181,11 +195,63 @@ export class MockHarness {
   }
 }
 
-/** Test-only reader for the documented text grammar; production never parses body text as metadata. */
+export interface MessageDirectory {
+  agents: Pick<Agent, 'id' | 'name'>[];
+  channels: Pick<Channel, 'id' | 'kind' | 'name' | 'agentId' | 'memberIds'>[];
+}
+
+/** Split separators only outside JSON string literals, including escaped quotes. */
+function splitFields(text: string, delimiter: string): string[] {
+  const fields: string[] = [];
+  let start = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index];
+    if (quoted && escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted && character === '\\') escaped = true;
+    else if (character === '"') quoted = !quoted;
+    else if (!quoted && text.startsWith(delimiter, index)) {
+      fields.push(text.slice(start, index));
+      start = index + delimiter.length;
+      index += delimiter.length - 1;
+    }
+  }
+  if (quoted || escaped) throw new Error('Unterminated JSON name in message header');
+  fields.push(text.slice(start));
+  return fields;
+}
+
+/** Independent fixture lookup: reject bare UUIDs and stale/ambiguous name labels. */
+function resolveLabel(label: string, directory: { id: string; name: string | null }[]) {
+  const match = /^("(?:[^"\\]|\\.)*")(?:#([0-9a-f]{8,32}))?$/.exec(label);
+  if (!match) throw new Error(`Invalid name label: ${label}`);
+  const name = JSON.parse(match[1]!) as string;
+  const candidates = directory.filter((entry) => entry.name === name);
+  if (candidates.length === 1 && match[2] === undefined) return candidates[0]!;
+  if (candidates.length < 2 || !match[2]) throw new Error(`Ambiguous name label: ${label}`);
+  const prefix = match[2];
+  const matched = candidates.filter((entry) => entry.id.replaceAll('-', '').startsWith(prefix));
+  if (matched.length !== 1) throw new Error(`Ambiguous ID suffix: ${label}`);
+  // The suffix is minimal, but never shorter than eight hexadecimal characters.
+  if (
+    prefix.length > 8 &&
+    candidates.filter((entry) => entry.id.replaceAll('-', '').startsWith(prefix.slice(0, -1)))
+      .length === 1
+  )
+    throw new Error(`Nonminimal ID suffix: ${label}`);
+  return matched[0]!;
+}
+
+/** Test-only reader for the current name grammar; production never parses body metadata. */
 export function parseMessageText(
   text: string,
-  privateChannelId = 'private',
-  recipientId = '',
+  privateChannelId: string,
+  recipientId: string,
+  directory: MessageDirectory,
 ): Envelope & { has_more: boolean; nextAfter: number | null; nextBefore: number | null } {
   const channels = new Map<string, Envelope['channels'][number]>();
   let current: Envelope['channels'][number]['messages'][number] | undefined;
@@ -201,21 +267,23 @@ export function parseMessageText(
       if (current) current.body = current.body.replace(/\n+$/, '');
       current = undefined;
       const fields = Object.fromEntries(
-        line
-          .slice(1, -1)
-          .split(', ')
-          .map((field) => {
-            const colon = field.indexOf(': ');
-            return [field.slice(0, colon), field.slice(colon + 2)];
-          }),
+        splitFields(line.slice(1, -1), ', ').map((field) => {
+          const colon = field.indexOf(': ');
+          return [field.slice(0, colon), field.slice(colon + 2)];
+        }),
       );
       if (fields.has_more) result.has_more = fields.has_more === 'true';
       if (!fields.channel) continue;
-      const id = fields.channel === 'private' ? privateChannelId : fields.channel;
+      const available = directory.channels.filter(
+        (channel) => channel.kind === 'group' && channel.memberIds.includes(recipientId),
+      );
+      const resolved =
+        fields.channel === 'private' ? undefined : resolveLabel(fields.channel!, available);
+      const id = resolved?.id ?? privateChannelId;
       const channel = channels.get(id) ?? {
         channel_id: id,
         kind: fields.channel === 'private' ? 'private' : 'group',
-        name: null,
+        name: resolved?.name ?? null,
         skipped_unread: 0,
         messages: [],
       };
@@ -225,13 +293,19 @@ export function parseMessageText(
       if (fields.next_before) result.nextBefore = Number(fields.next_before);
       if (!fields.seq) continue;
       const sender = fields.from!;
+      const author = sender.startsWith('agent:')
+        ? resolveLabel(sender.slice(6), directory.agents)
+        : undefined;
+      const mentions = fields.mentions
+        ? splitFields(fields.mentions, '|').map((label) => resolveLabel(label, directory.agents).id)
+        : [];
       current = {
         seq: Number(fields.seq),
-        sender: sender.startsWith('agent:')
-          ? { type: 'agent', id: sender.slice(6) }
+        sender: author
+          ? { type: 'agent', id: author.id, name: author.name! }
           : { type: sender, id: sender },
         body: '',
-        mentions_you: (fields.mentions ?? '').split('|').includes(recipientId),
+        mentions_you: mentions.includes(recipientId),
       };
       channel.messages.push(current);
     } else if (current)

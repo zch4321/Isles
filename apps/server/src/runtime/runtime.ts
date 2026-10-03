@@ -27,7 +27,7 @@ import {
 } from '../codex/protocol.js';
 import { HttpError } from '../errors.js';
 import type { Actor, AgentRecord, ClaimedChannel, MessageInput, Store } from '../storage/store.js';
-import { formatMessages } from './envelope.js';
+import { formatMessages, MessageLabels } from './envelope.js';
 
 export type ClientFactory = (
   agent: AgentRecord,
@@ -101,6 +101,10 @@ export class Runtime {
   }
 
   // Agents, channels and messages
+
+  messageLabels(id: string) {
+    return new MessageLabels(id, this.store.listAgents(true), this.store.channelsOf(id));
+  }
 
   async createAgent(input: CreateAgent) {
     if (!this.baseUrl) throw new HttpError(503, 'Runtime 尚未监听本机端口');
@@ -381,7 +385,7 @@ export class Runtime {
           input: [
             {
               type: 'text',
-              text: formatMessages(id, input),
+              text: formatMessages(this.messageLabels(id), input),
               text_elements: [],
             },
           ],

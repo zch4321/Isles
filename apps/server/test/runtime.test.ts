@@ -21,13 +21,16 @@ async function fixture(catalog: Catalog = testCatalog) {
   const dir = await mkdtemp(join(tmpdir(), 'isles-runtime-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));
   const harness = new MockHarness();
-  const open = () =>
-    buildApp({
+  const open = async () => {
+    const opened = await buildApp({
       config: testConfig(dir),
       catalog,
       clientFactory: harness.factory,
       runtimeUrl: 'http://127.0.0.1:1',
     });
+    harness.useStore(opened.isles.store);
+    return opened;
+  };
   const app = await open();
   cleanups.push(() => app.close());
   const create = async (name = '测试 Agent', canCreateGroups = false) => {
@@ -151,6 +154,7 @@ describe('durable runtime with simulated Codex', () => {
       },
       runtimeUrl: 'http://127.0.0.1:1',
     });
+    harness.useStore(app.isles.store);
     cleanups.push(() => app.close());
     const agent = await app.isles.runtime.createAgent({
       name: 'Before connection',
@@ -437,6 +441,7 @@ describe('durable runtime with simulated Codex', () => {
       },
       runtimeUrl: 'http://127.0.0.1:1',
     });
+    harness.useStore(app.isles.store);
     cleanups.push(() => app.close());
     cleanups.push(async () => {
       releaseConnection?.();
@@ -1138,6 +1143,7 @@ describe('durable runtime with simulated Codex', () => {
       (await call(client, 'read_messages', { channelId: shared.id })).text,
       agent.channelId,
       agent.id,
+      harness.directory(),
     );
     expect(history.channels[0]!.messages.at(-1)).toMatchObject({
       body: input.body,

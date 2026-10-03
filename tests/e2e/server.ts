@@ -55,6 +55,7 @@ const app = await buildApp({
   },
   clientFactory: harness.factory,
 });
+harness.useStore(app.isles.store);
 
 async function callMcp<T>(client: MockClient, name: string, args: Record<string, unknown>) {
   const response = await fetch(`${client.baseUrl}/mcp/${client.agent.id}`, {
@@ -78,7 +79,12 @@ async function callMcp<T>(client: MockClient, name: string, args: Record<string,
   if (!rpc.result || rpc.result.isError) throw new Error('Test MCP tool failed');
   return (
     name === 'receive_messages'
-      ? parseMessageText(rpc.result.content[0]!.text, client.agent.channelId, client.agent.id)
+      ? parseMessageText(
+          rpc.result.content[0]!.text,
+          client.agent.channelId,
+          client.agent.id,
+          harness.directory(),
+        )
       : JSON.parse(rpc.result.content[0]!.text)
   ) as T;
 }

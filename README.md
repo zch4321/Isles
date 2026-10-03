@@ -4,7 +4,7 @@
 
 面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。接入以官方原生能力为主，顺序为 **Codex app-server → Kimi Code Server API → Claude Agent SDK**。
 
-Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到带 `[channel: ..., seq: ..., from: ...]` 头部的文本，消息以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。
+Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到 `[channel: "评审", seq: 12, from: agent:"Alice"]` 这样的文本头部，自己的私聊显示为 `private`。普通消息用名称呈现群、发送者与提及对象，重名时在引号外附加 ID 短前缀；工具仍通过目录查询完整 UUID 寻址，消息仍以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，本轮验证见 [名称消息验收](docs/name-message-acceptance.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。
 
 当前已实现 M1 的 Codex 私聊闭环、M2 的 Codex 群聊与 Agent 基础管理。用户创建多个 Agent，与每个 Agent 私聊，或把几个 Agent 拉进群讨论；Agent 通过 Isles MCP 发布正式消息，原生输出只在执行详情展示。群内用户或 Agent 的发言立即唤醒其他空闲成员；忙碌成员独立积累未读，原生 turn 结束后立即合并剩余未读开始下一 turn，不做防抖、不等待其他成员结束。Agent 可以在当前 turn 内通过 `receive_messages` 主动收信，或通过 `read_messages` 读取历史，实际返回的消息不再自动投递；`@` 只公开标明特意对谁说。用户可以暂停群讨论、管理成员，并按 Agent 开启拉群权限。每个 Agent 在私聊和所有群中始终使用同一个原生 thread，消息与投递持久化，应用重启后继续。Agent 之间私聊、其他 harness 与用户登录留在后续阶段。
 
@@ -154,6 +154,8 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 
 消息对象以 `channelId` + `seq` 定位，不再包含消息 `id`；`replyTo` 为同频道数字序号，执行输入为 `messageSeqs`。MCP 发言、收信和历史工具还接受 `channelId: "private"`，由服务端解析为调用 Agent 自己的私聊频道。完整字段、正文边界和分页标记见[消息协议](docs/message-protocol.md)。
 
+普通消息中的 JSON 引号名称和 `#` 短前缀是显示标签，不是工具地址。向某个名称的群发言，先用 `list_channels` 确认名称、成员及完整 ID，再传入 `channelId`；提及某个 Agent，先用 `list_agents` 取完整 ID，再传入 `mentions`。目录和群管理结果保留完整 ID、名称及配置，MCP `send_message` 成功只返回 `{ "seq": N }`。改名后重新查询目录；历史头部使用当前存储名称，已删除发送者仍可读，原始作者的内部 ID 不变。同名消歧包含已删除的历史 Agent；群名仅在接收 Agent 已加入的群之间比较。REST 对象和数据库 schema 不变。
+
 ## 工程结构
 
 | 路径                 | 内容                                                        |
@@ -170,6 +172,7 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 - [实现计划](docs/implementation-plan.md)
 - [M2 实施计划](docs/m2-implementation-plan.md)
 - [消息协议](docs/message-protocol.md)
+- [名称消息验收](docs/name-message-acceptance.md)
 - [基础修复与验收](docs/foundation-repair-plan.md)
 
 本项目后续开发直接在 `main` 修改，完成相应检查后提交并 push，不另建功能分支、不走 PR 流程。提交遵循 conventional 规范；如用户另行要求使用分支，分支同样遵循 conventional 规范，不使用 `codex/` 前缀。shadcn-vue Button 源码的上游许可见 [组件许可](apps/web/src/components/ui/LICENSE.shadcn-vue.txt)。
