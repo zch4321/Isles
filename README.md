@@ -72,6 +72,8 @@ port = 5173
 
 每次启动原生进程前，Isles 从[唯一规则模板](apps/server/resources/AGENTS.template.md)更新 workspace 的 `AGENTS.md` 托管段，保留已有用户内容。身份、环境、消息格式和工具规则由 Codex 从文件加载，不再通过 `developerInstructions` 或历史注入保存规则。创建和恢复时检查原生返回的 `instructionSources`；没有加载该文件会明确报错。已有原生历史不改写，新输入与文件均使用当前文本协议。
 
+Agent 的规则文件包含独立的“Shared workspace”章节：所有 Agent 可直接读写共享文件，交接时通过相关频道发送文件绝对路径和说明。文件写入不会自动唤醒其他 Agent，完成或更新后需要发消息通知；并行修改同一文件前应协调，共享仓库继续遵守自己的项目规则。
+
 Codex 按会话使用 `danger-full-access` 与 `approvalPolicy: never`，不弹出执行审批；原生用户问题仍可在 Web 回答。原生子代理沿用你的 Codex 设置，是否使用由 Agent 自行决定；Isles 只向 Agent 的主 thread 投递消息，也只恢复这个 thread。首次创建仅通过 `thread/inject_items` 写入中性的 assistant 初始化标记 `Isles session initialized.`，使尚未聊天的空 thread 可恢复；标记不含规则，不调用模型、不创建聊天回合。恢复失败会显示错误，不能用新 thread 或 fork 替代。
 
 Web 和管理 HTTP API 暂无登录鉴权，仅供本机使用，不承诺把人类与本机进程安全隔离。MCP 的 bearer 身份绑定 Agent，每次调用重新校验频道成员关系与权限：所有 Agent 可用 `send_message`、`receive_messages`、`read_messages`、`list_channels`、`list_agents`；只有开启拉群权限的 Agent 能看到并调用 `create_group`、`invite_to_group`。权限修改立即在服务端生效，Agent 空闲时重启原生进程并恢复原 thread 以刷新工具列表。不提供创建 Agent、移出成员或 Agent 之间私聊的工具。全权限执行也不提供 Agent 之间的操作系统沙箱。
