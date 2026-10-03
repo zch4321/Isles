@@ -14,6 +14,7 @@ export const agentStatusSchema = z.enum([
   'ready',
   'running',
   'stopped',
+  'deleted',
   'error',
 ]);
 export const deliveryStatusSchema = z.enum([
@@ -46,7 +47,15 @@ export const createAgentSchema = z
     canCreateGroups: z.boolean().default(false),
   })
   .strict();
-export const updateAgentSchema = z.object({ canCreateGroups: z.boolean() }).strict();
+export const updateAgentSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80).optional(),
+    model: z.string().trim().min(1).max(120).optional(),
+    reasoningEffort: z.string().trim().min(1).max(24).optional(),
+    canCreateGroups: z.boolean().optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, { message: '请至少修改一个字段' });
 export const sendMessageSchema = z
   .object({
     body: z.string().trim().min(1).max(32_000),
@@ -229,6 +238,7 @@ export type QuestionAnswer = z.infer<typeof answerQuestionSchema>;
 export type AgentDetail = z.infer<typeof agentDetailSchema>;
 export type ChannelDetail = z.infer<typeof channelDetailSchema>;
 export type CreateAgent = z.input<typeof createAgentSchema>;
+export type UpdateAgent = z.infer<typeof updateAgentSchema>;
 export type CreateGroup = z.infer<typeof createGroupSchema>;
 export type SendMessage = z.infer<typeof sendMessageSchema>;
 export type Model = z.infer<typeof modelSchema>;

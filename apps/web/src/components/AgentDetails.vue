@@ -1,20 +1,25 @@
 <script setup lang="ts">
 import type { Agent, Run } from '@isles/contracts';
 import { useMutation, useQueryClient } from '@tanstack/vue-query';
-import { Check, Copy, LoaderCircle, SquareTerminal } from '@lucide/vue';
+import { Check, Copy, LoaderCircle, Pencil, SquareTerminal, Trash2 } from '@lucide/vue';
 import { computed, onBeforeUnmount, ref } from 'vue';
 import { updateAgent } from '@/api/isles';
 import { invalidateAll, useChannels } from '@/api/queries';
 import RunCard from './RunCard.vue';
 import StatusBadge from './StatusBadge.vue';
+import EditAgentDialog from './EditAgentDialog.vue';
+import DeleteAgentDialog from './DeleteAgentDialog.vue';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { channelTitle, type Directory } from '@/lib/channels';
 
 const props = defineProps<{ agent: Agent; runs: Run[] | undefined; directory: Directory }>();
+defineEmits<{ deleted: [] }>();
 
 const queryClient = useQueryClient();
 const channels = useChannels();
+const editOpen = ref(false);
+const deleteOpen = ref(false);
 
 const copied = ref('');
 const copyError = ref('');
@@ -61,6 +66,20 @@ function inputs(run: Run) {
 <template>
   <div>
     <section class="space-y-3 border-b p-4">
+      <div v-if="agent.status !== 'deleted'" class="flex gap-2">
+        <Button variant="outline" size="sm" class="flex-1" @click="editOpen = true">
+          <Pencil />编辑 Agent
+        </Button>
+        <Button variant="destructive" size="sm" @click="deleteOpen = true">
+          <Trash2 />删除 Agent
+        </Button>
+      </div>
+      <p
+        v-else
+        class="rounded-md border bg-muted/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground"
+      >
+        此 Agent 已删除，无法恢复运行。聊天历史、工作目录和共享文件已保留。
+      </p>
       <dl
         class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2.5 text-[13px]"
       >
@@ -107,7 +126,7 @@ function inputs(run: Run) {
       </p>
     </section>
 
-    <section class="border-b p-4">
+    <section v-if="agent.status !== 'deleted'" class="border-b p-4">
       <h3 class="text-[13px] font-semibold">协作权限</h3>
       <div class="mt-2.5 flex items-start gap-3">
         <div class="min-w-0 flex-1">
@@ -156,5 +175,7 @@ function inputs(run: Run) {
         <li v-for="run in runs" :key="run.id"><RunCard :run="run" :inputs="inputs(run)" /></li>
       </ol>
     </section>
+    <EditAgentDialog v-if="agent.status !== 'deleted'" v-model:open="editOpen" :agent="agent" />
+    <DeleteAgentDialog v-model:open="deleteOpen" :agent="agent" @deleted="$emit('deleted')" />
   </div>
 </template>

@@ -30,7 +30,9 @@ const summary = computed(() => {
 });
 // Paused groups and stopped Agents both hold new messages until resumed.
 const held = computed(() =>
-  agent.value ? agent.value.desiredState === 'stopped' : props.channel.paused,
+  agent.value
+    ? agent.value.status !== 'deleted' && agent.value.desiredState === 'stopped'
+    : props.channel.paused,
 );
 </script>
 
@@ -56,6 +58,7 @@ const held = computed(() =>
       </span>
       <span class="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
         <span :class="['truncate', summary.active && 'text-primary']">{{ summary.text }}</span>
+        <span v-if="agent?.status === 'deleted'" class="ml-auto shrink-0 text-[11px]">已删除</span>
         <template v-if="held">
           <Pause class="ml-auto size-3.5 shrink-0" aria-hidden="true" /><span class="sr-only">{{
             agent ? '已停止' : '已暂停'

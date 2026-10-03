@@ -12,6 +12,7 @@ import {
   type CreateGroup,
   type QuestionAnswer,
   type SendMessage,
+  type UpdateAgent,
 } from '@isles/contracts';
 import { z } from 'zod';
 
@@ -47,12 +48,16 @@ export const saveCodexConfiguration = (binaryPath: string | null) =>
   api('/codex/config', codexConfigurationSchema, { binaryPath }, 'PUT');
 export const fetchModels = () => api('/codex/models', z.object({ models: z.array(modelSchema) }));
 
-export const fetchAgents = () =>
-  api('/agents', z.object({ agents: z.array(agentSchema), cursor: z.number() }));
+export const fetchAgents = (includeDeleted = false) =>
+  api(
+    `/agents${includeDeleted ? '?includeDeleted=true' : ''}`,
+    z.object({ agents: z.array(agentSchema), cursor: z.number() }),
+  );
 export const fetchAgentDetail = (id: string) => api(`/agents/${id}`, agentDetailSchema);
 export const createAgent = (input: CreateAgent) => api('/agents', agentSchema, input);
-export const updateAgent = (id: string, input: { canCreateGroups: boolean }) =>
+export const updateAgent = (id: string, input: UpdateAgent) =>
   api(`/agents/${id}`, agentSchema, input, 'PATCH');
+export const deleteAgent = (id: string) => api(`/agents/${id}`, agentSchema, undefined, 'DELETE');
 export const controlAgent = (id: string, action: 'stop' | 'resume') =>
   api(`/agents/${id}/${action}`, agentSchema, {});
 export const answerQuestion = (agentId: string, questionId: string, answer: QuestionAnswer) =>

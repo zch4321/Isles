@@ -9,11 +9,15 @@ export const useHealth = () =>
   useQuery({ queryKey: ['health'], queryFn: fetchHealth, refetchInterval: 15_000 });
 
 export const useAgents = () =>
-  useQuery({ queryKey: ['agents'], queryFn: fetchAgents, refetchInterval: 10_000 });
+  useQuery({ queryKey: ['agents'], queryFn: () => fetchAgents(), refetchInterval: 10_000 });
 
 /** Agents by ID, for sender names, members and mentions. */
 export function useDirectory() {
-  const agents = useAgents();
+  const agents = useQuery({
+    queryKey: ['agents', 'directory'],
+    queryFn: () => fetchAgents(true),
+    refetchInterval: 10_000,
+  });
   return computed(() => new Map<string, Agent>(agents.data.value?.agents.map((a) => [a.id, a])));
 }
 

@@ -8,6 +8,7 @@ import {
   type QuestionDefinition,
   type Run,
   type SendMessage,
+  type UpdateAgent,
 } from '@isles/contracts';
 import { z } from 'zod';
 import { join, resolve } from 'node:path';
@@ -44,11 +45,14 @@ interface Handle {
   client?: NativeClient;
   active?: Active;
   task?: Promise<void>;
+  // A newer stop/resume/delete supersedes a control request waiting on native I/O.
+  controlRevision?: number;
   // Restart the idle native process so it reloads its MCP tool list.
   refresh?: boolean;
 }
 export class Runtime {
   private handles = new Map<string, Handle>();
+  private deleting = new Set<string>();
   private baseUrl: string | undefined;
   private closing = false;
   readonly factory: ClientFactory;
@@ -114,13 +118,43 @@ export class Runtime {
     this.kick(agent.id);
     return this.store.publicAgent(agent.id);
   }
-  updateAgent(id: string, update: { canCreateGroups: boolean }) {
-    const agent = this.store.getAgent(id);
-    if (agent.canCreateGroups !== update.canCreateGroups) {
-      // Server-side checks read the new value at once; the model's tool list follows on restart.
-      this.store.updateAgent(id, { canCreateGroups: update.canCreateGroups });
+  async updateAgent(id: string, update: UpdateAgent) {
+    let agent = this.managed(id);
+    const changesModel = () =>
+      (update.model !== undefined && update.model !== agent.model) ||
+      (update.reasoningEffort !== undefined && update.reasoningEffort !== agent.reasoningEffort);
+    if (changesModel()) {
+      const status = await this.catalog.status();
+      agent = this.managed(id);
+      if (changesModel()) {
+        if (!status.available || !status.authenticated)
+          throw new HttpError(503, status.error ?? 'Codex 原生认证不可用');
+        const models = await this.catalog.models();
+        // Another partial edit may have completed while the catalog was loading.
+        agent = this.managed(id);
+        if (changesModel()) {
+          const model = models.find((m) => m.model === (update.model ?? agent.model));
+          if (
+            !model ||
+            !model.supportedReasoningEfforts.includes(
+              update.reasoningEffort ?? agent.reasoningEffort,
+            )
+          )
+            throw new HttpError(400, '请选择实际可用的模型和推理等级');
+        }
+      }
+    }
+    const changed = Object.fromEntries(
+      Object.entries(update).filter(
+        ([key, value]) => value !== undefined && value !== agent[key as keyof AgentRecord],
+      ),
+    ) as Partial<Pick<AgentRecord, 'name' | 'model' | 'reasoningEffort' | 'canCreateGroups'>>;
+    if (Object.keys(changed).length) {
+      this.store.updateAgent(id, changed);
+      // The running turn keeps its captured configuration; reconnect loads guidance and MCP tools
+      // for the next turn while resuming the same native thread.
       const handle = this.handles.get(id);
-      if (handle?.client) {
+      if (handle) {
         handle.refresh = true;
         this.kick(id);
       }
@@ -128,6 +162,9 @@ export class Runtime {
     return this.store.publicAgent(id);
   }
   send(channelId: string, input: SendMessage) {
+    const channel = this.store.getChannel(channelId);
+    if (channel.kind === 'private' && channel.agentId && this.deleting.has(channel.agentId))
+      throw new HttpError(409, 'Agent 正在删除，不能继续发送消息');
     const message = this.store.saveMessage(channelId, { type: 'user' }, input);
     this.wake(message);
     return message;
@@ -146,8 +183,14 @@ export class Runtime {
   private wake(message: Message) {
     for (const d of message.deliveries) if (d.status === 'queued') this.kick(d.agentId);
   }
+  private managed(id: string) {
+    const agent = this.store.getAgent(id);
+    if (agent.status === 'deleted') throw new HttpError(410, 'Agent 已删除，历史仅供查看');
+    if (this.deleting.has(id)) throw new HttpError(409, 'Agent 正在删除，请等待操作完成');
+    return agent;
+  }
   private running(agentId: string) {
-    if (this.store.getAgent(agentId).desiredState !== 'running')
+    if (this.managed(agentId).desiredState !== 'running')
       throw new HttpError(409, 'Agent 已停止，不能继续操作');
   }
   receiveMessages(agentId: string, query: { channelId?: string | undefined; limit: number }) {
@@ -290,6 +333,9 @@ export class Runtime {
         }
         delete handle.refresh;
         if (!handle.client) await this.connect(id, handle);
+        // An edit during workspace preparation or initialization must reload guidance
+        // before any queued input starts its first turn.
+        if (handle.refresh) continue;
         const agent = this.store.getAgent(id);
         if (
           !handle.client ||
@@ -552,6 +598,13 @@ export class Runtime {
     this.store.answerQuestion(questionId, answers);
   }
   async stop(id: string) {
+    this.managed(id);
+    const handle = this.handle(id);
+    handle.controlRevision = (handle.controlRevision ?? 0) + 1;
+    await this.halt(id);
+  }
+  /** Deletion uses the same interruption path while it blocks other management actions. */
+  private async halt(id: string) {
     this.store.getAgent(id);
     this.store.updateAgent(id, { desiredState: 'stopped', status: 'stopped', error: null });
     const handle = this.handles.get(id);
@@ -581,18 +634,45 @@ export class Runtime {
     if (handle.client === client) delete handle.client;
   }
   async resume(id: string) {
-    let agent = this.store.getAgent(id);
+    let agent = this.managed(id);
     const handle = this.handle(id);
     if (agent.desiredState === 'running' && handle.active)
       throw new HttpError(409, 'Agent 正在执行，请先停止');
+    const revision = (handle.controlRevision ?? 0) + 1;
+    handle.controlRevision = revision;
+    const current = () => {
+      const agent = this.managed(id);
+      if (handle.controlRevision !== revision)
+        throw new HttpError(409, 'Agent 的运行状态已被其他操作更改，请重试');
+      return agent;
+    };
     await handle.task;
-    agent = this.store.getAgent(id);
+    agent = current();
     if (agent.threadCreationAttempted && !agent.threadId)
       throw new HttpError(409, '原生 thread 创建结果不明，无法用新 thread 替代；请核对原生记录。');
-    await handle.client?.close();
-    delete handle.client;
+    const client = handle.client;
+    await client?.close();
+    current();
+    if (handle.client === client) delete handle.client;
     this.store.updateAgent(id, { desiredState: 'running', status: 'recovering', error: null });
     this.kick(id);
+  }
+  async deleteAgent(id: string) {
+    const agent = this.store.getAgent(id);
+    if (agent.status === 'deleted') return this.store.publicAgent(id);
+    if (this.deleting.has(id)) throw new HttpError(409, 'Agent 正在删除，请等待操作完成');
+    this.deleting.add(id);
+    const handle = this.handle(id);
+    handle.controlRevision = (handle.controlRevision ?? 0) + 1;
+    try {
+      await this.halt(id);
+      await this.handles.get(id)?.task;
+      const deleted = this.store.deleteAgent(id);
+      this.handles.delete(id);
+      return deleted;
+    } finally {
+      this.deleting.delete(id);
+    }
   }
   async close() {
     this.closing = true;

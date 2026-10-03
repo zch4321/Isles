@@ -38,7 +38,21 @@ harness.factory = async (agent, handlers, baseUrl) => {
 };
 const app = await buildApp({
   config,
-  catalog: testCatalog,
+  catalog: {
+    ...testCatalog,
+    models: async () => [
+      ...(await testCatalog.models()),
+      {
+        id: 'test-model-2',
+        model: 'test-model-2',
+        displayName: '测试模型 2',
+        description: '模拟模型，仅用于编辑验证',
+        supportedReasoningEfforts: ['high', 'max'],
+        defaultReasoningEffort: 'high',
+        isDefault: false,
+      },
+    ],
+  },
   clientFactory: harness.factory,
 });
 

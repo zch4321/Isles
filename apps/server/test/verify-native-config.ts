@@ -1,4 +1,5 @@
-// Opt-in native acceptance: pnpm --filter @isles/server exec tsx test/verify-native-config.ts
+// Opt-in configuration, workspace and Agent management acceptance.
+// pnpm --filter @isles/server exec tsx test/verify-native-config.ts
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
@@ -25,6 +26,8 @@ const report = {
   startedAt: new Date().toISOString(),
   version: null as string | null,
   model: null as string | null,
+  editedModel: null as string | null,
+  editedEffort: null as string | null,
   agents: [] as { id: string; threadId: string | null; workspace: string }[],
   instructionSources: [] as {
     agentId: string;
@@ -33,6 +36,7 @@ const report = {
     paths: string[];
     injectedRules: boolean;
   }[],
+  turns: [] as { agentId: string; threadId: string; model: string; effort: string }[],
   checks: [] as string[],
   error: null as string | null,
   finishedAt: '',
@@ -67,6 +71,13 @@ const open = async () => {
             injectedRules: Object.hasOwn(params, 'developerInstructions'),
           });
         }
+        if (method === 'turn/start')
+          report.turns.push({
+            agentId: agent.id,
+            threadId: String(params.threadId),
+            model: String(params.model),
+            effort: String(params.effort),
+          });
         return response;
       };
       try {
@@ -209,6 +220,155 @@ try {
     resumed,
   );
   report.checks.push('same native threads and shared file survive application restart');
+  progress('editing a real Agent without replacing its thread');
+  const alternate =
+    models.find(
+      (candidate) => candidate.model === 'gpt-6-luna' && candidate.model !== model.model,
+    ) ??
+    models.find(
+      (candidate) =>
+        candidate.model !== model.model && candidate.supportedReasoningEfforts.includes('high'),
+    );
+  assert.ok(alternate, 'Need a second available model to verify model editing');
+  const editedEffort = alternate.supportedReasoningEfforts.includes('xhigh') ? 'xhigh' : 'high';
+  const editedName = `Edited reader ${nonce}`;
+  const beforeEdit = app.isles.store.publicAgent(reader.id);
+  const resumesBeforeEdit = report.instructionSources.filter(
+    (source) => source.agentId === reader.id && source.method === 'thread/resume',
+  ).length;
+  const editedResponse = await app.inject({
+    method: 'PATCH',
+    url: `/api/agents/${reader.id}`,
+    payload: {
+      name: editedName,
+      model: alternate.model,
+      reasoningEffort: editedEffort,
+      canCreateGroups: true,
+    },
+  });
+  assert.equal(editedResponse.statusCode, 200);
+  report.editedModel = alternate.model;
+  report.editedEffort = editedEffort;
+  await until(
+    () =>
+      ready(reader) &&
+      report.instructionSources.filter(
+        (source) => source.agentId === reader.id && source.method === 'thread/resume',
+      ).length ===
+        resumesBeforeEdit + 1,
+    'edited Agent reconnected',
+  );
+  const edited = app.isles.store.publicAgent(reader.id);
+  assert.equal(edited.threadId, beforeEdit.threadId);
+  assert.equal(edited.workspace, beforeEdit.workspace);
+  assert.equal(edited.canCreateGroups, true);
+  assert.ok(
+    (await readFile(join(reader.workspace, 'AGENTS.md'), 'utf8')).includes(
+      `Agent name: ${JSON.stringify(editedName)}`,
+    ),
+  );
+  const editReply = `EDITED_${nonce}`;
+  await ask(
+    reader,
+    `Acceptance check: read your workspace AGENTS.md and verify your Agent name is exactly ${editedName}. Read ${fileName} from its shared directory and verify its content is ${payload}. Use Isles MCP send_message with channelId private and body exactly ${editReply}. End your turn.`,
+    editReply,
+  );
+  assert.deepEqual(report.turns.at(-1), {
+    agentId: reader.id,
+    threadId: edited.threadId!,
+    model: alternate.model,
+    effort: editedEffort,
+  });
+  report.checks.push(
+    'native rename, model and effort edit reloads AGENTS.md and retains original thread/workspace',
+  );
+  const group = app.isles.runtime.createGroup('user', {
+    name: 'Deletion acceptance',
+    memberIds: [writer.id, reader.id],
+  });
+  const personalFile = join(reader.workspace, 'retained-after-delete.txt');
+  await writeFile(personalFile, nonce);
+  const readerRoot = agentRoot(app.isles.runtime.environment.dataDir, reader);
+  const readerToken = (await readFile(join(readerRoot, 'isles-mcp-token'), 'utf8')).trim();
+  const historyBeforeDelete = app.isles.store.listMessages(reader.channelId);
+  progress('deleting an active real Agent');
+  app.isles.runtime.send(reader.channelId, {
+    body: 'Acceptance interruption check: reread AGENTS.md, then wait 10 seconds before publishing anything. Your turn will be interrupted by the test.',
+    clientId: randomUUID(),
+  });
+  await until(
+    () =>
+      app!.isles.store
+        .agentDetail(reader.id)
+        .runs.some((run) => run.status === 'running' && run.turnId !== null),
+    'native turn accepted before deletion',
+  );
+  const deletedResponse = await app.inject({ method: 'DELETE', url: `/api/agents/${reader.id}` });
+  assert.equal(deletedResponse.statusCode, 200);
+  assert.equal(deletedResponse.json().status, 'deleted');
+  assert.equal(app.isles.store.publicAgent(reader.id).threadId, beforeEdit.threadId);
+  assert.deepEqual(app.isles.store.memberIds(group.id), [writer.id]);
+  assert.equal(app.isles.store.agentDetail(reader.id).runs[0]!.status, 'interrupted');
+  assert.deepEqual(
+    app.isles.store.listMessages(reader.channelId).slice(0, historyBeforeDelete.length),
+    historyBeforeDelete,
+  );
+  assert.equal(await readFile(personalFile, 'utf8'), nonce);
+  assert.equal(await readFile(join(root, 'work', 'shared', fileName), 'utf8'), payload);
+  assert.equal((await readFile(join(readerRoot, 'isles-mcp-token'), 'utf8')).trim(), readerToken);
+  assert.equal(
+    (
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/agents/${reader.id}`,
+        payload: { name: 'Cannot revive' },
+      })
+    ).statusCode,
+    410,
+  );
+  assert.equal(
+    (await app.inject({ method: 'POST', url: `/api/agents/${reader.id}/resume` })).statusCode,
+    410,
+  );
+  assert.equal(
+    (
+      await app.inject({
+        method: 'POST',
+        url: `/api/channels/${reader.channelId}/messages`,
+        payload: { body: 'Read only', clientId: 'deleted-write' },
+      })
+    ).statusCode,
+    409,
+  );
+  const address = app.server.address();
+  assert.ok(address && typeof address !== 'string');
+  const rejectedMcp = await fetch(`http://127.0.0.1:${address.port}/mcp/${reader.id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${readerToken}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+  });
+  assert.equal(rejectedMcp.status, 401);
+  report.checks.push(
+    'active native deletion interrupts turn, leaves groups, revokes MCP and retains history/personal/shared files',
+  );
+  await app.close();
+  app = undefined;
+  progress('restarting after deletion');
+  app = await open();
+  await until(() => ready(writer), 'surviving Agent restored');
+  assert.equal(app.isles.store.publicAgent(writer.id).threadId, report.agents[0]!.threadId);
+  const afterRestart = app.isles.store.publicAgent(reader.id);
+  assert.equal(afterRestart.status, 'deleted');
+  assert.equal(afterRestart.name, editedName);
+  assert.equal(afterRestart.model, alternate.model);
+  assert.equal(afterRestart.reasoningEffort, editedEffort);
+  assert.equal(app.isles.store.listAgents().length, 1);
+  assert.equal(app.isles.store.listAgents(true).length, 2);
+  assert.equal((await app.inject(`/api/agents/${reader.id}`)).statusCode, 200);
+  assert.equal(await readFile(personalFile, 'utf8'), nonce);
+  report.checks.push(
+    'restart restores only the surviving original thread; deleted identity and read-only history remain',
+  );
   const normalize = (path: string) =>
     process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
   for (const source of report.instructionSources) {
@@ -226,7 +386,7 @@ try {
   );
   assert.equal(
     report.instructionSources.filter((source) => source.method === 'thread/resume').length,
-    2,
+    4,
   );
   assert.equal(await configHash(), before);
   report.checks.push(

@@ -27,6 +27,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
     async handler(request, reply) {
       const store = runtime.store;
       const agent = store.getAgent(request.params.id);
+      if (agent.status === 'deleted') throw new HttpError(401, 'Agent 已删除，MCP 身份已失效');
       let token: string;
       try {
         token = (
@@ -45,6 +46,8 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         !timingSafeEqual(Buffer.from(authorization), Buffer.from(expected))
       )
         throw new HttpError(401, 'MCP Agent 身份无效');
+      if (store.getAgent(agent.id).status === 'deleted')
+        throw new HttpError(401, 'Agent 已删除，MCP 身份已失效');
       const id = agent.id;
       const server = new McpServer({ name: 'isles', version: '0.4.0' });
       const resolveChannel = (channelId: string) =>

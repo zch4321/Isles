@@ -35,6 +35,9 @@ const sections = computed(() => {
   const query = search.value.trim().toLowerCase();
   const all = (channels.data.value?.channels ?? []).toSorted(byActivity);
   const visible = all.filter((channel) => matches(channel, query));
+  const deleted = (channel: Channel) =>
+    channel.kind === 'private' && directory.value.get(channel.agentId ?? '')?.status === 'deleted';
+  const history = all.filter(deleted);
   return [
     {
       id: 'groups',
@@ -47,11 +50,23 @@ const sections = computed(() => {
     {
       id: 'agents',
       title: 'Agents',
-      total: all.filter((c) => c.kind === 'private').length,
-      items: visible.filter((c) => c.kind === 'private'),
+      total: all.filter((c) => c.kind === 'private' && !deleted(c)).length,
+      items: visible.filter((c) => c.kind === 'private' && !deleted(c)),
       create: { label: '新建 Agent', kind: 'agent' as const },
       empty: '新建一个 Agent，开始私聊。',
     },
+    ...(history.length
+      ? [
+          {
+            id: 'history',
+            title: '历史对话',
+            total: history.length,
+            items: visible.filter(deleted),
+            create: undefined,
+            empty: '',
+          },
+        ]
+      : []),
   ];
 });
 const loading = computed(() => agents.isPending.value || channels.isPending.value);
@@ -146,6 +161,7 @@ async function refresh() {
             <h2 class="font-medium">{{ section.title }}</h2>
             <span class="tabular-nums">{{ section.total }}</span>
             <Button
+              v-if="section.create"
               variant="ghost"
               size="icon-xs"
               class="ml-auto"

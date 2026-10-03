@@ -54,7 +54,7 @@ const running = computed(() => props.members.filter((m) => m.status === 'running
         </p>
       </div>
       <Button
-        v-if="canResume"
+        v-if="agent.status !== 'deleted' && canResume"
         variant="outline"
         size="sm"
         aria-label="恢复 Agent"
@@ -64,7 +64,7 @@ const running = computed(() => props.members.filter((m) => m.status === 'running
         <LoaderCircle v-if="controlPending" class="animate-spin" /><Play v-else />恢复
       </Button>
       <Button
-        v-else
+        v-else-if="agent.status !== 'deleted'"
         variant="outline"
         size="sm"
         aria-label="停止 Agent"

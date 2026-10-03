@@ -38,7 +38,15 @@ export type ChannelRecord = typeof channels.$inferSelect;
 type AgentUpdate = Partial<
   Pick<
     AgentRecord,
-    'status' | 'desiredState' | 'threadId' | 'error' | 'threadCreationAttempted' | 'canCreateGroups'
+    | 'status'
+    | 'desiredState'
+    | 'threadId'
+    | 'error'
+    | 'threadCreationAttempted'
+    | 'canCreateGroups'
+    | 'name'
+    | 'model'
+    | 'reasoningEffort'
   >
 >;
 export type Sender = { type: 'user' } | { type: 'agent'; id: string };
@@ -151,10 +159,11 @@ export class Store {
   publicAgent(id: string): Agent {
     return agentSchema.parse(this.getAgent(id));
   }
-  listAgents(): Agent[] {
+  listAgents(includeDeleted = false): Agent[] {
     return this.db
       .select({ id: agents.id })
       .from(agents)
+      .where(includeDeleted ? undefined : ne(agents.status, 'deleted'))
       .orderBy(asc(agents.createdAt))
       .all()
       .map((r) => this.publicAgent(r.id));
@@ -197,12 +206,68 @@ export class Store {
   }
   updateAgent(id: string, update: AgentUpdate) {
     this.change(() => {
+      if (this.getAgent(id).status === 'deleted') throw new HttpError(410, '该 Agent 已删除');
       this.db
         .update(agents)
         .set({ ...update, updatedAt: now() })
         .where(eq(agents.id, id))
         .run();
       this.event('agent', { agentId: id }, update);
+    });
+  }
+  /** Retire an Agent while retaining its identity, native session and historical records. */
+  deleteAgent(id: string): Agent {
+    return this.change(() => {
+      const agent = this.getAgent(id);
+      if (agent.status === 'deleted') return this.publicAgent(id);
+      const joined = this.channelsOf(id);
+      const update = {
+        status: 'deleted' as const,
+        desiredState: 'stopped' as const,
+        canCreateGroups: false,
+        error: null,
+      };
+      this.db
+        .update(agents)
+        .set({ ...update, updatedAt: now() })
+        .where(eq(agents.id, id))
+        .run();
+      this.db.delete(channelMembers).where(eq(channelMembers.agentId, id)).run();
+      const cancelled = this.db
+        .update(deliveries)
+        .set({ status: 'cancelled', updatedAt: now() })
+        .where(
+          and(
+            eq(deliveries.agentId, id),
+            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'accepted']),
+          ),
+        )
+        .returning({ channelId: deliveries.channelId })
+        .all();
+      const interrupted = this.db
+        .update(runs)
+        .set({ status: 'interrupted', finishedAt: now() })
+        .where(and(eq(runs.agentId, id), inArray(runs.status, ['starting', 'running', 'waiting'])))
+        .returning({ id: runs.id })
+        .all();
+      const expired = this.db
+        .update(questions)
+        .set({ status: 'expired' })
+        .where(and(eq(questions.agentId, id), eq(questions.status, 'pending')))
+        .returning({ id: questions.id })
+        .all();
+      this.event('agent', { agentId: id }, update);
+      for (const channel of joined) {
+        if (channel.kind === 'group')
+          this.systemMessage(channel.id, `用户删除了 ${agent.name}，该 Agent 已退出群聊。`);
+        this.event('channel', { agentId: id, channelId: channel.id }, { members: 'removed' });
+      }
+      for (const channelId of new Set(cancelled.map((d) => d.channelId)))
+        this.event('delivery', { agentId: id, channelId }, { status: 'cancelled' });
+      for (const run of interrupted)
+        this.event('run', { agentId: id }, { runId: run.id, status: 'interrupted' });
+      if (expired.length) this.event('question', { agentId: id }, { status: 'expired' });
+      return this.publicAgent(id);
     });
   }
   private agentName(id: string) {
@@ -279,7 +344,7 @@ export class Store {
     const found = this.db
       .select({ id: agents.id })
       .from(agents)
-      .where(inArray(agents.id, unique))
+      .where(and(inArray(agents.id, unique), ne(agents.status, 'deleted')))
       .all();
     if (found.length !== unique.length) throw new HttpError(400, '只能添加已有的 Agent');
     return unique;
@@ -539,6 +604,8 @@ export class Store {
   }
   saveMessage(channelId: string, sender: Sender, input: MessageInput): Message {
     const channel = this.getChannel(channelId);
+    if (channel.kind === 'private' && this.getAgent(channel.agentId!).status === 'deleted')
+      throw new HttpError(409, '该 Agent 已删除，私聊历史只读');
     const senderId = sender.type === 'user' ? USER : sender.id;
     if (sender.type === 'agent' && !this.isMember(channelId, sender.id))
       throw new HttpError(403, '只能在自己所在的频道发言');
@@ -902,6 +969,10 @@ export class Store {
       .where(inArray(runs.status, ['starting', 'running', 'waiting']))
       .all();
     for (const r of active) {
+      if (this.getAgent(r.agentId).status === 'deleted') {
+        this.finishRun(r.id, 'interrupted', 'cancelled');
+        continue;
+      }
       this.finishRun(
         r.id,
         'uncertain',

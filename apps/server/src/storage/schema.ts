@@ -29,7 +29,7 @@ export const agents = sqliteTable(
       .notNull()
       .default('running'),
     status: text({
-      enum: ['creating', 'recovering', 'ready', 'running', 'stopped', 'error'],
+      enum: ['creating', 'recovering', 'ready', 'running', 'stopped', 'deleted', 'error'],
     }).notNull(),
     error: text(),
     createdAt: text('created_at').notNull(),

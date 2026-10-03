@@ -103,6 +103,7 @@ const send = useMutation({
 
 const draft = useDraft(() => props.channelId);
 async function submit() {
+  if (agent.value?.status === 'deleted') return;
   const body = draft.value.trim();
   if (!body || send.isPending.value) return;
   try {
@@ -125,6 +126,8 @@ const placeholder = computed(() => {
     : `在 ${channel.value?.name ?? '群聊'} 中发言，输入 @ 提及成员…`;
 });
 const notice = computed(() => {
+  if (agent.value?.status === 'deleted')
+    return { held: true, text: 'Agent 已删除，聊天历史和工作文件已保留。当前对话仅供查看。' };
   if (channel.value?.paused)
     return { held: true, text: '讨论已暂停：新消息会保存，暂不自动投递；继续后汇总剩余未读。' };
   const current = agent.value;
@@ -220,6 +223,7 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
           <Clock3 v-else class="size-3.5 shrink-0" aria-hidden="true" />{{ notice.text }}
         </p>
         <MessageComposer
+          v-if="agent?.status !== 'deleted'"
           v-model="draft"
           :placeholder="placeholder"
           :sending="send.isPending.value"

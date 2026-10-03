@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
+import type { Catalog } from '../src/codex/catalog.js';
 import { agentRoot } from '../src/codex/environment.js';
 import { MockHarness, testCatalog, testConfig, parseMessageText } from './helpers.js';
 
@@ -16,14 +17,14 @@ afterEach(async () => {
   for (const fn of cleanups.reverse()) await fn();
   cleanups.length = 0;
 });
-async function fixture() {
+async function fixture(catalog: Catalog = testCatalog) {
   const dir = await mkdtemp(join(tmpdir(), 'isles-runtime-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));
   const harness = new MockHarness();
   const open = () =>
     buildApp({
       config: testConfig(dir),
-      catalog: testCatalog,
+      catalog,
       clientFactory: harness.factory,
       runtimeUrl: 'http://127.0.0.1:1',
     });
@@ -54,6 +55,514 @@ async function fixture() {
 }
 
 describe('durable runtime with simulated Codex', () => {
+  it('renames an idle Agent and refreshes guidance on its original thread without changing omitted fields', async () => {
+    const { app, harness, create, ready } = await fixture();
+    const agent = await create('Before');
+    const originalClient = harness.latest(agent.id);
+    const renamed = await app.isles.runtime.updateAgent(agent.id, { name: 'After' });
+    expect(renamed).toMatchObject({
+      id: agent.id,
+      name: 'After',
+      model: agent.model,
+      reasoningEffort: agent.reasoningEffort,
+      canCreateGroups: agent.canCreateGroups,
+      workspace: agent.workspace,
+      threadId: agent.threadId,
+    });
+    await expect.poll(() => harness.clients.length).toBe(2);
+    await ready(agent.id);
+    expect(originalClient.closed).toBe(true);
+    expect(harness.latest(agent.id).calls[0]).toMatchObject({
+      method: 'thread/resume',
+      params: { threadId: agent.threadId },
+    });
+    expect(await readFile(join(agent.workspace, 'AGENTS.md'), 'utf8')).toContain(
+      'Agent name: "After"',
+    );
+    const cursor = app.isles.store.cursor();
+    await app.isles.runtime.updateAgent(agent.id, { name: 'After' });
+    expect(app.isles.store.cursor()).toBe(cursor);
+    expect(harness.clients).toHaveLength(2);
+  });
+
+  it('applies busy model edits to the next turn while preserving the active turn and native thread', async () => {
+    const catalog: Catalog = {
+      ...testCatalog,
+      models: async () => [
+        ...(await testCatalog.models()),
+        {
+          ...(await testCatalog.models())[0]!,
+          id: 'second-model',
+          model: 'second-model',
+          supportedReasoningEfforts: ['high'],
+        },
+      ],
+    };
+    const { app, harness, create, say, ready } = await fixture(catalog);
+    const agent = await create();
+    say(agent.channelId, 'First turn');
+    const originalClient = harness.latest(agent.id);
+    await app.isles.runtime.updateAgent(agent.id, {
+      model: 'second-model',
+      reasoningEffort: 'high',
+    });
+    expect(originalClient.closed).toBe(false);
+    expect(originalClient.calls.find((call) => call.method === 'turn/start')).toMatchObject({
+      params: { model: 'test-model', effort: 'max', threadId: agent.threadId },
+    });
+    expect(app.isles.store.publicAgent(agent.id).status).toBe('running');
+    say(agent.channelId, 'Next turn');
+    originalClient.complete();
+    await expect.poll(() => harness.turns).toBe(2);
+    expect(originalClient.closed).toBe(true);
+    const nextClient = harness.latest(agent.id);
+    expect(nextClient.calls[0]).toMatchObject({
+      method: 'thread/resume',
+      params: { threadId: agent.threadId, model: 'second-model' },
+    });
+    expect(nextClient.calls.find((call) => call.method === 'turn/start')).toMatchObject({
+      params: { model: 'second-model', effort: 'high', threadId: agent.threadId },
+    });
+    nextClient.complete();
+    await ready(agent.id);
+    expect(
+      harness.clients
+        .flatMap((client) => client.calls)
+        .filter((call) => call.method === 'thread/start'),
+    ).toHaveLength(1);
+  });
+
+  it('refreshes edits made during initial connection before the first turn without replacing its persisted thread', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'isles-runtime-edit-connecting-'));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const harness = new MockHarness();
+    let releaseConnection: (() => void) | undefined;
+    const guidance: string[] = [];
+    const app = await buildApp({
+      config: testConfig(dir),
+      catalog: testCatalog,
+      clientFactory: async (agent, handlers, baseUrl) => {
+        guidance.push(await readFile(join(agent.workspace, 'AGENTS.md'), 'utf8'));
+        if (!agent.threadId)
+          await new Promise<void>((resolve) => {
+            releaseConnection = resolve;
+          });
+        return harness.factory(agent, handlers, baseUrl);
+      },
+      runtimeUrl: 'http://127.0.0.1:1',
+    });
+    cleanups.push(() => app.close());
+    const agent = await app.isles.runtime.createAgent({
+      name: 'Before connection',
+      model: 'test-model',
+      reasoningEffort: 'max',
+    });
+    await expect.poll(() => Boolean(releaseConnection)).toBe(true);
+    expect(harness.clients).toHaveLength(0);
+    expect(guidance[0]).toContain('Agent name: "Before connection"');
+    await app.isles.runtime.updateAgent(agent.id, {
+      name: 'After connection',
+      reasoningEffort: 'high',
+    });
+    app.isles.runtime.send(agent.channelId, { body: 'First input', clientId: 'connecting-input' });
+    releaseConnection!();
+    await expect.poll(() => harness.turns).toBe(1);
+    expect(harness.clients).toHaveLength(2);
+    expect(guidance[1]).toContain('Agent name: "After connection"');
+    const initialClient = harness.clients[0]!;
+    expect(initialClient.closed).toBe(true);
+    expect(initialClient.calls.map((call) => call.method)).toEqual([
+      'thread/start',
+      'thread/inject_items',
+    ]);
+    const refreshedClient = harness.latest(agent.id);
+    expect(refreshedClient.calls[0]).toMatchObject({
+      method: 'thread/resume',
+      params: { threadId: initialClient.threadId },
+    });
+    expect(refreshedClient.calls.find((call) => call.method === 'turn/start')).toMatchObject({
+      params: { effort: 'high', threadId: initialClient.threadId },
+    });
+    expect(app.isles.store.publicAgent(agent.id)).toMatchObject({
+      name: 'After connection',
+      threadId: initialClient.threadId,
+      workspace: agent.workspace,
+    });
+    expect(harness.persistedThreads.size).toBe(1);
+    refreshedClient.complete();
+    await expect.poll(() => app.isles.store.publicAgent(agent.id).status).toBe('ready');
+  });
+
+  it('rejects invalid partial edits atomically and keeps stopped Agents stopped after valid edits', async () => {
+    const { app, harness, create } = await fixture();
+    const agent = await create();
+    await app.isles.runtime.stop(agent.id);
+    const before = app.isles.store.publicAgent(agent.id);
+    const cursor = app.isles.store.cursor();
+    for (const payload of [
+      {},
+      { name: '' },
+      { status: 'ready' },
+      { model: 'missing', name: 'Bad rename' },
+      { reasoningEffort: 'unsupported', canCreateGroups: true },
+    ]) {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: `/api/agents/${agent.id}`,
+        payload,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(app.isles.store.publicAgent(agent.id)).toEqual(before);
+    }
+    expect(app.isles.store.cursor()).toBe(cursor);
+    const changed = await app.isles.runtime.updateAgent(agent.id, {
+      name: 'Stopped rename',
+      reasoningEffort: 'high',
+      canCreateGroups: true,
+    });
+    expect(changed).toMatchObject({
+      name: 'Stopped rename',
+      reasoningEffort: 'high',
+      canCreateGroups: true,
+      desiredState: 'stopped',
+      status: 'stopped',
+      threadId: agent.threadId,
+      workspace: agent.workspace,
+    });
+    expect(harness.clients).toHaveLength(1);
+  });
+
+  it('edits names and permissions without fetching an unavailable model catalog', async () => {
+    let unavailable = false;
+    const catalog: Catalog = {
+      status: async () => {
+        if (unavailable) throw new Error('Catalog must not be fetched for this edit');
+        return testCatalog.status();
+      },
+      models: async () => {
+        if (unavailable) throw new Error('Catalog must not be fetched for this edit');
+        return testCatalog.models();
+      },
+    };
+    const { app, create } = await fixture(catalog);
+    const agent = await create();
+    unavailable = true;
+    const edited = await app.isles.runtime.updateAgent(agent.id, {
+      name: 'Offline rename',
+      canCreateGroups: true,
+      model: agent.model,
+      reasoningEffort: agent.reasoningEffort,
+    });
+    expect(edited).toMatchObject({
+      name: 'Offline rename',
+      canCreateGroups: true,
+      model: agent.model,
+      reasoningEffort: agent.reasoningEffort,
+    });
+  });
+
+  it('validates a delayed model edit against the latest reasoning effort and never applies its other fields on rejection', async () => {
+    let releaseModels: (() => void) | undefined;
+    let delayModels = false;
+    const catalog: Catalog = {
+      ...testCatalog,
+      models: async () => {
+        if (delayModels) {
+          delayModels = false;
+          await new Promise<void>((resolve) => {
+            releaseModels = resolve;
+          });
+        }
+        return [
+          ...(await testCatalog.models()),
+          {
+            ...(await testCatalog.models())[0]!,
+            id: 'max-model',
+            model: 'max-model',
+            supportedReasoningEfforts: ['max'],
+          },
+        ];
+      },
+    };
+    const { app, create } = await fixture(catalog);
+    const agent = await create();
+    await app.isles.runtime.stop(agent.id);
+    delayModels = true;
+    const delayed = app.isles.runtime.updateAgent(agent.id, {
+      model: 'max-model',
+      name: 'Rejected rename',
+    });
+    const rejection = expect(delayed).rejects.toMatchObject({ statusCode: 400 });
+    await expect.poll(() => Boolean(releaseModels)).toBe(true);
+    await app.isles.runtime.updateAgent(agent.id, { reasoningEffort: 'high' });
+    releaseModels!();
+    await rejection;
+    expect(app.isles.store.publicAgent(agent.id)).toMatchObject({
+      name: agent.name,
+      model: agent.model,
+      reasoningEffort: 'high',
+      desiredState: 'stopped',
+    });
+  });
+
+  it('deletes a waiting Agent through the API, revokes its MCP identity and retains read-only history across restart', async () => {
+    const { app, harness, create, say, group, open } = await fixture();
+    const agent = await create('Retained author');
+    const other = await create('Survivor');
+    const shared = group('Discussion', [agent.id, other.id]);
+    const privateFile = join(agent.workspace, 'retain.txt');
+    const sharedFile = join(app.isles.runtime.environment.sharedDir, 'retain.txt');
+    await writeFile(privateFile, 'personal');
+    await writeFile(sharedFile, 'shared');
+    const token = await app.isles.runtime.environment.token(
+      agentRoot(app.isles.runtime.environment.dataDir, agent),
+    );
+    say(agent.channelId, 'Running input');
+    await expect.poll(() => harness.turns).toBe(1);
+    const client = harness.latest(agent.id);
+    app.isles.runtime.publish(agent.id, agent.channelId, {
+      body: 'Retained reply',
+      clientId: 'retained-reply',
+    });
+    client.question();
+    const question = app.isles.store.agentDetail(agent.id).questions[0]!;
+    say(agent.channelId, 'Queued input');
+    const deleted = await app.inject({ method: 'DELETE', url: `/api/agents/${agent.id}` });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toMatchObject({
+      id: agent.id,
+      status: 'deleted',
+      desiredState: 'stopped',
+      threadId: agent.threadId,
+      workspace: agent.workspace,
+    });
+    expect(client.closed).toBe(true);
+    expect(client.calls.map((call) => call.method)).toContain('turn/interrupt');
+    expect(app.isles.store.getQuestion(question.id).status).toBe('expired');
+    expect(app.isles.store.memberIds(shared.id)).toEqual([other.id]);
+    expect(
+      (await app.inject('/api/agents')).json().agents.map((a: { id: string }) => a.id),
+    ).toEqual([other.id]);
+    expect((await app.inject('/api/agents?includeDeleted=true')).json().agents).toHaveLength(2);
+    expect((await app.inject('/api/agents?includeDeleted=yes')).statusCode).toBe(400);
+    const detail = (await app.inject(`/api/agents/${agent.id}`)).json();
+    expect(detail).toMatchObject({
+      agent: { name: 'Retained author' },
+      runs: [{ status: 'interrupted' }],
+      questions: [],
+    });
+    expect(
+      app.isles.store.channelDetail(agent.channelId).messages.map((message) => message.body),
+    ).toEqual(['Running input', 'Retained reply', 'Queued input']);
+    expect(await readFile(privateFile, 'utf8')).toBe('personal');
+    expect(await readFile(sharedFile, 'utf8')).toBe('shared');
+    for (const operation of ['stop', 'resume'])
+      expect(
+        (await app.inject({ method: 'POST', url: `/api/agents/${agent.id}/${operation}` }))
+          .statusCode,
+      ).toBe(410);
+    expect(
+      (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/agents/${agent.id}`,
+          payload: { name: 'Revived' },
+        })
+      ).statusCode,
+    ).toBe(410);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/api/channels/${agent.channelId}/messages`,
+          payload: { body: 'Rejected', clientId: 'deleted-input' },
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/mcp/${agent.id}`,
+          headers: { authorization: `Bearer ${token}` },
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect(() =>
+      app.isles.runtime.publish(agent.id, shared.id, {
+        body: 'Rejected',
+        clientId: 'deleted-reply',
+      }),
+    ).toThrow('Agent 已删除');
+    expect(() => app.isles.runtime.receiveMessages(agent.id, { limit: 50 })).toThrow(
+      'Agent 已删除',
+    );
+    const cursor = app.isles.store.cursor();
+    expect(
+      (await app.inject({ method: 'DELETE', url: `/api/agents/${agent.id}` })).statusCode,
+    ).toBe(200);
+    expect(app.isles.store.cursor()).toBe(cursor);
+    const clientsBefore = harness.clients.filter(
+      (candidate) => candidate.agent.id === agent.id,
+    ).length;
+    await app.close();
+    const restored = await open();
+    cleanups.push(() => restored.close());
+    await expect.poll(() => restored.isles.store.publicAgent(other.id).status).toBe('ready');
+    expect(restored.isles.store.publicAgent(agent.id)).toMatchObject({
+      status: 'deleted',
+      threadId: agent.threadId,
+    });
+    expect(harness.clients.filter((candidate) => candidate.agent.id === agent.id)).toHaveLength(
+      clientsBefore,
+    );
+    expect(restored.isles.store.listAgents().map((candidate) => candidate.id)).toEqual([other.id]);
+    expect(restored.isles.store.agentDetail(agent.id).runs).toEqual(detail.runs);
+  });
+
+  it('blocks management and private input while deletion waits for an initial native connection', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'isles-runtime-delete-connecting-'));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const harness = new MockHarness();
+    let releaseConnection: (() => void) | undefined;
+    const app = await buildApp({
+      config: testConfig(dir),
+      catalog: testCatalog,
+      clientFactory: async (agent, handlers, baseUrl) => {
+        await new Promise<void>((resolve) => {
+          releaseConnection = resolve;
+        });
+        return harness.factory(agent, handlers, baseUrl);
+      },
+      runtimeUrl: 'http://127.0.0.1:1',
+    });
+    cleanups.push(() => app.close());
+    cleanups.push(async () => {
+      releaseConnection?.();
+    });
+    const agent = await app.isles.runtime.createAgent({
+      name: 'Connecting',
+      model: 'test-model',
+      reasoningEffort: 'high',
+    });
+    await expect.poll(() => Boolean(releaseConnection)).toBe(true);
+    const deleting = app.isles.runtime.deleteAgent(agent.id);
+    await expect.poll(() => app.isles.store.publicAgent(agent.id).status).toBe('stopped');
+    await expect(app.isles.runtime.resume(agent.id)).rejects.toMatchObject({ statusCode: 409 });
+    await expect(
+      app.isles.runtime.updateAgent(agent.id, { name: 'Revived' }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    await expect(app.isles.runtime.deleteAgent(agent.id)).rejects.toMatchObject({
+      statusCode: 409,
+    });
+    expect(() =>
+      app.isles.runtime.send(agent.channelId, { body: 'Rejected', clientId: 'connecting-delete' }),
+    ).toThrow('正在删除');
+    releaseConnection!();
+    expect(await deleting).toMatchObject({ status: 'deleted', threadId: null, name: 'Connecting' });
+    expect(harness.clients).toHaveLength(1);
+    expect(harness.clients[0]!.closed).toBe(true);
+    expect(harness.clients[0]!.calls).toEqual([]);
+  });
+
+  it('rejects a delayed model edit when the Agent was deleted during catalog validation', async () => {
+    let delay = false;
+    let releaseModels: (() => void) | undefined;
+    const catalog: Catalog = {
+      ...testCatalog,
+      models: async () => {
+        if (delay)
+          await new Promise<void>((resolve) => {
+            releaseModels = resolve;
+          });
+        return testCatalog.models();
+      },
+    };
+    const { app, create } = await fixture(catalog);
+    const agent = await create();
+    delay = true;
+    const edit = app.isles.runtime.updateAgent(agent.id, {
+      reasoningEffort: 'high',
+      name: 'Rejected rename',
+    });
+    const rejection = expect(edit).rejects.toMatchObject({ statusCode: 410 });
+    await expect.poll(() => Boolean(releaseModels)).toBe(true);
+    await app.isles.runtime.deleteAgent(agent.id);
+    releaseModels!();
+    await rejection;
+    expect(app.isles.store.publicAgent(agent.id)).toMatchObject({
+      status: 'deleted',
+      name: agent.name,
+      reasoningEffort: 'max',
+    });
+  });
+
+  it('cannot resume an Agent when deletion begins while its native process is closing', async () => {
+    const { app, harness, create } = await fixture();
+    const agent = await create();
+    let releaseClose: (() => void) | undefined;
+    const closed = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    cleanups.push(async () => {
+      releaseClose?.();
+    });
+    const client = harness.latest(agent.id);
+    let closing = false;
+    client.close = async () => {
+      closing = true;
+      await closed;
+      client.closed = true;
+    };
+    const resume = app.isles.runtime.resume(agent.id);
+    const rejection = expect(resume).rejects.toMatchObject({ statusCode: 409 });
+    await expect.poll(() => closing).toBe(true);
+    const deleting = app.isles.runtime.deleteAgent(agent.id);
+    releaseClose!();
+    await rejection;
+    expect(await deleting).toMatchObject({ status: 'deleted', desiredState: 'stopped' });
+    expect(harness.clients).toHaveLength(1);
+  });
+
+  it('keeps an Agent stopped when a later stop supersedes a resume waiting on native close', async () => {
+    const { app, harness, create } = await fixture();
+    const agent = await create();
+    let releaseClose: (() => void) | undefined;
+    const closed = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    cleanups.push(async () => {
+      releaseClose?.();
+    });
+    const client = harness.latest(agent.id);
+    let closing = false;
+    client.close = async () => {
+      closing = true;
+      await closed;
+      client.closed = true;
+    };
+    const resume = app.isles.runtime.resume(agent.id);
+    const rejection = expect(resume).rejects.toMatchObject({ statusCode: 409 });
+    await expect.poll(() => closing).toBe(true);
+    const stopping = app.isles.runtime.stop(agent.id);
+    releaseClose!();
+    await Promise.all([rejection, stopping]);
+    expect(app.isles.store.publicAgent(agent.id)).toMatchObject({
+      status: 'stopped',
+      desiredState: 'stopped',
+      threadId: agent.threadId,
+    });
+    expect(harness.clients).toHaveLength(1);
+    await app.isles.runtime.resume(agent.id);
+    await expect.poll(() => app.isles.store.publicAgent(agent.id).status).toBe('ready');
+    expect(harness.clients).toHaveLength(2);
+    expect(harness.latest(agent.id).calls[0]).toMatchObject({
+      method: 'thread/resume',
+      params: { threadId: agent.threadId },
+    });
+  });
+
   it('keeps individual workspaces and data-backed tokens while sharing files across Agents', async () => {
     const { app, dir, create, open } = await fixture();
     const first = await create('Writer');

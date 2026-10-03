@@ -6,6 +6,7 @@ export const agentStatusLabels: Record<AgentStatus, string> = {
   ready: '可用',
   running: '执行中',
   stopped: '已停止',
+  deleted: '已删除',
   error: '异常',
 };
 
@@ -38,6 +39,7 @@ export const agentStatusTone: Record<AgentStatus, string> = {
   ready: 'bg-success',
   running: 'bg-primary',
   stopped: 'bg-muted-foreground/50',
+  deleted: 'bg-muted-foreground/30',
   error: 'bg-destructive',
 };
 

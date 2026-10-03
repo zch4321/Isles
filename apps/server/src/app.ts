@@ -131,7 +131,13 @@ export async function buildApp(options: AppOptions) {
     return configuration;
   });
   app.get('/api/codex/models', async () => ({ models: await catalog.models() }));
-  app.get('/api/agents', () => ({ agents: store.listAgents(), cursor: store.cursor() }));
+  app.get('/api/agents', (request) => {
+    const { includeDeleted } = z
+      .object({ includeDeleted: z.enum(['true', 'false']).optional() })
+      .strict()
+      .parse(request.query);
+    return { agents: store.listAgents(includeDeleted === 'true'), cursor: store.cursor() };
+  });
   app.post('/api/agents', async (request, reply) =>
     reply.code(201).send(await runtime.createAgent(createAgentSchema.parse(request.body))),
   );
@@ -140,6 +146,9 @@ export async function buildApp(options: AppOptions) {
   );
   app.patch<{ Params: { id: string } }>('/api/agents/:id', (request) =>
     runtime.updateAgent(request.params.id, updateAgentSchema.parse(request.body)),
+  );
+  app.delete<{ Params: { id: string } }>('/api/agents/:id', (request) =>
+    runtime.deleteAgent(request.params.id),
   );
   app.post<{ Params: { id: string } }>('/api/agents/:id/stop', async (request) => {
     await runtime.stop(request.params.id);

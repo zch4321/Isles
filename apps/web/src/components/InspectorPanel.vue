@@ -65,6 +65,7 @@ const title = computed(() =>
           :agent="agent"
           :runs="detail.data.value?.runs"
           :directory="directory"
+          @deleted="member = null"
         />
         <GroupDetails
           v-else-if="channel.kind === 'group'"
