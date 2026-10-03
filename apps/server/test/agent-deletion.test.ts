@@ -28,6 +28,7 @@ function fixture() {
   const store = open();
   const create = (name: string) => {
     const agent = store.createAgent({
+      harness: 'codex',
       name,
       model: 'test-model',
       reasoningEffort: 'high',

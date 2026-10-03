@@ -38,6 +38,7 @@ function agent(id: string) {
   return {
     id,
     name: id,
+    harness: 'codex',
     model: 'test-model',
     reasoningEffort: 'high',
     workspace: `workspace-${id}`,
@@ -243,20 +244,25 @@ describe('database baseline', () => {
   it('preserves agent uniqueness, channel shape and membership relationships', async () => {
     const { db } = await fixture();
     db.insert(agents)
-      .values({ ...agent('a'), threadId: 'native-thread' })
+      .values({ ...agent('a'), nativeHome: 'shared-home', threadId: 'native-thread' })
       .run();
     expect(() =>
       db
         .insert(agents)
-        .values({ ...agent('b'), threadId: 'native-thread' })
+        .values({ ...agent('b'), nativeHome: 'shared-home', threadId: 'native-thread' })
         .run(),
     ).toThrow(/UNIQUE constraint failed/);
-    expect(() =>
-      db
-        .insert(agents)
-        .values({ ...agent('b'), harness: 'other' })
-        .run(),
-    ).toThrow(/CHECK constraint failed/);
+    db.insert(agents)
+      .values({
+        ...agent('other'),
+        harness: 'other',
+        nativeHome: 'shared-home',
+        threadId: 'native-thread',
+      })
+      .run();
+    db.insert(agents)
+      .values({ ...agent('different-home'), threadId: 'native-thread' })
+      .run();
     db.insert(agents).values(agent('b')).run();
     const privateChannel = {
       ...group('private-a'),

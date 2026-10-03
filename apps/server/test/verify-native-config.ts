@@ -10,8 +10,10 @@ import { ConfigManager } from '@isles/config';
 import type { Agent } from '@isles/contracts';
 import { parse } from 'smol-toml';
 import { buildApp } from '../src/app.js';
-import { agentRoot } from '../src/codex/environment.js';
+import { agentRoot } from '../src/runtime/workspace.js';
 import { StdioClient } from '../src/codex/client.js';
+import { CodexAdapter } from '../src/codex/adapter.js';
+import { NativeEnvironment } from '../src/codex/environment.js';
 import { threadResponseSchema } from '../src/codex/protocol.js';
 
 const root = await mkdtemp(join(tmpdir(), 'isles-native-config-'));
@@ -49,44 +51,49 @@ const open = async () => {
   const config = new ConfigManager({ configFilePath, environment });
   const instance = await buildApp({
     config,
-    clientFactory: async (agent, handlers) => {
-      const native = instance.isles.runtime.environment;
-      const client = new StdioClient(
-        await native.executable(),
-        agent.workspace,
-        await native.launch(agent),
-        handlers,
-        native.redactor,
-      );
-      const request = client.request.bind(client);
-      client.request = async <T = unknown>(method: string, params: Record<string, unknown>) => {
-        const response = await request<T>(method, params);
-        if (method === 'thread/start' || method === 'thread/resume') {
-          const parsed = threadResponseSchema.parse(response);
-          report.instructionSources.push({
-            agentId: agent.id,
-            method,
-            threadId: parsed.thread.id,
-            paths: parsed.instructionSources,
-            injectedRules: Object.hasOwn(params, 'developerInstructions'),
-          });
-        }
-        if (method === 'turn/start')
-          report.turns.push({
-            agentId: agent.id,
-            threadId: String(params.threadId),
-            model: String(params.model),
-            effort: String(params.effort),
-          });
-        return response;
-      };
-      try {
-        await client.initialize();
-        return client;
-      } catch (error) {
-        await client.close();
-        throw error;
-      }
+    adapterFactory: (workspace, config) => {
+      const native = new NativeEnvironment(config, workspace);
+      return [
+        new CodexAdapter(native, undefined, async (agent, handlers, _baseUrl, connecting) => {
+          const client = new StdioClient(
+            await native.executable(),
+            agent.workspace,
+            await native.launch(agent),
+            handlers,
+            native.redactor,
+          );
+          connecting(client);
+          const request = client.request.bind(client);
+          client.request = async <T = unknown>(method: string, params: Record<string, unknown>) => {
+            const response = await request<T>(method, params);
+            if (method === 'thread/start' || method === 'thread/resume') {
+              const parsed = threadResponseSchema.parse(response);
+              report.instructionSources.push({
+                agentId: agent.id,
+                method,
+                threadId: parsed.thread.id,
+                paths: parsed.instructionSources,
+                injectedRules: Object.hasOwn(params, 'developerInstructions'),
+              });
+            }
+            if (method === 'turn/start')
+              report.turns.push({
+                agentId: agent.id,
+                threadId: String(params.threadId),
+                model: String(params.model),
+                effort: String(params.effort),
+              });
+            return response;
+          };
+          try {
+            await client.initialize();
+            return client;
+          } catch (error) {
+            await client.close();
+            throw error;
+          }
+        }),
+      ];
     },
   });
   try {
@@ -126,7 +133,12 @@ async function ask(agent: Agent, body: string, expected: string) {
 }
 async function configHash() {
   try {
-    const file = await readFile(join(current().isles.runtime.environment.home, 'config.toml'));
+    const file = await readFile(
+      join(
+        (current().isles.runtime.harnesses.get('codex') as CodexAdapter).environment.home,
+        'config.toml',
+      ),
+    );
     return createHash('sha256').update(file).digest('hex');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -136,9 +148,9 @@ async function configHash() {
 try {
   app = await open();
   const before = await configHash();
-  const status = await app.isles.runtime.catalog.status();
+  const status = await app.isles.runtime.harnesses.get('codex').catalog.status();
   assert.ok(status.available && status.authenticated, status.error ?? 'Codex is not authenticated');
-  const models = await app.isles.runtime.catalog.models();
+  const models = await app.isles.runtime.harnesses.get('codex').catalog.models();
   const model =
     models.find((candidate) => candidate.model === 'gpt-6.1-sol') ??
     models.find((candidate) => candidate.isDefault);
@@ -148,11 +160,13 @@ try {
   report.model = model.model;
   progress('native catalog ready');
   const writer = await app.isles.runtime.createAgent({
+    harness: 'codex',
     name: 'Workspace acceptance writer',
     model: model.model,
     reasoningEffort: 'high',
   });
   const reader = await app.isles.runtime.createAgent({
+    harness: 'codex',
     name: 'Workspace acceptance reader',
     model: model.model,
     reasoningEffort: 'high',
@@ -288,7 +302,7 @@ try {
   });
   const personalFile = join(reader.workspace, 'retained-after-delete.txt');
   await writeFile(personalFile, nonce);
-  const readerRoot = agentRoot(app.isles.runtime.environment.dataDir, reader);
+  const readerRoot = agentRoot(app.isles.runtime.workspace.dataDir, reader);
   const readerToken = (await readFile(join(readerRoot, 'isles-mcp-token'), 'utf8')).trim();
   const historyBeforeDelete = app.isles.store.listMessages(reader.channelId);
   progress('deleting an active real Agent');
@@ -394,7 +408,7 @@ try {
   );
   report.success = true;
 } catch (error) {
-  report.error = app?.isles.runtime.environment.redactor.text(error) ?? String(error);
+  report.error = app?.isles.runtime.workspace.redactor.text(error) ?? String(error);
   process.exitCode = 1;
 } finally {
   await app?.close();

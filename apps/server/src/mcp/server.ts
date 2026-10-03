@@ -6,7 +6,7 @@ import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { agentRoot } from '../codex/environment.js';
+import { agentRoot } from '../runtime/workspace.js';
 import { HttpError } from '../errors.js';
 import {
   channelView,
@@ -40,7 +40,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
       try {
         token = (
           await readFile(
-            join(agentRoot(runtime.environment.dataDir, agent), 'isles-mcp-token'),
+            join(agentRoot(runtime.workspace.dataDir, agent), 'isles-mcp-token'),
             'utf8',
           )
         ).trim();

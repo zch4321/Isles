@@ -2,7 +2,24 @@ import type { Agent } from '@isles/contracts';
 import { useQuery, type QueryClient } from '@tanstack/vue-query';
 import { computed, toValue, type MaybeRefOrGetter } from 'vue';
 import { fetchHealth } from './health';
-import { fetchAgentDetail, fetchAgents, fetchChannelDetail, fetchChannels } from './isles';
+import {
+  fetchAgentDetail,
+  fetchAgents,
+  fetchChannelDetail,
+  fetchChannels,
+  fetchHarnesses,
+} from './isles';
+
+export const useHarnesses = () => useQuery({ queryKey: ['harnesses'], queryFn: fetchHarnesses });
+
+export function useHarnessName(id: MaybeRefOrGetter<string>) {
+  const harnesses = useHarnesses();
+  return computed(
+    () =>
+      harnesses.data.value?.harnesses.find((harness) => harness.id === toValue(id))?.displayName ??
+      toValue(id),
+  );
+}
 
 // SSE drives most refreshes; the intervals are a fallback when the stream is down.
 export const useHealth = () =>

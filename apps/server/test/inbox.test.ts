@@ -8,10 +8,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
-import { agentRoot } from '../src/codex/environment.js';
+import { agentRoot } from '../src/runtime/workspace.js';
 import {
   MockHarness,
   testCatalog,
+  codexAdapters,
   testConfig,
   parseMessageText,
   type Envelope,
@@ -33,8 +34,8 @@ type History = Envelope['channels'][number] & {
 };
 
 async function connect(app: App, agentId: string) {
-  const token = await app.isles.runtime.environment.token(
-    agentRoot(app.isles.runtime.environment.dataDir, app.isles.store.getAgent(agentId)),
+  const token = await app.isles.runtime.workspace.token(
+    agentRoot(app.isles.runtime.workspace.dataDir, app.isles.store.getAgent(agentId)),
   );
   const address = app.server.address();
   if (!address || typeof address === 'string') throw new Error('No listener');
@@ -91,8 +92,7 @@ async function fixture() {
   const open = async () => {
     const app = await buildApp({
       config: testConfig(dir),
-      catalog: testCatalog,
-      clientFactory: harness.factory,
+      adapterFactory: codexAdapters(testCatalog, harness.factory),
     });
     harness.useStore(app.isles.store);
     await app.listen({ host: '127.0.0.1', port: 0 });
@@ -102,6 +102,7 @@ async function fixture() {
   const app = await open();
   const create = async (name: string) => {
     const agent = await app.isles.runtime.createAgent({
+      harness: 'codex',
       name,
       model: 'test-model',
       reasoningEffort: 'max',

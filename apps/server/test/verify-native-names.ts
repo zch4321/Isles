@@ -9,7 +9,9 @@ import { ConfigManager } from '@isles/config';
 import type { Agent } from '@isles/contracts';
 import { buildApp } from '../src/app.js';
 import { StdioClient } from '../src/codex/client.js';
-import { agentRoot } from '../src/codex/environment.js';
+import { CodexAdapter } from '../src/codex/adapter.js';
+import { NativeEnvironment } from '../src/codex/environment.js';
+import { agentRoot } from '../src/runtime/workspace.js';
 import { threadResponseSchema } from '../src/codex/protocol.js';
 
 const root = await mkdtemp(join(tmpdir(), 'isles-native-names-'));
@@ -45,38 +47,43 @@ const progress = (stage: string) => console.log(JSON.stringify({ stage, root }))
 async function open() {
   const instance = await buildApp({
     config: new ConfigManager({ configFilePath, environment }),
-    clientFactory: async (agent, handlers) => {
-      const native = instance.isles.runtime.environment;
-      const client = new StdioClient(
-        await native.executable(),
-        agent.workspace,
-        await native.launch(agent),
-        handlers,
-        native.redactor,
-      );
-      const request = client.request.bind(client);
-      client.request = async <T = unknown>(method: string, params: Record<string, unknown>) => {
-        if (method === 'turn/start')
-          report.inputs.push({
-            agentId: agent.id,
-            text: (params.input as { text: string }[])[0]!.text,
-          });
-        const result = await request<T>(method, params);
-        if (method === 'thread/start' || method === 'thread/resume')
-          report.sources.push({
-            agentId: agent.id,
-            method,
-            paths: threadResponseSchema.parse(result).instructionSources,
-          });
-        return result;
-      };
-      try {
-        await client.initialize();
-        return client;
-      } catch (error) {
-        await client.close();
-        throw error;
-      }
+    adapterFactory: (workspace, config) => {
+      const native = new NativeEnvironment(config, workspace);
+      return [
+        new CodexAdapter(native, undefined, async (agent, handlers, _baseUrl, connecting) => {
+          const client = new StdioClient(
+            await native.executable(),
+            agent.workspace,
+            await native.launch(agent),
+            handlers,
+            native.redactor,
+          );
+          connecting(client);
+          const request = client.request.bind(client);
+          client.request = async <T = unknown>(method: string, params: Record<string, unknown>) => {
+            if (method === 'turn/start')
+              report.inputs.push({
+                agentId: agent.id,
+                text: (params.input as { text: string }[])[0]!.text,
+              });
+            const result = await request<T>(method, params);
+            if (method === 'thread/start' || method === 'thread/resume')
+              report.sources.push({
+                agentId: agent.id,
+                method,
+                paths: threadResponseSchema.parse(result).instructionSources,
+              });
+            return result;
+          };
+          try {
+            await client.initialize();
+            return client;
+          } catch (error) {
+            await client.close();
+            throw error;
+          }
+        }),
+      ];
     },
   });
   instance.addHook('preHandler', async (request) => {
@@ -115,7 +122,7 @@ async function tool(
   args: Record<string, unknown> = {},
   expectError = false,
 ) {
-  const native = current().isles.runtime.environment;
+  const native = current().isles.runtime.workspace;
   const token = (
     await readFile(join(agentRoot(native.dataDir, agent), 'isles-mcp-token'), 'utf8')
   ).trim();
@@ -145,7 +152,14 @@ async function tool(
 async function configHash() {
   try {
     return createHash('sha256')
-      .update(await readFile(join(current().isles.runtime.environment.home, 'config.toml')))
+      .update(
+        await readFile(
+          join(
+            (current().isles.runtime.harnesses.get('codex') as CodexAdapter).environment.home,
+            'config.toml',
+          ),
+        ),
+      )
       .digest('hex');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -155,17 +169,22 @@ async function configHash() {
 try {
   app = await open();
   const before = await configHash();
-  const status = await app.isles.runtime.catalog.status();
+  const status = await app.isles.runtime.harnesses.get('codex').catalog.status();
   assert.ok(status.available && status.authenticated, status.error ?? 'Codex is unavailable');
   report.version = status.version;
-  const models = await app.isles.runtime.catalog.models();
+  const models = await app.isles.runtime.harnesses.get('codex').catalog.models();
   const model =
     models.find((value) => value.model === 'gpt-6.1-sol') ??
     models.find((value) => value.isDefault);
   assert.ok(model && model.supportedReasoningEfforts.includes('high'));
   const name = '同名审查员, [Alpha] | "v1"';
   const create = () =>
-    app!.isles.runtime.createAgent({ name, model: model.model, reasoningEffort: 'high' });
+    app!.isles.runtime.createAgent({
+      harness: 'codex',
+      name,
+      model: model.model,
+      reasoningEffort: 'high',
+    });
   const reader = await create();
   const peer = await create();
   await until(
@@ -363,7 +382,7 @@ try {
   );
   report.success = true;
 } catch (error) {
-  report.error = app?.isles.runtime.environment.redactor.text(error) ?? String(error);
+  report.error = app?.isles.runtime.workspace.redactor.text(error) ?? String(error);
   process.exitCode = 1;
 } finally {
   await app?.close();

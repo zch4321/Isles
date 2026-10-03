@@ -4,7 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/vue-query';
 import { Check, Copy, LoaderCircle, Pencil, SquareTerminal, Trash2 } from '@lucide/vue';
 import { computed, onBeforeUnmount, ref } from 'vue';
 import { updateAgent } from '@/api/isles';
-import { invalidateAll, useChannels } from '@/api/queries';
+import { invalidateAll, useChannels, useHarnessName } from '@/api/queries';
 import RunCard from './RunCard.vue';
 import StatusBadge from './StatusBadge.vue';
 import EditAgentDialog from './EditAgentDialog.vue';
@@ -18,6 +18,7 @@ defineEmits<{ deleted: [] }>();
 
 const queryClient = useQueryClient();
 const channels = useChannels();
+const harnessName = useHarnessName(() => props.agent.harness);
 const editOpen = ref(false);
 const deleteOpen = ref(false);
 
@@ -86,7 +87,7 @@ function inputs(run: Run) {
         <dt class="text-muted-foreground">状态</dt>
         <dd><StatusBadge :status="agent.status" /></dd>
         <dt class="text-muted-foreground">Harness</dt>
-        <dd>Codex</dd>
+        <dd>{{ harnessName }}</dd>
         <dt class="text-muted-foreground">模型</dt>
         <dd class="break-words">{{ agent.model }} · {{ agent.reasoningEffort }}</dd>
         <dt class="text-muted-foreground">会话</dt>
@@ -122,7 +123,7 @@ function inputs(run: Run) {
       <p v-if="copyError" role="alert" class="text-xs text-destructive">{{ copyError }}</p>
       <p class="text-xs leading-relaxed text-muted-foreground">
         Agent 在私聊和所有群中始终使用这一个原生会话和工作目录。不同 Agent
-        之间不共享对话上下文；Codex 的配置、插件和长期记忆与你本机的 Codex 共用。
+        之间不共享对话上下文；原生配置、插件和长期记忆由 {{ harnessName }} 管理。
       </p>
     </section>
 

@@ -61,9 +61,9 @@ describe('application bootstrap', () => {
     expect(parse(await readFile(config.current.configFilePath, 'utf8'))).toMatchObject({
       codex: { binary_path: firstPath },
     });
-    expect((await app.inject('/api/codex/status')).json().error).toContain(firstPath);
+    expect((await app.inject('/api/harnesses/codex/status')).json().error).toContain(firstPath);
     await save(secondPath);
-    expect((await app.inject('/api/codex/status')).json().error).toContain(secondPath);
+    expect((await app.inject('/api/harnesses/codex/status')).json().error).toContain(secondPath);
     const invalid = await app.inject({
       method: 'PUT',
       url: '/api/codex/config',

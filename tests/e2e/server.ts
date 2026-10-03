@@ -6,9 +6,10 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { buildApp } from '../../apps/server/src/app.js';
-import { agentRoot } from '../../apps/server/src/codex/environment.js';
+import { agentRoot } from '../../apps/server/src/runtime/workspace.js';
 import {
   MockHarness,
+  codexAdapters,
   parseMessageText,
   testCatalog,
   type MockClient,
@@ -38,22 +39,24 @@ harness.factory = async (agent, handlers, baseUrl) => {
 };
 const app = await buildApp({
   config,
-  catalog: {
-    ...testCatalog,
-    models: async () => [
-      ...(await testCatalog.models()),
-      {
-        id: 'test-model-2',
-        model: 'test-model-2',
-        displayName: '测试模型 2',
-        description: '模拟模型，仅用于编辑验证',
-        supportedReasoningEfforts: ['high', 'max'],
-        defaultReasoningEffort: 'high',
-        isDefault: false,
-      },
-    ],
-  },
-  clientFactory: harness.factory,
+  adapterFactory: codexAdapters(
+    {
+      ...testCatalog,
+      models: async () => [
+        ...(await testCatalog.models()),
+        {
+          id: 'test-model-2',
+          model: 'test-model-2',
+          displayName: '测试模型 2',
+          description: '模拟模型，仅用于编辑验证',
+          supportedReasoningEfforts: ['high', 'max'],
+          defaultReasoningEffort: 'high',
+          isDefault: false,
+        },
+      ],
+    },
+    harness.factory,
+  ),
 });
 harness.useStore(app.isles.store);
 

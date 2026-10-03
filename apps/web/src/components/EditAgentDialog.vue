@@ -22,7 +22,11 @@ import { Switch } from '@/components/ui/switch';
 const props = defineProps<{ agent: Agent }>();
 const open = defineModel<boolean>('open', { required: true });
 const queryClient = useQueryClient();
-const models = useQuery({ queryKey: ['models'], queryFn: fetchModels, enabled: open });
+const models = useQuery({
+  queryKey: computed(() => ['models', props.agent.harness]),
+  queryFn: () => fetchModels(props.agent.harness),
+  enabled: open,
+});
 const form = ref({ name: '', model: '', reasoningEffort: '', canCreateGroups: false });
 const validationError = ref('');
 const current = computed(() =>

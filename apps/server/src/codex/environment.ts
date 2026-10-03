@@ -1,18 +1,10 @@
-import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ConfigManager } from '@isles/config';
 import { parse } from 'smol-toml';
 import { findCodexExecutable, type CodexExecutable } from './executable.js';
-import { Redactor } from '../errors.js';
 import type { AgentRecord } from '../storage/store.js';
-import { prepareGuidance } from '../runtime/guidance.js';
-
-/** Environment variable the native MCP client reads the Agent's bearer token from. */
-export const MCP_TOKEN_ENV = 'ISLES_MCP_TOKEN';
-/** Agent credentials belong to application data, independently of working files. */
-export const agentRoot = (dataDir: string, agent: Pick<AgentRecord, 'id'>) =>
-  join(dataDir, 'agents', agent.id);
+import { AgentWorkspace, agentRoot, MCP_TOKEN_ENV } from '../runtime/workspace.js';
 
 export class NativeEnvironment {
   private discovery: Promise<CodexExecutable> | undefined;
@@ -22,13 +14,18 @@ export class NativeEnvironment {
    * plugins and long-term memories; each keeps its own thread, so context is never shared.
    */
   readonly home: string;
-  readonly dataDir: string;
-  readonly sharedDir: string;
-  readonly redactor = new Redactor();
-  constructor(readonly config: ConfigManager) {
+  constructor(
+    readonly config: ConfigManager,
+    readonly workspace: AgentWorkspace,
+  ) {
     this.home = config.current.codexHome;
-    this.dataDir = config.current.dataDir;
-    this.sharedDir = config.current.sharedDir;
+  }
+  get redactor() {
+    return this.workspace.redactor;
+  }
+  invalidate() {
+    this.discovery = undefined;
+    this.selected = undefined;
   }
   async version() {
     return (await this.executable(true)).version;
@@ -41,8 +38,7 @@ export class NativeEnvironment {
   }
   async configure(binaryPath: string | null) {
     const configuration = await this.config.configureCodexBinary(binaryPath);
-    this.discovery = undefined;
-    this.selected = undefined;
+    this.invalidate();
     return configuration;
   }
   async executable(refresh = false): Promise<CodexExecutable> {
@@ -62,26 +58,6 @@ export class NativeEnvironment {
       if (this.discovery === discovery) this.discovery = undefined;
       throw error;
     }
-  }
-  private async privateFile(path: string, body: string) {
-    const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`;
-    await writeFile(temporary, body, { mode: 0o600 });
-    await chmod(temporary, 0o600);
-    await rename(temporary, path);
-  }
-  async token(dir: string): Promise<string> {
-    const path = join(dir, 'isles-mcp-token');
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    let token: string;
-    try {
-      token = (await readFile(path, 'utf8')).trim();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      token = randomBytes(32).toString('hex');
-      await this.privateFile(path, token);
-    }
-    this.redactor.add(token);
-    return token;
   }
   /**
    * Native errors and tool output may echo credentials from the shared home. They are
@@ -106,19 +82,13 @@ export class NativeEnvironment {
         if (typeof provider?.env_key === 'string') this.redactor.add(process.env[provider.env_key]);
     }
   }
-  async prepareWorkspace(agent: AgentRecord) {
-    await mkdir(agent.workspace, { recursive: true });
-    await mkdir(this.sharedDir, { recursive: true });
-    await writeFile(join(agent.workspace, '.isles-root'), 'Isles Agent workspace\n');
-    await prepareGuidance(agent, this.sharedDir);
-  }
   /** Prepares the workspace and returns the environment of the Agent's native process. */
   async launch(agent: AgentRecord): Promise<Record<string, string>> {
-    await this.prepareWorkspace(agent);
+    await this.workspace.prepareWorkspace(agent);
     await this.learnSecrets();
     return {
       CODEX_HOME: this.home,
-      [MCP_TOKEN_ENV]: await this.token(agentRoot(this.dataDir, agent)),
+      [MCP_TOKEN_ENV]: await this.workspace.token(agentRoot(this.workspace.dataDir, agent)),
     };
   }
   /**

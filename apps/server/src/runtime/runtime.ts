@@ -10,39 +10,28 @@ import {
   type SendMessage,
   type UpdateAgent,
 } from '@isles/contracts';
-import { z } from 'zod';
-import { join, resolve } from 'node:path';
-import type { Catalog } from '../codex/catalog.js';
-import { StdioClient } from '../codex/client.js';
-import type { NativeEnvironment } from '../codex/environment.js';
+import type { HarnessRegistry } from '../harness/registry.js';
 import {
-  inputRequestSchema,
-  NativeRpcError,
-  threadResponseSchema,
-  turnNotificationSchema,
-  turnResponseSchema,
-  type NativeClient,
-  type NativeHandlers,
-  type RequestId,
-} from '../codex/protocol.js';
+  HarnessSubmissionRejected,
+  type HarnessEvent,
+  type HarnessQuestion,
+  type HarnessRequestId,
+  type HarnessSession,
+} from '../harness/types.js';
 import { HttpError } from '../errors.js';
 import type { Actor, AgentRecord, ClaimedChannel, MessageInput, Store } from '../storage/store.js';
 import { formatMessages, MessageLabels } from './envelope.js';
+import type { AgentWorkspace } from './workspace.js';
 
-export type ClientFactory = (
-  agent: AgentRecord,
-  handlers: NativeHandlers,
-  baseUrl: string,
-) => Promise<NativeClient>;
 interface Active {
   run: Run;
   turnId: string | null;
   done: Promise<void>;
   finish: () => void;
-  requests: Map<string, RequestId>;
+  requests: Map<string, HarnessRequestId>;
 }
 interface Handle {
-  client?: NativeClient;
+  session?: HarnessSession;
   active?: Active;
   task?: Promise<void>;
   // A newer stop/resume/delete supersedes a control request waiting on native I/O.
@@ -55,35 +44,11 @@ export class Runtime {
   private deleting = new Set<string>();
   private baseUrl: string | undefined;
   private closing = false;
-  readonly factory: ClientFactory;
   constructor(
     readonly store: Store,
-    readonly catalog: Catalog,
-    readonly environment: NativeEnvironment,
-    factory?: ClientFactory,
+    readonly harnesses: HarnessRegistry,
+    readonly workspace: AgentWorkspace,
   ) {
-    this.factory =
-      factory ??
-      (async (agent, handlers) => {
-        const executable = await environment.executable();
-        const env = await environment.launch(agent);
-        const client = new StdioClient(
-          executable,
-          agent.workspace,
-          env,
-          handlers,
-          environment.redactor,
-        );
-        // Publish the connection before initialize so stop/shutdown can terminate it.
-        this.handle(agent.id).client = client;
-        try {
-          await client.initialize();
-          return client;
-        } catch (error) {
-          await client.close();
-          throw error;
-        }
-      });
     store.recoverOnBoot();
   }
   private handle(id: string) {
@@ -108,32 +73,37 @@ export class Runtime {
 
   async createAgent(input: CreateAgent) {
     if (!this.baseUrl) throw new HttpError(503, 'Runtime 尚未监听本机端口');
-    const status = await this.catalog.status();
+    const adapter = this.harnesses.get(input.harness);
+    const status = await adapter.catalog.status();
     if (!status.available || !status.authenticated)
-      throw new HttpError(503, status.error ?? 'Codex 原生认证不可用');
-    const model = (await this.catalog.models()).find((m) => m.model === input.model);
+      throw new HttpError(503, status.error ?? `${adapter.descriptor.displayName} 原生认证不可用`);
+    const model = (await adapter.catalog.models()).find((m) => m.model === input.model);
     if (!model || !model.supportedReasoningEfforts.includes(input.reasoningEffort))
       throw new HttpError(400, '请选择实际可用的模型和推理等级');
     const agent = this.store.createAgent({
       ...input,
       canCreateGroups: input.canCreateGroups ?? false,
-      nativeHome: this.environment.home,
+      nativeHome: adapter.nativeHome,
     });
     this.kick(agent.id);
     return this.store.publicAgent(agent.id);
   }
   async updateAgent(id: string, update: UpdateAgent) {
     let agent = this.managed(id);
+    const adapter = this.harnesses.get(agent.harness);
     const changesModel = () =>
       (update.model !== undefined && update.model !== agent.model) ||
       (update.reasoningEffort !== undefined && update.reasoningEffort !== agent.reasoningEffort);
     if (changesModel()) {
-      const status = await this.catalog.status();
+      const status = await adapter.catalog.status();
       agent = this.managed(id);
       if (changesModel()) {
         if (!status.available || !status.authenticated)
-          throw new HttpError(503, status.error ?? 'Codex 原生认证不可用');
-        const models = await this.catalog.models();
+          throw new HttpError(
+            503,
+            status.error ?? `${adapter.descriptor.displayName} 原生认证不可用`,
+          );
+        const models = await adapter.catalog.models();
         // Another partial edit may have completed while the catalog was loading.
         agent = this.managed(id);
         if (changesModel()) {
@@ -179,7 +149,7 @@ export class Runtime {
     const message = this.store.saveMessage(
       channelId,
       { type: 'agent', id: agentId },
-      { ...input, body: this.environment.redactor.text(input.body) },
+      { ...input, body: this.workspace.redactor.text(input.body) },
     );
     this.wake(message);
     return message;
@@ -249,7 +219,7 @@ export class Runtime {
     handle.task = this.pump(id, handle).finally(() => {
       delete handle.task;
       // Also covers input that arrived after the pump decided to stop.
-      if (this.closing || !handle.client || !this.runnable(id)) return;
+      if (this.closing || !handle.session || !this.runnable(id)) return;
       if (handle.refresh || this.store.hasPendingMessages(id)) this.kick(id);
     });
   }
@@ -258,73 +228,59 @@ export class Runtime {
     if (agent.desiredState !== 'running' || this.closing) return;
     if (agent.threadCreationAttempted && !agent.threadId)
       throw new Error('原生 thread 创建结果不明，不能创建替代 thread；请核对原生记录。');
-    // A thread only exists in the Codex home it was created in; another home cannot resume it.
-    if (agent.nativeHome !== this.environment.home)
+    const adapter = this.harnesses.get(agent.harness);
+    if (agent.nativeHome !== adapter.nativeHome)
       throw new Error(
-        `该 Agent 的原生会话位于 ${agent.nativeHome}，当前 Codex 目录是 ${this.environment.home}，无法恢复原会话，也不会创建替代会话。`,
+        `该 Agent 的原生会话位于 ${agent.nativeHome}，当前 ${adapter.descriptor.displayName} 目录是 ${adapter.nativeHome}，无法恢复原会话，也不会创建替代会话。`,
       );
     this.store.updateAgent(id, {
       status: agent.threadId ? 'recovering' : 'creating',
       error: null,
     });
-    await this.environment.prepareWorkspace(agent);
-    const client = await this.factory(
-      agent,
-      {
-        notification: (method, params) => this.notification(id, handle, method, params),
-        request: (requestId, method, params) =>
-          this.serverRequest(id, handle, requestId, method, params),
-        exit: (error) => this.connectionExited(id, handle, error),
+    await this.workspace.prepareWorkspace(agent);
+    let connection: HarnessSession | undefined;
+    const session = await adapter.connect(agent, this.baseUrl!, {
+      connected: (value) => {
+        connection = value;
+        handle.session = value;
+        if (this.closing || this.store.getAgent(id).desiredState !== 'running')
+          void value.close().catch(() => {});
       },
-      this.baseUrl!,
-    );
-    handle.client = client;
+      event: (event) => {
+        if (connection && handle.session === connection) this.event(id, handle, event);
+      },
+      question: (question) => {
+        if (connection && handle.session === connection) this.question(id, handle, question);
+      },
+      exit: (error) => {
+        if (connection && handle.session === connection) this.connectionExited(id, handle, error);
+      },
+    });
+    if (connection !== session) throw new Error('Harness 未发布正确的原生连接');
+    handle.session = session;
     if (this.store.getAgent(id).desiredState !== 'running' || this.closing) {
-      await client.close();
-      delete handle.client;
+      await session.close();
+      if (handle.session === session) delete handle.session;
       return;
     }
-    const params = {
-      model: agent.model,
-      cwd: agent.workspace,
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
-      config: this.environment.threadConfig(agent, this.baseUrl!),
-    };
-    if (!agent.threadId) this.store.updateAgent(id, { threadCreationAttempted: true });
-    const response = threadResponseSchema.parse(
-      await client.request(
-        agent.threadId ? 'thread/resume' : 'thread/start',
-        agent.threadId ? { ...params, threadId: agent.threadId } : { ...params, ephemeral: false },
-      ),
-    );
-    if (agent.threadId && response.thread.id !== agent.threadId)
-      throw new Error('恢复返回了不同 thread，已拒绝继续执行。');
-    if (!agent.threadId) this.store.updateAgent(id, { threadId: response.thread.id });
-    if (!agent.threadId) {
-      // CLI 0.159.2 still defers an empty rollout. A neutral assistant item
-      // persists it without a model turn; all environment rules come from AGENTS.md.
-      // Persist even on guidance validation failure so fixing the file can resume this ID.
-      await client.request('thread/inject_items', {
-        threadId: response.thread.id,
-        items: [
-          {
-            type: 'message',
-            role: 'assistant',
-            content: [{ type: 'output_text', text: 'Isles session initialized.' }],
-          },
-        ],
+    let sessionId: string;
+    if (agent.threadId) {
+      sessionId = await session.resumeSession(agent.threadId);
+      if (sessionId !== agent.threadId) throw new Error('恢复返回了不同 thread，已拒绝继续执行。');
+    } else {
+      this.store.updateAgent(id, { threadCreationAttempted: true });
+      sessionId = await session.createSession((createdId) => {
+        if (!createdId) throw new Error('Harness 返回了空的原生 session ID');
+        const saved = this.store.getAgent(id).threadId;
+        if (saved && saved !== createdId)
+          throw new Error('Harness 试图替换已保存的原生 session 绑定');
+        this.store.updateAgent(id, { threadId: createdId });
       });
+      if (sessionId !== this.store.getAgent(id).threadId)
+        throw new Error('Harness 新建的 session 与已保存绑定不一致');
     }
-    const normalize = (path: string) =>
-      process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
-    const expectedGuidance = normalize(join(agent.workspace, 'AGENTS.md'));
-    if (!response.instructionSources.some((path) => normalize(path) === expectedGuidance))
-      throw new Error(
-        'Codex 未确认加载工作目录的 AGENTS.md，请检查规则覆盖、读取大小限制和 CLI 版本。',
-      );
     this.store.updateAgent(id, {
-      threadId: response.thread.id,
+      threadId: sessionId,
       status: this.store.getAgent(id).desiredState === 'running' ? 'ready' : 'stopped',
       error: null,
     });
@@ -332,20 +288,20 @@ export class Runtime {
   private async pump(id: string, handle: Handle) {
     try {
       while (!this.closing && this.runnable(id)) {
-        if (handle.refresh && handle.client) {
-          // Codex loads MCP tools when it starts; the same thread is resumed below.
-          const client = handle.client;
-          delete handle.client;
+        if (handle.refresh && handle.session) {
+          // Reconnect through the adapter to reload settings and tools in the same session.
+          const client = handle.session;
+          delete handle.session;
           await client.close();
         }
         delete handle.refresh;
-        if (!handle.client) await this.connect(id, handle);
+        if (!handle.session) await this.connect(id, handle);
         // An edit during workspace preparation or initialization must reload guidance
         // before any queued input starts its first turn.
         if (handle.refresh) continue;
         const agent = this.store.getAgent(id);
         if (
-          !handle.client ||
+          !handle.session ||
           !agent.threadId ||
           !this.runnable(id) ||
           !this.store.hasPendingMessages(id)
@@ -353,22 +309,22 @@ export class Runtime {
           break;
         const claimed = this.store.startRun(id, agent.threadId);
         if (!claimed) break;
-        await this.turn(id, handle, handle.client, agent, claimed.run, claimed.input);
+        await this.turn(id, handle, handle.session, agent, claimed.run, claimed.input);
       }
     } catch (error) {
       if (!this.closing && this.store.getAgent(id).desiredState === 'running')
         this.store.updateAgent(id, {
           status: 'error',
-          error: this.environment.redactor.text(error),
+          error: this.workspace.redactor.text(error),
         });
-      await handle.client?.close();
-      delete handle.client;
+      await handle.session?.close();
+      delete handle.session;
     }
   }
   private async turn(
     id: string,
     handle: Handle,
-    client: NativeClient,
+    client: HarnessSession,
     agent: AgentRecord,
     run: Run,
     input: ClaimedChannel[],
@@ -381,40 +337,30 @@ export class Runtime {
     handle.active = active;
     this.store.updateAgent(id, { status: 'running' });
     try {
-      const response = turnResponseSchema.parse(
-        await client.request('turn/start', {
-          threadId: run.threadId,
-          clientUserMessageId: run.id,
-          input: [
-            {
-              type: 'text',
-              text: formatMessages(this.messageLabels(id), input),
-              text_elements: [],
-            },
-          ],
-          model: agent.model,
-          effort: agent.reasoningEffort,
-          cwd: agent.workspace,
-          approvalPolicy: 'never',
-          sandboxPolicy: { type: 'dangerFullAccess' },
-        }),
-      );
-      active.turnId = response.turn.id;
-      this.store.acceptRun(run.id, response.turn.id);
+      const response = await client.submit({
+        sessionId: run.threadId,
+        runId: run.id,
+        text: formatMessages(this.messageLabels(id), input),
+        model: agent.model,
+        reasoningEffort: agent.reasoningEffort,
+        workspace: agent.workspace,
+      });
+      active.turnId = response.turnId;
+      this.store.acceptRun(run.id, response.turnId);
       await done;
     } catch (error) {
-      const rejected = error instanceof NativeRpcError && !active.turnId;
+      const rejected = error instanceof HarnessSubmissionRejected && !active.turnId;
       if (!this.store.getRun(run.id).finishedAt)
         this.store.finishRun(
           run.id,
           rejected ? 'failed' : 'uncertain',
           rejected ? 'failed' : 'uncertain',
-          this.environment.redactor.text(error),
+          this.workspace.redactor.text(error),
         );
       if (this.store.getAgent(id).desiredState === 'running')
         this.store.updateAgent(id, {
           status: 'error',
-          error: this.environment.redactor.text(error),
+          error: this.workspace.redactor.text(error),
         });
       return;
     } finally {
@@ -423,149 +369,106 @@ export class Runtime {
     if (!this.closing && this.runnable(id)) this.store.updateAgent(id, { status: 'ready' });
   }
   private connectionExited(id: string, handle: Handle, error: Error) {
-    delete handle.client;
+    delete handle.session;
     if (handle.active) {
       this.store.finishRun(
         handle.active.run.id,
         'uncertain',
         'uncertain',
-        this.environment.redactor.text(error),
+        this.workspace.redactor.text(error),
       );
       handle.active.finish();
     }
     if (!this.closing && this.store.getAgent(id).desiredState === 'running')
       this.store.updateAgent(id, {
         status: 'error',
-        error: this.environment.redactor.text(error),
+        error: this.workspace.redactor.text(error),
       });
   }
-  private notification(
-    id: string,
-    handle: Handle,
-    method: string,
-    params: Record<string, unknown>,
-  ) {
+  private event(id: string, handle: Handle, event: HarnessEvent) {
     const active = handle.active;
-    if (!active || params.threadId !== active.run.threadId) return;
-    if (method === 'turn/started' || method === 'turn/completed') {
-      const parsed = turnNotificationSchema.safeParse(params);
-      if (!parsed.success || (active.turnId && active.turnId !== parsed.data.turn.id)) return;
-      active.turnId = parsed.data.turn.id;
+    if (!active || event.sessionId !== active.run.threadId) return;
+    const run = this.store.getRun(active.run.id);
+    if (run.finishedAt) return;
+    if (event.type === 'turn_started' || event.type === 'turn_completed') {
+      if (active.turnId && active.turnId !== event.turnId) return;
+      active.turnId = event.turnId;
       this.store.acceptRun(active.run.id, active.turnId);
-      if (method === 'turn/completed') {
-        const status = parsed.data.turn.status;
-        const error = parsed.data.turn.error
-          ? this.environment.redactor.text(parsed.data.turn.error.message)
-          : null;
+      if (event.type === 'turn_completed') {
+        const error = event.error ? this.workspace.redactor.text(event.error) : null;
         this.store.finishRun(
           active.run.id,
-          status === 'completed'
+          event.status,
+          event.status === 'completed'
             ? 'completed'
-            : status === 'interrupted'
-              ? 'interrupted'
+            : event.status === 'interrupted'
+              ? 'cancelled'
               : 'failed',
-          status === 'completed' ? 'completed' : status === 'interrupted' ? 'cancelled' : 'failed',
           error,
         );
-        if (status === 'failed')
+        if (event.status === 'failed')
           this.store.updateAgent(id, { status: 'error', error: error ?? '原生 turn 失败' });
         active.finish();
       }
       return;
     }
-    if (params.turnId && active.turnId && params.turnId !== active.turnId) return;
-    if (method === 'item/agentMessage/delta' || method === 'item/commandExecution/outputDelta') {
-      if (typeof params.itemId !== 'string' || typeof params.delta !== 'string') return;
-      const previous = this.store
-        .getRun(active.run.id)
-        .items.find((item) => item.id === params.itemId);
-      this.store.updateItem(
-        active.run.id,
-        {
-          id: params.itemId,
-          type:
-            previous?.type ??
-            (method.includes('agentMessage') ? 'agentMessage' : 'commandExecution'),
-          status: 'running',
-          text: this.environment.redactor.text(params.delta),
-        },
-        true,
-      );
-    } else if (method === 'item/started' || method === 'item/completed') {
-      const item = z
-        .object({ id: z.string(), type: z.string() })
-        .passthrough()
-        .safeParse(params.item);
-      if (!item.success) return;
-      const value = item.data;
-      const strings = [
-        'text',
-        'command',
-        'aggregatedOutput',
-        'server',
-        'tool',
-        'status',
-        'exitCode',
-      ];
-      const detail: string[] = [];
-      for (const key of strings)
-        if (typeof value[key] === 'string' || typeof value[key] === 'number')
-          detail.push(key === 'text' ? String(value[key]) : `${key}: ${String(value[key])}`);
-      // No raw arguments/config/result objects, auth material or reasoning blobs.
-      this.store.updateItem(active.run.id, {
-        id: value.id,
-        type: value.type,
-        status: method === 'item/completed' ? 'completed' : 'running',
-        text: this.environment.redactor.text(detail.join('\n')),
-      });
-    }
+    if (event.turnId && active.turnId && event.turnId !== active.turnId) return;
+    const previous = event.append ? run.items.find((item) => item.id === event.item.id) : undefined;
+    this.store.updateItem(
+      active.run.id,
+      {
+        ...event.item,
+        type: previous?.type ?? event.item.type,
+        text: this.workspace.redactor.text(event.item.text),
+      },
+      event.append,
+    );
   }
-  private serverRequest(
-    id: string,
-    handle: Handle,
-    requestId: RequestId,
-    method: string,
-    params: Record<string, unknown>,
-  ) {
-    const client = handle.client;
-    if (!client) return;
+  private question(id: string, handle: Handle, request: HarnessQuestion) {
+    const session = handle.session;
+    if (!session) return;
     const active = handle.active;
-    const request = inputRequestSchema.safeParse(params);
-    // The process belongs to this Agent alone, so another thread is one of its own sub-agents;
-    // its questions are answered while the main turn that started it is running.
-    const main = request.success && request.data.threadId === active?.run.threadId;
+    const main = request.sessionId === active?.run.threadId;
+    const capabilities = this.harnesses.get(this.store.getAgent(id).harness).descriptor
+      .capabilities;
     if (
-      method === 'item/tool/requestUserInput' &&
-      request.success &&
+      capabilities.userQuestions &&
+      (main || capabilities.nativeSubagents) &&
       active &&
-      (!main || !active.turnId || request.data.turnId === active.turnId) &&
+      (!main || !active.turnId || request.turnId === active.turnId) &&
       this.store.getAgent(id).desiredState === 'running' &&
       !this.store.getRun(active.run.id).finishedAt
     ) {
       if (main) {
-        active.turnId = request.data.turnId;
+        active.turnId = request.turnId;
         this.store.acceptRun(active.run.id, active.turnId);
       }
-      const definitions: QuestionDefinition[] = request.data.questions.map((q) => ({
-        ...q,
-        question: this.environment.redactor.text(q.question),
-        options:
-          q.options?.map((o) => ({
-            label: this.environment.redactor.text(o.label),
-            description: this.environment.redactor.text(o.description),
-          })) ?? null,
-      }));
+      const definitions: QuestionDefinition[] = request.questions.map((definition) => {
+        const q = questionDefinitionSchema.parse(definition);
+        return {
+          ...q,
+          question: this.workspace.redactor.text(q.question),
+          options:
+            q.options?.map((option) => ({
+              label: this.workspace.redactor.text(option.label),
+              description: this.workspace.redactor.text(option.description),
+            })) ?? null,
+        };
+      });
       const questionId = this.store.createQuestion(
         id,
         active.run.id,
-        request.data.turnId,
-        requestId,
+        request.turnId,
+        request.requestId,
         definitions,
       );
-      active.requests.set(questionId, requestId);
+      active.requests.set(questionId, request.requestId);
       return;
     }
-    client.reject(requestId, `Isles does not support this native request: ${method}`);
+    session.rejectQuestion(
+      request.requestId,
+      'Isles cannot accept this native question in the current run',
+    );
   }
   answer(id: string, questionId: string, value: QuestionAnswer) {
     const answers = answerQuestionSchema.parse(value);
@@ -576,7 +479,7 @@ export class Runtime {
     if (
       question.status !== 'pending' ||
       requestId === undefined ||
-      !handle?.client ||
+      !handle?.session ||
       handle.active?.run.id !== question.runId ||
       this.store.getAgent(id).desiredState !== 'running' ||
       this.store.getRun(question.runId).finishedAt
@@ -596,11 +499,11 @@ export class Runtime {
         response.answers.some((a) => !q.options!.some((o) => o.label === a))
       )
         throw new HttpError(400, '答案必须属于问题给出的选项');
-      if (q.isSecret) response.answers.forEach((a) => this.environment.redactor.add(a));
+      if (q.isSecret) response.answers.forEach((a) => this.workspace.redactor.add(a));
     }
     // The live connection/request identity is checked before responding. If it
     // closes afterwards, crash recovery marks any still pending question expired.
-    handle.client.respond(requestId, answers);
+    handle.session.answer(requestId, answers);
     handle.active.requests.delete(questionId);
     this.store.answerQuestion(questionId, answers);
   }
@@ -616,7 +519,7 @@ export class Runtime {
     this.store.updateAgent(id, { desiredState: 'stopped', status: 'stopped', error: null });
     const handle = this.handles.get(id);
     if (!handle) return;
-    const client = handle.client;
+    const client = handle.session;
     if (handle.active) {
       const active = handle.active;
       this.store.finishRun(
@@ -626,11 +529,13 @@ export class Runtime {
         '用户停止了 Agent；该输入不会再次投递。',
       );
       active.finish();
-      if (client && active.turnId)
+      if (
+        client &&
+        active.turnId &&
+        this.harnesses.get(this.store.getAgent(id).harness).descriptor.capabilities.interrupt
+      )
         await Promise.race([
-          client
-            .request('turn/interrupt', { threadId: active.run.threadId, turnId: active.turnId })
-            .catch(() => {}),
+          client.interrupt(active.run.threadId, active.turnId).catch(() => {}),
           new Promise((resolve) => {
             const timer = setTimeout(resolve, 2_000);
             timer.unref();
@@ -638,7 +543,7 @@ export class Runtime {
         ]);
     }
     await client?.close();
-    if (handle.client === client) delete handle.client;
+    if (handle.session === client) delete handle.session;
   }
   async resume(id: string) {
     let agent = this.managed(id);
@@ -657,10 +562,10 @@ export class Runtime {
     agent = current();
     if (agent.threadCreationAttempted && !agent.threadId)
       throw new HttpError(409, '原生 thread 创建结果不明，无法用新 thread 替代；请核对原生记录。');
-    const client = handle.client;
+    const client = handle.session;
     await client?.close();
     current();
-    if (handle.client === client) delete handle.client;
+    if (handle.session === client) delete handle.session;
     this.store.updateAgent(id, { desiredState: 'running', status: 'recovering', error: null });
     this.kick(id);
   }
@@ -700,7 +605,7 @@ export class Runtime {
     }
     await Promise.all(
       [...this.handles.values()].map(async (handle) => {
-        await handle.client?.close();
+        await handle.session?.close();
         await handle.task;
       }),
     );

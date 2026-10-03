@@ -26,8 +26,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "'codex'"
+          "autoincrement": false
         },
         "model": {
           "name": "model",
@@ -120,19 +119,14 @@
       "indexes": {
         "agents_thread": {
           "name": "agents_thread",
-          "columns": ["thread_id"],
+          "columns": ["harness", "native_home", "thread_id"],
           "isUnique": true
         }
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {
-        "agents_codex": {
-          "name": "agents_codex",
-          "value": "\"agents\".\"harness\" = 'codex'"
-        }
-      }
+      "checkConstraints": {}
     },
     "channel_members": {
       "name": "channel_members",

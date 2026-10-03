@@ -1,12 +1,14 @@
 import { ConfigManager } from '@isles/config';
-import type { Catalog } from '../src/codex/catalog.js';
+import type { HarnessCatalog } from '../src/harness/types.js';
+import { CodexAdapter, type CodexClientFactory } from '../src/codex/adapter.js';
+import { NativeEnvironment } from '../src/codex/environment.js';
+import type { AgentWorkspace } from '../src/runtime/workspace.js';
 import {
   NativeRpcError,
   type NativeClient,
   type NativeHandlers,
   type RequestId,
 } from '../src/codex/protocol.js';
-import type { ClientFactory } from '../src/runtime/runtime.js';
 import type { AgentRecord, Store } from '../src/storage/store.js';
 import type { Agent, Channel } from '@isles/contracts';
 import { join } from 'node:path';
@@ -19,7 +21,7 @@ export const testConfig = (root: string, environment: NodeJS.ProcessEnv = {}) =>
     environment: { ISLES_DATA_DIR: root, ...environment },
   });
 
-export const testCatalog: Catalog = {
+export const testCatalog: HarnessCatalog = {
   status: async () => ({
     available: true,
     authenticated: true,
@@ -39,6 +41,11 @@ export const testCatalog: Catalog = {
     },
   ],
 };
+export const codexAdapters =
+  (catalog: HarnessCatalog = testCatalog, factory?: CodexClientFactory) =>
+  (workspace: AgentWorkspace, config: ConfigManager) => [
+    new CodexAdapter(new NativeEnvironment(config, workspace), catalog, factory),
+  ];
 export class MockClient implements NativeClient {
   calls: { method: string; params: Record<string, unknown> }[] = [];
   responses: { id: RequestId; result: unknown }[] = [];
@@ -179,7 +186,7 @@ export class MockHarness {
   missingGuidance = false;
   failTurn: 'reject' | 'unknown' | undefined;
   onTurn: ((client: MockClient, params: Record<string, unknown>) => void) | undefined;
-  factory: ClientFactory = async (agent, handlers, baseUrl) => {
+  factory: CodexClientFactory = async (agent, handlers, baseUrl) => {
     const client = new MockClient(agent, handlers, this, baseUrl);
     this.clients.push(client);
     return client;

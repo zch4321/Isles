@@ -2,6 +2,7 @@
 import type { Agent, Channel } from '@isles/contracts';
 import { ArrowLeft, LoaderCircle, PanelRight, Pause, Play, Square } from '@lucide/vue';
 import { computed } from 'vue';
+import { useHarnessName } from '@/api/queries';
 import GroupAvatar from './GroupAvatar.vue';
 import ParticipantAvatar from './ParticipantAvatar.vue';
 import StatusBadge from './StatusBadge.vue';
@@ -29,6 +30,7 @@ const canResume = computed(
   () => props.agent?.desiredState === 'stopped' || props.agent?.status === 'error',
 );
 const running = computed(() => props.members.filter((m) => m.status === 'running').length);
+const harnessName = useHarnessName(() => props.agent?.harness ?? '');
 </script>
 
 <template>
@@ -50,7 +52,7 @@ const running = computed(() => props.members.filter((m) => m.status === 'running
           <StatusBadge data-testid="agent-status" :status="agent.status" />
         </div>
         <p class="truncate text-xs text-muted-foreground">
-          Codex · {{ agent.model }} · {{ agent.reasoningEffort }}
+          {{ harnessName }} · {{ agent.model }} · {{ agent.reasoningEffort }}
         </p>
       </div>
       <Button

@@ -39,8 +39,28 @@ export const runStatusSchema = z.enum([
   'failed',
   'uncertain',
 ]);
+export const harnessIdSchema = z
+  .string()
+  .min(1)
+  .max(48)
+  .regex(/^[a-z][a-z0-9-]*$/);
+export const harnessCapabilitiesSchema = z.object({
+  sessionResume: z.boolean(),
+  interrupt: z.boolean(),
+  userQuestions: z.boolean(),
+  nativeSubagents: z.boolean(),
+  mcp: z.boolean(),
+  workspaceInstructions: z.boolean(),
+});
+export const harnessDescriptorSchema = z.object({
+  id: harnessIdSchema,
+  displayName: z.string(),
+  configuration: z.enum(['codex-path']).nullable(),
+  capabilities: harnessCapabilitiesSchema,
+});
 export const createAgentSchema = z
   .object({
+    harness: harnessIdSchema,
     name: z.string().trim().min(1).max(80),
     model: z.string().min(1).max(120),
     reasoningEffort: z.string().min(1).max(24),
@@ -84,7 +104,7 @@ export const addMembersSchema = z
 export const agentSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
-  harness: z.literal('codex'),
+  harness: harnessIdSchema,
   model: z.string(),
   reasoningEffort: z.string(),
   /** The Agent's private chat with the user. */
@@ -205,7 +225,7 @@ export const modelSchema = z.object({
   defaultReasoningEffort: z.string(),
   isDefault: z.boolean(),
 });
-export const codexStatusSchema = z.object({
+export const harnessStatusSchema = z.object({
   available: z.boolean(),
   authenticated: z.boolean(),
   version: z.string().nullable(),
@@ -245,7 +265,10 @@ export type UpdateAgent = z.infer<typeof updateAgentSchema>;
 export type CreateGroup = z.infer<typeof createGroupSchema>;
 export type SendMessage = z.infer<typeof sendMessageSchema>;
 export type Model = z.infer<typeof modelSchema>;
-export type CodexStatus = z.infer<typeof codexStatusSchema>;
+export type HarnessId = z.infer<typeof harnessIdSchema>;
+export type HarnessCapabilities = z.infer<typeof harnessCapabilitiesSchema>;
+export type HarnessDescriptor = z.infer<typeof harnessDescriptorSchema>;
+export type HarnessStatus = z.infer<typeof harnessStatusSchema>;
 export type IslesEvent = z.infer<typeof eventSchema>;
 export type DeliveryStatus = z.infer<typeof deliveryStatusSchema>;
 export type RunStatus = z.infer<typeof runStatusSchema>;

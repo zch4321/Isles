@@ -15,7 +15,7 @@ export const agents = sqliteTable(
   {
     id: text().primaryKey(),
     name: text().notNull(),
-    harness: text().notNull().default('codex'),
+    harness: text().notNull(),
     model: text().notNull(),
     reasoningEffort: text('reasoning_effort').notNull(),
     workspace: text().notNull(),
@@ -35,10 +35,7 @@ export const agents = sqliteTable(
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
-  (t) => [
-    uniqueIndex('agents_thread').on(t.threadId),
-    check('agents_codex', sql`${t.harness} = 'codex'`),
-  ],
+  (t) => [uniqueIndex('agents_thread').on(t.harness, t.nativeHome, t.threadId)],
 );
 
 export const channels = sqliteTable(

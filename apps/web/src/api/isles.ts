@@ -3,7 +3,8 @@ import {
   agentSchema,
   channelDetailSchema,
   channelSchema,
-  codexStatusSchema,
+  harnessStatusSchema,
+  harnessDescriptorSchema,
   codexConfigurationSchema,
   messagePageSchema,
   messageSchema,
@@ -41,12 +42,18 @@ export async function api<T>(
   return schema.parse(body);
 }
 
-export const fetchCodex = (refresh = false) =>
-  api(`/codex/status${refresh ? '?refresh=true' : ''}`, codexStatusSchema);
+export const fetchHarnesses = () =>
+  api('/harnesses', z.object({ harnesses: z.array(harnessDescriptorSchema) }));
+export const fetchHarnessStatus = (id: string, refresh = false) =>
+  api(
+    `/harnesses/${encodeURIComponent(id)}/status${refresh ? '?refresh=true' : ''}`,
+    harnessStatusSchema,
+  );
 export const fetchCodexConfiguration = () => api('/codex/config', codexConfigurationSchema);
 export const saveCodexConfiguration = (binaryPath: string | null) =>
   api('/codex/config', codexConfigurationSchema, { binaryPath }, 'PUT');
-export const fetchModels = () => api('/codex/models', z.object({ models: z.array(modelSchema) }));
+export const fetchModels = (id: string) =>
+  api(`/harnesses/${encodeURIComponent(id)}/models`, z.object({ models: z.array(modelSchema) }));
 
 export const fetchAgents = (includeDeleted = false) =>
   api(

@@ -30,8 +30,8 @@ const save = useMutation({
   onSuccess: async (value) => {
     queryClient.setQueryData(['codex-configuration'], value);
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['codex'] }),
-      queryClient.invalidateQueries({ queryKey: ['models'] }),
+      queryClient.invalidateQueries({ queryKey: ['harness-status', 'codex'] }),
+      queryClient.invalidateQueries({ queryKey: ['models', 'codex'] }),
     ]);
   },
 });
@@ -60,7 +60,7 @@ const save = useMutation({
           :disabled="configuration.isPending.value || save.isPending.value"
         />
         <p class="text-xs leading-relaxed text-muted-foreground">
-          此设置供本机所有 Agent 使用，保存后重新检测。留空恢复自动发现。
+          此设置供本机所有 Codex Agent 使用，保存后重新检测。留空恢复自动发现。
         </p>
         <p
           v-if="configuration.data.value"

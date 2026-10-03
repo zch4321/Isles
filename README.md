@@ -2,7 +2,7 @@
 
 **让独立的 AI 一起工作。**
 
-面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。接入以官方原生能力为主，顺序为 **Codex app-server → Kimi Code Server API → Claude Agent SDK**。
+面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前只接入 **Codex app-server**；先将已有 Codex 行为完整抽入 harness 适配层，再添加新的 harness。Kimi Code 保留为后续候选，Claude Code / Claude Agent SDK 因用户重新考虑闭源执行核心而暂缓。
 
 Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到 `[channel: "评审", seq: 12, from: agent:"Alice"]` 这样的文本头部，自己的私聊显示为 `private`。普通消息用名称呈现群、发送者与提及对象，重名时在引号外附加 ID 短前缀；工具仍通过目录查询完整 UUID 寻址，消息仍以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，本轮验证见 [名称消息验收](docs/name-message-acceptance.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。
 
@@ -100,7 +100,7 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-`pnpm check` 包含格式、ESLint、类型检查、服务测试与生产构建。服务测试中的原生 adapter 是模拟实现，覆盖规则文件维护与加载校验、文本格式与正文转义、频道序号与回复、即时唤醒、串行队列、MCP 接收去重、暂停与成员权限、停止/恢复、待核对、问题关联和进程锁。浏览器测试使用独立临时数据目录及 `54310`/`55173` 端口，通过真实 REST/SSE/MCP 验证页面链路，原生模型执行采用测试专用模拟 adapter；生产入口不会启用它。
+`pnpm check` 包含格式、ESLint、类型检查、服务测试与生产构建。独立语义 fake adapter 验证 Runtime 的协议无关派发、相同 session ID 跨 harness 的隔离、注册约束和生命周期；Codex 原生协议模拟验证 adapter 的参数、事件及问题转换。既有测试覆盖规则文件维护与加载校验、文本格式与正文转义、频道序号与回复、即时唤醒、串行队列、MCP 接收去重、暂停与成员权限、停止/恢复、待核对、问题关联和进程锁。浏览器测试使用独立临时数据目录及 `54310`/`55173` 端口，通过真实 REST/SSE/MCP 验证页面链路，原生模型执行采用测试专用模拟 adapter；生产入口不会启用它。本轮最终检查和真实 Codex 回归结果见 [Harness 适配层验收](docs/harness-adapter-acceptance.md)，模拟验证不代表新 harness 已接入。
 
 可选执行本机版本对应的类型生成检查（不调用模型）：
 
@@ -141,7 +141,8 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 
 | 入口                                                                          | 用途                                                                                              |
 | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `GET /api/codex/status`、`GET /api/codex/models`                              | 原生版本、认证可用性与实际模型配置。                                                              |
+| `GET /api/harnesses`                                                          | 已注册的 harness 目录与能力声明；当前只返回 Codex。                                               |
+| `GET /api/harnesses/:id/status`、`GET /api/harnesses/:id/models`              | 所选 harness 的版本、认证可用性与实际模型配置。                                                   |
 | `GET/PUT /api/codex/config`                                                   | 读取/保存 TOML 中的 Codex 可执行路径；响应包含 `configFilePath`，传入 `null` 删除 `binary_path`。 |
 | `GET/POST /api/agents`、`GET/PATCH/DELETE /api/agents/:id`                    | 列表、创建、详情、修改名称/模型/推理等级/拉群权限，以及保留历史的删除。                           |
 | `POST /api/agents/:id/stop`、`POST /api/agents/:id/resume`                    | 持久停止及原 thread 恢复。                                                                        |
@@ -155,7 +156,11 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 
 普通事件页的 `cursor` 是本页最后返回 ID，`latestCursor` 是当前库的最大 ID；续读使用 `cursor`。SSE 断线自动重连，Web 同时补读权威快照以恢复聊天与状态。原生文本不会自动进入正式聊天。
 
-`GET /api/agents` 默认排除已删除 Agent；`?includeDeleted=true` 用于历史发送者目录。Agent PATCH 仅更新提供的字段，空请求或不支持的模型/等级返回 `400`；不接受修改 ID、工作区或 thread。DELETE 成功返回已删除 Agent，重复删除保持相同状态。已删除 Agent 的详情仍可读取，编辑/停止/恢复返回 `410`，私聊写入返回 `409`，MCP 请求返回 `401`。
+创建 Agent 必须传入已注册的 `harness`，Web 从目录动态读取选项，仅展示实际接入项。模型和推理等级来自所选 adapter 的原生目录，不预设其他 harness。原 Codex 状态/模型路由已移除，不提供兼容别名；Codex 路径设置继续使用 `/api/codex/config`。
+
+`GET /api/agents` 默认排除已删除 Agent；`?includeDeleted=true` 用于历史发送者目录。Agent PATCH 仅更新提供的字段，空请求或不支持的模型/等级返回 `400`；不接受修改 harness、ID、工作区或 thread。DELETE 成功返回已删除 Agent，重复删除保持相同状态。已删除 Agent 的详情仍可读取，编辑/停止/恢复返回 `410`，私聊写入返回 `409`，MCP 请求返回 `401`。
+
+API 与存储中的 `threadId` 表示 adapter 返回的不透明原生 session ID，不要求所有 harness 使用 Codex thread 语义。绑定按 `(harness, nativeHome, threadId)` 区分；同一 Agent 不能静默替换绑定。此轮只更新当前数据库基线，不迁移、清理或搬移现有 Codex 数据。
 
 `GET /api/channels` 默认排除已删除群；`?includeDeleted=true` 包含保留的群历史。频道响应增加 `deletedAt`，未删除频道为 `null`。群 PATCH 仅接受名称与暂停状态，空请求返回 `400`；DELETE 返回删除后的频道，重复删除幂等，私聊 DELETE 返回 `400`。已删除群的详情和历史仍可由人类读取，改名、暂停/继续和成员修改返回 `410`，发消息返回 `409`；Agent 的 MCP 调用拒绝读写该群。删除状态记录在永久保留的 `group_deleted` 事件中，不能当作普通 SSE 回放历史清理。
 
@@ -165,17 +170,18 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 
 ## 工程结构
 
-| 路径                 | 内容                                                        |
-| -------------------- | ----------------------------------------------------------- |
-| `apps/web`           | Vue 3、Vite、shadcn-vue、Tailwind CSS、TanStack Vue Query。 |
-| `apps/server`        | Fastify 服务、SQLite/Drizzle、配置及后续 Runtime/adapters。 |
-| `packages/contracts` | Zod 运行时校验和前后端共享协议类型。                        |
-| `packages/config`    | Node 专用 TOML 配置解析、路径定位和 Codex 路径保存。        |
-| `tests/e2e`          | Playwright 浏览器链路验证。                                 |
-| `docs`               | 需求、架构与实施计划。                                      |
+| 路径                 | 内容                                                                  |
+| -------------------- | --------------------------------------------------------------------- |
+| `apps/web`           | Vue 3、Vite、shadcn-vue、Tailwind CSS、TanStack Vue Query。           |
+| `apps/server`        | Fastify、SQLite/Drizzle、通用 Runtime、harness 契约与 Codex adapter。 |
+| `packages/contracts` | Zod 运行时校验和前后端共享协议类型。                                  |
+| `packages/config`    | Node 专用 TOML 配置解析、路径定位和 Codex 路径保存。                  |
+| `tests/e2e`          | Playwright 浏览器链路验证。                                           |
+| `docs`               | 需求、架构与实施计划。                                                |
 
 - [需求文档](docs/requirements.md)
 - [架构设计](docs/architecture.md)
+- [Harness 适配层验收](docs/harness-adapter-acceptance.md)
 - [实现计划](docs/implementation-plan.md)
 - [M2 实施计划](docs/m2-implementation-plan.md)
 - [消息协议](docs/message-protocol.md)

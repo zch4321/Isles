@@ -1,4 +1,5 @@
-import type { CodexStatus, Model } from '@isles/contracts';
+import type { HarnessStatus, Model } from '@isles/contracts';
+import type { HarnessCatalog } from '../harness/types.js';
 import { z } from 'zod';
 import { StdioClient } from './client.js';
 import type { NativeEnvironment } from './environment.js';
@@ -17,14 +18,9 @@ const modelsSchema = z.object({
   ),
   nextCursor: z.string().nullable(),
 });
-export interface Catalog {
-  status(): Promise<CodexStatus>;
-  models(): Promise<Model[]>;
-  invalidate?(): void;
-}
-export class NativeCatalog implements Catalog {
-  private cache: { status: CodexStatus; models: Model[]; time: number } | undefined;
-  private fetching: Promise<{ status: CodexStatus; models: Model[] }> | undefined;
+export class NativeCatalog implements HarnessCatalog {
+  private cache: { status: HarnessStatus; models: Model[]; time: number } | undefined;
+  private fetching: Promise<{ status: HarnessStatus; models: Model[] }> | undefined;
   private revision = 0;
   constructor(
     private environment: NativeEnvironment,

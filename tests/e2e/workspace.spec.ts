@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { Agent, Channel } from '@isles/contracts';
+import type { Agent, Channel, HarnessDescriptor } from '@isles/contracts';
 
 const composer = (page: Page) => page.getByRole('textbox', { name: '消息输入' });
 async function send(page: Page, body: string) {
@@ -11,7 +11,18 @@ async function createAgent(page: Page, name: string) {
   await page.getByLabel('名称').fill(name);
   await page.getByLabel('模型', { exact: true }).selectOption('test-model');
   await page.getByLabel('推理等级').selectOption('max');
-  await page.getByRole('button', { name: '创建 Agent', exact: true }).click();
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    page.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  expect(response.request().postDataJSON()).toMatchObject({ harness: 'codex' });
+  const created = (await response.json()) as Agent;
+  await expect
+    .poll(async () => (await (await page.request.get(`/api/agents/${created.id}`)).json()).agent)
+    .toMatchObject({ status: 'ready', threadId: expect.any(String) });
   await expect(page.getByTestId('agent-status')).toHaveText('可用');
 }
 const noHorizontalScroll = (page: Page) =>
@@ -21,7 +32,7 @@ test('saves the Codex executable path in the creation dialog and restores automa
   page,
 }, testInfo) => {
   let unavailable = true;
-  await page.route('**/api/codex/status*', (route) =>
+  await page.route('**/api/harnesses/codex/status*', (route) =>
     unavailable
       ? route.fulfill({
           json: {
@@ -61,6 +72,114 @@ test('saves the Codex executable path in the creation dialog and restores automa
   expect(await noHorizontalScroll(page)).toBe(false);
   await page.screenshot({ path: testInfo.outputPath('codex-path-mobile.png'), fullPage: true });
   await page.getByRole('button', { name: '取消', exact: true }).click();
+});
+
+test('switches registered harness catalogs and cached selections without applying Codex settings or creating a fallback Agent', async ({
+  page,
+}) => {
+  const semantic: HarnessDescriptor = {
+    id: 'semantic-test',
+    displayName: 'Semantic Test',
+    configuration: null,
+    capabilities: {
+      sessionResume: true,
+      interrupt: false,
+      userQuestions: false,
+      nativeSubagents: false,
+      mcp: true,
+      workspaceInstructions: true,
+    },
+  };
+  await page.route('**/api/harnesses', async (route) => {
+    const response = await route.fetch();
+    const directory = (await response.json()) as { harnesses: HarnessDescriptor[] };
+    await route.fulfill({ response, json: { harnesses: [...directory.harnesses, semantic] } });
+  });
+  await page.route('**/api/harnesses/semantic-test/status*', (route) =>
+    route.fulfill({
+      json: {
+        available: true,
+        authenticated: true,
+        version: 'test-only',
+        binaryPath: null,
+        error: null,
+      },
+    }),
+  );
+  let modelRequests = 0;
+  let releaseRefresh!: () => void;
+  const refreshReady = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  await page.route('**/api/harnesses/semantic-test/models', async (route) => {
+    // Hold the second read so returning to this harness must use its own cached catalog.
+    if (++modelRequests === 2) await refreshReady;
+    await route.fulfill({
+      json: {
+        models: [
+          {
+            id: 'semantic-model',
+            model: 'semantic-model',
+            displayName: 'Semantic Model',
+            description: '',
+            supportedReasoningEfforts: ['low', 'medium'],
+            defaultReasoningEffort: 'medium',
+            isDefault: true,
+          },
+        ],
+      },
+    });
+  });
+  const before = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
+  await page.goto('/');
+  await page.getByRole('button', { name: '新建 Agent', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
+  const harness = dialog.getByLabel('Harness', { exact: true });
+  const model = dialog.getByLabel('模型', { exact: true });
+  const effort = dialog.getByLabel('推理等级');
+  const codexSettings = dialog.getByRole('button', { name: 'Codex 路径设置', exact: true });
+  await expect(harness).toHaveValue('codex');
+  await expect(harness.locator('option')).toHaveText(['Codex', 'Semantic Test']);
+  await expect(model).toHaveValue('test-model');
+  await expect(effort).toHaveValue('high');
+  await expect(codexSettings).toBeVisible();
+  await dialog.getByLabel('名称').fill('Semantic catalog test');
+  await harness.selectOption('semantic-test');
+  await expect(model).toHaveValue('semantic-model');
+  await expect(effort).toHaveValue('medium');
+  await expect(effort.locator('option')).toHaveText(['low', 'medium']);
+  await expect(codexSettings).toHaveCount(0);
+  await harness.selectOption('codex');
+  await expect(model).toHaveValue('test-model');
+  await expect(effort).toHaveValue('high');
+  await expect(codexSettings).toBeVisible();
+  await Promise.all([
+    page.waitForRequest((request) => request.url().endsWith('/api/harnesses/semantic-test/models')),
+    harness.selectOption('semantic-test'),
+  ]);
+  await expect(model).toHaveValue('semantic-model');
+  await expect(effort).toHaveValue('medium');
+  await expect(codexSettings).toHaveCount(0);
+  releaseRefresh();
+  const [creation] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  expect(creation.request().postDataJSON()).toEqual({
+    harness: 'semantic-test',
+    name: 'Semantic catalog test',
+    model: 'semantic-model',
+    reasoningEffort: 'medium',
+    canCreateGroups: false,
+  });
+  expect(creation.status()).toBe(404);
+  await expect(dialog.getByRole('alert')).toContainText('未注册的 harness：semantic-test');
+  const after = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
+  expect(after.agents.map((agent) => agent.id)).toEqual(before.agents.map((agent) => agent.id));
+  await dialog.getByRole('button', { name: '取消', exact: true }).click();
 });
 
 test('opens the workspace and connects through the Web proxy to SQLite-backed health', async ({
@@ -279,7 +398,7 @@ test('edits an Agent without resetting its effort or changing its native convers
   const catalogReady = new Promise<void>((resolve) => {
     releaseCatalog = resolve;
   });
-  await page.route('**/api/codex/models', async (route) => {
+  await page.route('**/api/harnesses/codex/models', async (route) => {
     const response = await route.fetch();
     await catalogReady;
     await route.fulfill({ response });
@@ -293,7 +412,7 @@ test('edits an Agent without resetting its effort or changing its native convers
   releaseCatalog();
   await expect(dialog.getByLabel('模型', { exact: true })).toBeEnabled();
   await expect(dialog.getByLabel('推理等级')).toHaveValue('max');
-  await page.unroute('**/api/codex/models');
+  await page.unroute('**/api/harnesses/codex/models');
   await dialog.getByLabel('名称').fill('改名后的 Agent');
   const [rename] = await Promise.all([
     page.waitForResponse(
@@ -377,7 +496,7 @@ test('can edit name and permission when the model catalog is unavailable', async
   await createAgent(page, '离线编辑 Agent');
   const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
   const original = list.agents.find((agent) => agent.name === '离线编辑 Agent')!;
-  await page.route('**/api/codex/models', (route) =>
+  await page.route('**/api/harnesses/codex/models', (route) =>
     route.fulfill({ status: 503, json: { error: '模型列表暂时不可用' } }),
   );
   await page.reload();

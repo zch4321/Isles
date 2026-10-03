@@ -1,16 +1,16 @@
 # Isles 实现计划
 
-> 版本：0.15 · 日期：2026-10-03 · 状态：配置、独立工作区、Agent 与群聊基础管理已完成；下一阶段为 M3
+> 版本：0.16 · 日期：2026-10-03 · 状态：现有 Codex 基础闭环已完成；harness 适配层已完成；新 harness 随后添加，Claude 暂缓
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
 ## 1. 已确定的方向
 
 - 采用已讨论的 Vue 3、Vite、TypeScript、shadcn-vue、Tailwind CSS、Fastify、SQLite/Drizzle 和 pnpm workspace。
-- 以官方原生接口为主；首批顺序为 **Codex → Kimi Code → Claude Agent SDK**。
+- 以官方原生接口为主；当前先完整提取现有 **Codex 的 harness 适配层**，验收后再添加新的 harness。
 - Codex 是主要接入，首先用它跑通 Agent、固定 session、私聊和多 Agent 协作。
-- Kimi 和 Claude 复用既有业务层与 Runtime，通过 adapter 表达各自能力差异。
-- 第一阶段不接 DSH，不引入 Claude 的第三方 ACP 桥接。
+- Kimi Code 保留为后续候选，本轮不接入；新增 harness 复用业务层与 Runtime，通过 adapter 表达能力差异。
+- 2026-10-03 用户重新考虑 Claude Code 闭源执行核心，Claude Code / Claude Agent SDK 接入暂缓；不安装 SDK，不实现其 adapter。DSH 与第三方 Claude ACP 不进入当前范围。
 - M0 已完成。M1 链路验收及 AGENTS.md 原生加载、真实压缩和恢复的补充验收已通过，最新证据见 [基础修复计划](foundation-repair-plan.md)。原 [实施计划](m1-implementation-plan.md)和[验收记录](m1-acceptance.md)保留为历史事实。
 - M2 规则于 2026-09-30 确认，2026-10-02 调整为即时唤醒与 MCP 主动收信；任务与验收标准见 [M2 实施计划](m2-implementation-plan.md)。
 - 产品中的 AI 参与者统一称为 **Agent**（M1 文档中的“对象”）；M1 实施计划和验收记录作为历史记录保留原用词。
@@ -23,27 +23,28 @@
 
 ## 2. 阶段总览
 
-| 阶段                     | 交付结果                                                                   | 状态                                                                                                            |
-| ------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| M0 工程初始化            | 可启动的 Web/API、共享协议、SQLite/Drizzle、检查和构建入口。               | 已完成并验证。                                                                                                  |
-| M1 Codex 单 Agent 闭环   | 用户创建 Agent，私聊、观察执行、回答原生问题、停止并恢复同一 session。     | 链路及基础规则加载、压缩与恢复补充验收通过。                                                                    |
-| 基础修复                 | AGENTS.md 原生加载、简洁文本协议、频道序号、压缩和恢复验证。               | 历史验收已通过；当时的旧库迁移现已撤销。                                                                        |
-| M2 Codex 群聊协作        | 多个独立 Codex Agent 通过 MCP 参与群聊，权限与消息投递一致。               | 自动化与两个真实 Agent 的重新验收通过。                                                                         |
-| 配置与目录拆分           | TOML 配置、数据与工作区分离、共享目录规则、当前 schema 全新基线。          | 89 项测试、7 项浏览器测试与真实 Codex 验证通过；见 [验收记录](config-workspace-acceptance.md)。                 |
-| Agent 基础管理           | 编辑名称/模型/推理等级/权限，保留历史和文件的删除与只读历史入口。          | 105 项测试、10 项浏览器测试与真实 Codex 修改/删除/重启验证通过；见 [验收记录](agent-management-acceptance.md)。 |
-| 名称消息呈现             | 自动输入、收信与历史共用安全名称标签；目录保留完整 ID 寻址，更新持久规则。 | 108 项测试、10 项浏览器测试与真实 Codex 同名寻址/重启验证通过；见 [验收记录](name-message-acceptance.md)。      |
-| 群聊基础管理             | 创建/查询/改名/成员管理及保留历史的删除，成员继续使用同一 session。        | 本轮检查与真实 Codex 验证见 [群聊管理验收](group-management-acceptance.md)。                                    |
-| M3 Kimi Code 接入        | 通过原生 Server API 加入既有群聊，与 Codex 协作和 review。                 | 下一阶段，尚未实施。                                                                                            |
-| M4 Claude Agent SDK 接入 | 通过官方持续流式 SDK 加入既有协作。                                        | 按已确定顺序实施。                                                                                              |
-| M5 完整体验与长期运行    | 完善文件共享、生命周期、历史检索、备份和长时间运行体验。                   | 细分范围待讨论。                                                                                                |
+| 阶段                   | 交付结果                                                                   | 状态                                                                                                            |
+| ---------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| M0 工程初始化          | 可启动的 Web/API、共享协议、SQLite/Drizzle、检查和构建入口。               | 已完成并验证。                                                                                                  |
+| M1 Codex 单 Agent 闭环 | 用户创建 Agent，私聊、观察执行、回答原生问题、停止并恢复同一 session。     | 链路及基础规则加载、压缩与恢复补充验收通过。                                                                    |
+| 基础修复               | AGENTS.md 原生加载、简洁文本协议、频道序号、压缩和恢复验证。               | 历史验收已通过；当时的旧库迁移现已撤销。                                                                        |
+| M2 Codex 群聊协作      | 多个独立 Codex Agent 通过 MCP 参与群聊，权限与消息投递一致。               | 自动化与两个真实 Agent 的重新验收通过。                                                                         |
+| 配置与目录拆分         | TOML 配置、数据与工作区分离、共享目录规则、当前 schema 全新基线。          | 89 项测试、7 项浏览器测试与真实 Codex 验证通过；见 [验收记录](config-workspace-acceptance.md)。                 |
+| Agent 基础管理         | 编辑名称/模型/推理等级/权限，保留历史和文件的删除与只读历史入口。          | 105 项测试、10 项浏览器测试与真实 Codex 修改/删除/重启验证通过；见 [验收记录](agent-management-acceptance.md)。 |
+| 名称消息呈现           | 自动输入、收信与历史共用安全名称标签；目录保留完整 ID 寻址，更新持久规则。 | 108 项测试、10 项浏览器测试与真实 Codex 同名寻址/重启验证通过；见 [验收记录](name-message-acceptance.md)。      |
+| 群聊基础管理           | 创建/查询/改名/成员管理及保留历史的删除，成员继续使用同一 session。        | 本轮检查与真实 Codex 验证见 [群聊管理验收](group-management-acceptance.md)。                                    |
+| Harness 适配层         | 通用契约、注册目录、规范化生命周期与事件；完整抽出既有 Codex 行为。        | 128 项测试、13 项浏览器测试与两套真实 Codex 回归通过，见 [独立验收](harness-adapter-acceptance.md)。            |
+| M3 新 harness 接入     | 通过 adapter 加入既有协作；Kimi Code 保留为后续候选。                      | 适配层验收后另行确定范围，本轮不实施。                                                                          |
+| M4 Claude 接入（暂缓） | 此前计划通过官方 Agent SDK 接入 Claude Code。                              | 因用户重新考虑闭源执行核心而暂缓，不再作为已承诺阶段。                                                          |
+| M5 完整体验与长期运行  | 完善文件共享、生命周期、历史检索、备份和长时间运行体验。                   | 细分范围待讨论。                                                                                                |
 
 消息持久化、权限检查、停止和恢复从相应功能的第一阶段就实现；M5 扩展故障覆盖和体验，不用于推迟基础正确性。
 
-统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。随后按 M3 范围核对本机 Kimi 的实际协议和规则文件入口，再接入既有协作层；当前没有开始 Kimi 或 Claude 接入。
+统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。当前先提取适配层，只注册 Codex；随后再确定新 harness 接入范围，Kimi 仍是候选，Claude 明确暂缓。
 
 配置与目录拆分的验收覆盖优先级、路径解析、数据库/token 位置、Codex 发现及错误、UI 保存与实时检测、工作区稳定性、共享目录和原生规则加载。当前结果为 89 项测试、7 项浏览器测试与两个真实 Codex Agent 的读写/重启验证通过。旧目录清理仍有进程占用及工具审批限制，具体边界见 [验收记录](config-workspace-acceptance.md#4-旧目录清理遗留项)。
 
-当前单用户、本机、Codex 范围的基础闭环可收口：配置和独立工作区、Agent/群聊管理、私聊与群聊、MCP 共享文件协作、持久规则、停止/恢复与固定 thread 已有自动化、浏览器和真实 Codex 证据。群聊管理的本轮检查与边界见 [验收记录](group-management-acceptance.md)。下一步按 M3 接入 Kimi，再按 M4 接入 Claude；M5 的检索、产物版本、备份和更长时间运行不作为开始 M3 的前置条件。当前 Codex 验证不能代替其他 harness 的原生能力验收。
+当前单用户、本机、Codex 范围的基础闭环可收口：配置和独立工作区、Agent/群聊管理、私聊与群聊、MCP 共享文件协作、持久规则、停止/恢复与固定 thread 已有自动化、浏览器和真实 Codex 证据。群聊管理的检查与边界见 [验收记录](group-management-acceptance.md)。下一步完成适配层，再添加新 harness；M5 的检索、产物版本、备份和更长时间运行不作为接入前置条件。当前 Codex 或 fake adapter 验证都不能代替其他 harness 的原生能力验收。
 
 ## 3. M0：工程初始化
 
@@ -146,23 +147,28 @@
 
 建议第一轮验收使用两个独立 Codex Agent，验证私聊与群聊切换时原生 ID 不变，再测试多群并发输入、暂停和权限撤销。多人类用户、跨机器执行与固定角色系统不进入本阶段。
 
-## 6. M3：Kimi Code
+## 6. 当前阶段：Harness 适配层
 
-通过 `kimi web` 的 REST + WebSocket 接入，锁定安装版本的 OpenAPI/AsyncAPI。复用既有 Agent、频道、权限和 Runtime，不为 Kimi 单独建立一套聊天数据模型。
+本轮只完整提取已有 Codex 行为，不新增真实 harness。交付边界如下：
 
-先从当前 Codex 专用的客户端、模型目录、环境准备和协议处理中提取 adapter 边界，保留已验证的 Codex 行为。核对本机 Kimi 的实际版本、协议、认证/配置与规则加载入口后，再实现 Kimi adapter；差异通过能力说明和明确错误呈现，不伪造原生支持。模型目录、固定 session 的新建与恢复、停止/取消、MCP、用户交互和进程关闭都须独立验证。
+- `HarnessAdapter` / `HarnessSession` 规范化目录、创建/恢复、提交、取消、回答/拒绝问题、关闭与事件。Runtime 仅处理平台排队、固定绑定、执行互斥、持久停止及结果不明；Codex RPC、原生通知与 `instructionSources` 不进入通用控制器。
+- Codex adapter 封装 app-server、原生模型目录/环境、中性初始化、原生 AGENTS.md 加载验证，保留先保存原生 ID 再初始化的行为。
+- `AgentWorkspace` 接管平台 data/shared 目录、MCP token、规则文件与 redactor；原生 executable/home/config 仍归对应 adapter。
+- 注册强制要求 `sessionResume`、`mcp`、`workspaceInstructions`，其他能力逐项声明；停止始终关闭所属进程，即使 harness 没有原生 interrupt。
+- Web 动态读取 `/api/harnesses` 及所选 harness 的状态/模型目录；只注册和展示 Codex。创建必传 harness，编辑不能替换；保留 `/api/codex/config`，移除旧状态/模型路由，不增加兼容别名。
+- 保留存储/API 的 `threadId` 命名，其含义为不透明原生 session ID；当前数据库基线以 `(harness, nativeHome, threadId)` 约束绑定，不限定仅 Codex。按首发前政策不增加迁移、旧 schema 检测或兼容代码，不清理或自动搬移现有 Codex 数据。
 
-验证创建、恢复、消息包络、事件、停止、审批、MCP、配置及 session 独立（配置与 memory 可共用），向 UI 报告能力差异。
+验收需要三类独立证据：语义 fake adapter 验证平台协议无关的派发、相同 session ID 跨 harness、注册约束、生命周期与确定拒绝/结果不明；Codex 原生协议模拟验证 adapter 转换；完整检查、浏览器流程及真实 Codex 回归验证现有使用链路。创建/恢复期间停止、固定绑定、失效问题、子代理问题关联和关闭清理也须覆盖。本轮 128 项测试、13 项浏览器测试及两套真实 Codex 回归均通过，最终结果和边界见 [独立验收](harness-adapter-acceptance.md)。
 
-验收使用 Codex 与 Kimi 同群完成一个小任务，并交换明确版本的产物进行 review。这里验证跨模型合作能力，不增加全局强制 review 流水线。
+### 6.1 M3：新增 harness（后续）
 
-## 7. M4：Claude Agent SDK
+适配层验收后确定新接入的具体范围。Kimi Code 保留为候选；接入前核对安装版本的原生协议、认证/配置与规则加载入口。模型目录、固定 session 创建/恢复、事件、停止、用户交互、MCP 与进程关闭都须独立验证。不为它建立新的聊天业务模型。
 
-使用官方 TypeScript SDK 的持续流式输入驱动 Claude Code 原生进程。保存准确的 `session_id`，通过指定 ID 恢复，保持相同 Agent 的上下文连续性。
+新增 harness 的真实验收应包含与 Codex 同群完成小任务和交换明确版本产物进行 review；不增加全局强制 review 流水线，也不能用本轮 fake adapter 测试代替真实混合协作。
 
-接入前核对当前 SDK、原生工具、MCP、审批与配置加载；确认 fork、上下文重置与内置委派不影响 Isles 恢复主 session，验证不同 Agent 的 session 独立。
+## 7. M4：Claude Code / Claude Agent SDK（暂缓）
 
-验收复用前两个 adapter 的契约与故障场景，并进行三个 harness 的混合群聊。第三方 ACP 不属于该阶段的实现路径。
+2026-10-03 用户因重新考虑 Claude Code 闭源执行核心而暂缓此前官方 SDK 接入计划。本轮不安装 SDK、不实现 adapter、不开展三个真实 harness 的混合验收。是否恢复此方向由用户后续决定，旧研究路径保留为背景，不作为实施承诺。
 
 ## 8. M5：完整体验与长期运行
 

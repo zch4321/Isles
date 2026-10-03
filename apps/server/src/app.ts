@@ -17,11 +17,13 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { NativeCatalog, type Catalog } from './codex/catalog.js';
-import { NativeEnvironment } from './codex/environment.js';
 import { HttpError } from './errors.js';
+import { defaultAdapters } from './harness/defaults.js';
+import { HarnessRegistry } from './harness/registry.js';
+import type { HarnessAdapter } from './harness/types.js';
 import { registerMcp } from './mcp/server.js';
-import { Runtime, type ClientFactory } from './runtime/runtime.js';
+import { Runtime } from './runtime/runtime.js';
+import { AgentWorkspace } from './runtime/workspace.js';
 import { openDatabase } from './storage/database.js';
 import { acquireDataLock } from './storage/lock.js';
 import { Store } from './storage/store.js';
@@ -30,8 +32,7 @@ export interface AppOptions {
   config: ConfigManager;
   webRoot?: string;
   logger?: boolean;
-  catalog?: Catalog;
-  clientFactory?: ClientFactory;
+  adapterFactory?: (workspace: AgentWorkspace, config: ConfigManager) => HarnessAdapter[];
   runtimeUrl?: string;
 }
 
@@ -51,12 +52,15 @@ export async function buildApp(options: AppOptions) {
     releaseDataLock();
     throw error;
   }
-  const environment = new NativeEnvironment(options.config);
+  const workspace = new AgentWorkspace(options.config);
   const store = new Store(database, workspaceDir);
-  const catalog = options.catalog ?? new NativeCatalog(environment, dataDir);
   let runtime: Runtime;
   try {
-    runtime = new Runtime(store, catalog, environment, options.clientFactory);
+    const harnesses = new HarnessRegistry(
+      options.adapterFactory?.(workspace, options.config) ??
+        defaultAdapters(options.config, workspace),
+    );
+    runtime = new Runtime(store, harnesses, workspace);
   } catch (error) {
     database.sqlite.close();
     releaseDataLock();
@@ -72,7 +76,7 @@ export async function buildApp(options: AppOptions) {
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ConfigurationError)
-      return reply.code(400).send({ error: environment.redactor.text(error.message) });
+      return reply.code(400).send({ error: workspace.redactor.text(error.message) });
     if (error instanceof z.ZodError)
       return reply.code(400).send({
         error: '请求参数无效',
@@ -119,18 +123,26 @@ export async function buildApp(options: AppOptions) {
     return { status: 'ok', service: 'isles', database: 'ready' };
   });
 
-  app.get<{ Querystring: { refresh?: string } }>('/api/codex/status', (request) => {
-    if (request.query.refresh === 'true') catalog.invalidate?.();
-    return catalog.status();
-  });
-  app.get('/api/codex/config', () => environment.configuration());
+  app.get('/api/harnesses', () => ({ harnesses: runtime.harnesses.list() }));
+  app.get<{ Params: { id: string }; Querystring: { refresh?: string } }>(
+    '/api/harnesses/:id/status',
+    (request) => {
+      const adapter = runtime.harnesses.get(request.params.id);
+      if (request.query.refresh === 'true') adapter.invalidate();
+      return adapter.catalog.status();
+    },
+  );
+  app.get<{ Params: { id: string } }>('/api/harnesses/:id/models', async (request) => ({
+    models: await runtime.harnesses.get(request.params.id).catalog.models(),
+  }));
+  app.get('/api/codex/config', () => options.config.codexConfiguration());
   app.put('/api/codex/config', async (request) => {
+    const adapter = runtime.harnesses.get('codex');
     const { binaryPath } = codexConfigurationUpdateSchema.parse(request.body);
-    const configuration = await environment.configure(binaryPath);
-    catalog.invalidate?.();
+    const configuration = await options.config.configureCodexBinary(binaryPath);
+    adapter.invalidate();
     return configuration;
   });
-  app.get('/api/codex/models', async () => ({ models: await catalog.models() }));
   app.get('/api/agents', (request) => {
     const { includeDeleted } = z
       .object({ includeDeleted: z.enum(['true', 'false']).optional() })

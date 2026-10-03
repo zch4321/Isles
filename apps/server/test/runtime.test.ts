@@ -8,24 +8,29 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
-import type { Catalog } from '../src/codex/catalog.js';
-import { agentRoot } from '../src/codex/environment.js';
-import { MockHarness, testCatalog, testConfig, parseMessageText } from './helpers.js';
+import type { HarnessCatalog } from '../src/harness/types.js';
+import { agentRoot } from '../src/runtime/workspace.js';
+import {
+  MockHarness,
+  codexAdapters,
+  testCatalog,
+  testConfig,
+  parseMessageText,
+} from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   for (const fn of cleanups.reverse()) await fn();
   cleanups.length = 0;
 });
-async function fixture(catalog: Catalog = testCatalog) {
+async function fixture(catalog: HarnessCatalog = testCatalog) {
   const dir = await mkdtemp(join(tmpdir(), 'isles-runtime-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));
   const harness = new MockHarness();
   const open = async () => {
     const opened = await buildApp({
       config: testConfig(dir),
-      catalog,
-      clientFactory: harness.factory,
+      adapterFactory: codexAdapters(catalog, harness.factory),
       runtimeUrl: 'http://127.0.0.1:1',
     });
     harness.useStore(opened.isles.store);
@@ -35,6 +40,7 @@ async function fixture(catalog: Catalog = testCatalog) {
   cleanups.push(() => app.close());
   const create = async (name = '测试 Agent', canCreateGroups = false) => {
     const result = await app.isles.runtime.createAgent({
+      harness: 'codex',
       name,
       model: 'test-model',
       reasoningEffort: 'max',
@@ -89,7 +95,7 @@ describe('durable runtime with simulated Codex', () => {
   });
 
   it('applies busy model edits to the next turn while preserving the active turn and native thread', async () => {
-    const catalog: Catalog = {
+    const catalog: HarnessCatalog = {
       ...testCatalog,
       models: async () => [
         ...(await testCatalog.models()),
@@ -143,20 +149,20 @@ describe('durable runtime with simulated Codex', () => {
     const guidance: string[] = [];
     const app = await buildApp({
       config: testConfig(dir),
-      catalog: testCatalog,
-      clientFactory: async (agent, handlers, baseUrl) => {
+      adapterFactory: codexAdapters(testCatalog, async (agent, handlers, baseUrl, connecting) => {
         guidance.push(await readFile(join(agent.workspace, 'AGENTS.md'), 'utf8'));
         if (!agent.threadId)
           await new Promise<void>((resolve) => {
             releaseConnection = resolve;
           });
-        return harness.factory(agent, handlers, baseUrl);
-      },
+        return harness.factory(agent, handlers, baseUrl, connecting);
+      }),
       runtimeUrl: 'http://127.0.0.1:1',
     });
     harness.useStore(app.isles.store);
     cleanups.push(() => app.close());
     const agent = await app.isles.runtime.createAgent({
+      harness: 'codex',
       name: 'Before connection',
       model: 'test-model',
       reasoningEffort: 'max',
@@ -238,7 +244,7 @@ describe('durable runtime with simulated Codex', () => {
 
   it('edits names and permissions without fetching an unavailable model catalog', async () => {
     let unavailable = false;
-    const catalog: Catalog = {
+    const catalog: HarnessCatalog = {
       status: async () => {
         if (unavailable) throw new Error('Catalog must not be fetched for this edit');
         return testCatalog.status();
@@ -268,7 +274,7 @@ describe('durable runtime with simulated Codex', () => {
   it('validates a delayed model edit against the latest reasoning effort and never applies its other fields on rejection', async () => {
     let releaseModels: (() => void) | undefined;
     let delayModels = false;
-    const catalog: Catalog = {
+    const catalog: HarnessCatalog = {
       ...testCatalog,
       models: async () => {
         if (delayModels) {
@@ -315,11 +321,11 @@ describe('durable runtime with simulated Codex', () => {
     const other = await create('Survivor');
     const shared = group('Discussion', [agent.id, other.id]);
     const privateFile = join(agent.workspace, 'retain.txt');
-    const sharedFile = join(app.isles.runtime.environment.sharedDir, 'retain.txt');
+    const sharedFile = join(app.isles.runtime.workspace.sharedDir, 'retain.txt');
     await writeFile(privateFile, 'personal');
     await writeFile(sharedFile, 'shared');
-    const token = await app.isles.runtime.environment.token(
-      agentRoot(app.isles.runtime.environment.dataDir, agent),
+    const token = await app.isles.runtime.workspace.token(
+      agentRoot(app.isles.runtime.workspace.dataDir, agent),
     );
     say(agent.channelId, 'Running input');
     await expect.poll(() => harness.turns).toBe(1);
@@ -432,13 +438,12 @@ describe('durable runtime with simulated Codex', () => {
     let releaseConnection: (() => void) | undefined;
     const app = await buildApp({
       config: testConfig(dir),
-      catalog: testCatalog,
-      clientFactory: async (agent, handlers, baseUrl) => {
+      adapterFactory: codexAdapters(testCatalog, async (agent, handlers, baseUrl, connecting) => {
         await new Promise<void>((resolve) => {
           releaseConnection = resolve;
         });
-        return harness.factory(agent, handlers, baseUrl);
-      },
+        return harness.factory(agent, handlers, baseUrl, connecting);
+      }),
       runtimeUrl: 'http://127.0.0.1:1',
     });
     harness.useStore(app.isles.store);
@@ -447,6 +452,7 @@ describe('durable runtime with simulated Codex', () => {
       releaseConnection?.();
     });
     const agent = await app.isles.runtime.createAgent({
+      harness: 'codex',
       name: 'Connecting',
       model: 'test-model',
       reasoningEffort: 'high',
@@ -474,7 +480,7 @@ describe('durable runtime with simulated Codex', () => {
   it('rejects a delayed model edit when the Agent was deleted during catalog validation', async () => {
     let delay = false;
     let releaseModels: (() => void) | undefined;
-    const catalog: Catalog = {
+    const catalog: HarnessCatalog = {
       ...testCatalog,
       models: async () => {
         if (delay)
@@ -572,7 +578,7 @@ describe('durable runtime with simulated Codex', () => {
     const { app, dir, create, open } = await fixture();
     const first = await create('Writer');
     const second = await create('Reader');
-    const { environment } = app.isles.runtime;
+    const { workspace: environment } = app.isles.runtime;
     expect(first.workspace).toBe(join(dir, 'workspace', 'agents', first.id, 'workspace'));
     expect(second.workspace).toBe(join(dir, 'workspace', 'agents', second.id, 'workspace'));
     const payloadPath = join(environment.sharedDir, 'handoff.txt');
@@ -598,6 +604,7 @@ describe('durable runtime with simulated Codex', () => {
       JSON.stringify(join(dir, 'next-workspace', 'shared')),
     );
     const third = await restored.isles.runtime.createAgent({
+      harness: 'codex',
       name: 'New Agent',
       model: 'test-model',
       reasoningEffort: 'max',
@@ -610,6 +617,7 @@ describe('durable runtime with simulated Codex', () => {
     const { app, harness } = await fixture();
     harness.missingGuidance = true;
     const agent = await app.isles.runtime.createAgent({
+      harness: 'codex',
       name: 'Missing guidance',
       model: 'test-model',
       reasoningEffort: 'max',
@@ -1026,7 +1034,7 @@ describe('durable runtime with simulated Codex', () => {
     const privateInput = say(agent.channelId, 'Private input');
     const retainedInput = say(retained.id, 'Other group input');
     const file = join(agent.workspace, 'group-retained.txt');
-    const sharedFile = join(app.isles.runtime.environment.sharedDir, 'group-retained.txt');
+    const sharedFile = join(app.isles.runtime.workspace.sharedDir, 'group-retained.txt');
     await writeFile(file, 'personal');
     await writeFile(sharedFile, 'shared');
     expect(
@@ -1159,8 +1167,8 @@ describe('durable runtime with simulated Codex', () => {
     const removed = group('Deleted group', [agent.id]);
     const retained = group('Live group', [agent.id]);
     say(removed.id, 'Run before deletion');
-    const token = await app.isles.runtime.environment.token(
-      agentRoot(app.isles.runtime.environment.dataDir, agent),
+    const token = await app.isles.runtime.workspace.token(
+      agentRoot(app.isles.runtime.workspace.dataDir, agent),
     );
     const address = app.server.address();
     if (!address || typeof address === 'string') throw new Error('No listener');
@@ -1279,8 +1287,8 @@ describe('durable runtime with simulated Codex', () => {
     const other = await create('另一个 Agent');
     const shared = group('共享群', [agent.id, other.id]);
     const outside = group('无关群', [other.id]);
-    const token = await app.isles.runtime.environment.token(
-      agentRoot(app.isles.runtime.environment.dataDir, app.isles.store.getAgent(agent.id)),
+    const token = await app.isles.runtime.workspace.token(
+      agentRoot(app.isles.runtime.workspace.dataDir, app.isles.store.getAgent(agent.id)),
     );
     const address = app.server.address();
     if (!address || typeof address === 'string') throw new Error('No listener');

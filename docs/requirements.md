@@ -1,6 +1,6 @@
 # Isles（群岛）需求文档
 
-> 版本：0.16 · 日期：2026-10-03 · 状态：TOML 配置、独立工作区、Agent 与群聊基础管理已实现；验收另行记录
+> 版本：0.17 · 日期：2026-10-03 · 状态：现有 Codex 基础闭环已实现；本轮提取 harness 适配层，验收另行记录
 >
 > 本文整理当前讨论中已明确的产品方向、首批接入范围与技术选型。标记为“待确认”的事项不视为已决定的实现方案；未确认的技术栈与排期不作预设。
 >
@@ -22,8 +22,8 @@ Isles 是面向人类与多个 Agent 的聊天协作产品。用户像使用聊�
 - **前端采用 Vue 3、Vite 和 TypeScript**，组件采用 shadcn-vue，样式采用 Tailwind CSS，服务端状态使用 TanStack Vue Query。
 - **后端采用 Node.js 与 Fastify**，通过 pnpm workspace 管理前端、后端及共享协议；浏览器接口采用 REST + SSE。
 - **数据库采用 SQLite，启用 WAL；数据访问采用 Drizzle ORM**，使用配套 Drizzle Kit 管理当前 schema 基线。
-- **第一阶段接入 Codex、Kimi Code 和 Claude Code CLI**。DeepSeek Harness（DSH）不纳入第一阶段，后续是否支持另行决定。
-- **以原生接口为主，接入优先级为 Codex → Kimi Code → Claude Agent SDK**。Codex 使用 app-server，Kimi 使用原生 Server API，Claude 使用官方 SDK 持续流式输入。
+- **当前只接入 Codex，本轮先提取通用 harness 适配层**，保持现有私聊、群聊与固定 session 行为，再添加新的 harness。本轮不接入 Kimi 或其他新 harness。
+- **以原生接口为主**。Codex 使用 app-server；Kimi Code 保留为后续候选。用户重新考虑 Claude Code 闭源执行核心后，Claude Code / Claude Agent SDK 接入暂缓，不再作为已承诺阶段。DeepSeek Harness（DSH）不纳入当前范围。
 - Electron 桌面端和 IM 接入留待后续考虑，不纳入首版交付范围。
 - **首版采用单用户、单机部署**：Web 服务与所有 harness 在同一台电脑或服务器上运行，不要求跨机器调度执行。
 - M1 只监听本机，管理页面和 HTTP API 暂不做登录鉴权；Codex 使用 `danger-full-access` 与 `approvalPolicy: never`。远程访问与后续用户鉴权另行设计。
@@ -85,7 +85,7 @@ claudecode-sonnet-1
 
 例如，`codex-gpt6astra-1` 与 `codex-gpt6astra-2` 虽使用相同配置，仍是两个独立 Agent。界面应明确告知用户：**不同 Agent 对应不同 session，不共享原生对话上下文；harness 的配置与长期记忆可以共用。**
 
-当前 Codex Agent 支持修改名称、模型、推理等级和拉群权限，保留 Agent ID、工作目录与原生 session。模型与等级必须是原生接口实际支持的组合；当前 turn 保持原配置，下一次执行采用新配置。修改不会自动恢复已停止的 Agent。替换 harness 尚待确认，不能悄悄替换 session 并继续宣称上下文连续。
+当前 Codex Agent 支持修改名称、模型、推理等级和拉群权限，保留 Agent ID、工作目录与原生 session。模型与等级必须是原生接口实际支持的组合；当前 turn 保持原配置，下一次执行采用新配置。修改不会自动恢复已停止的 Agent。创建必须指定已注册的 harness，编辑不允许替换 harness，不能悄悄替换 session 并继续宣称上下文连续。
 
 用户可在 Agent 详情中确认删除。当前采用保留数据的方式：停止执行、退出所有群聊、从联系人移除，取消尚未处理的投递并使待答问题和 MCP 身份失效；私聊与群聊历史、执行记录、工作文件及原生 session 保留。删除后的私聊进入“历史对话”，仅供查看，不再编辑、恢复或发送消息。归档、撤销删除和永久清理文件暂不实现。
 
@@ -307,6 +307,10 @@ Isles 配置默认位于 `~/.Isles/config.toml`，可通过 `ISLES_CONFIG_FILE` 
 
 优先接入能够持续运行、双向交互的原生接口，例如 app-server、ACP、REST + WebSocket 或 HTTP + SSE，而不是以一次性 exec 作为主要执行模型。
 
+`GET /api/harnesses` 返回当前已注册目录和能力声明；Web 动态读取，不展示尚未接入的候选。状态和模型查询使用 `GET /api/harnesses/:id/status` 与 `GET /api/harnesses/:id/models`，旧 Codex 状态/模型端点移除，不提供兼容别名。Codex 路径配置保留专用入口。
+
+adapter 必须具备固定 session 恢复（`sessionResume`）、MCP（`mcp`）和原生工作区规则加载（`workspaceInstructions`），缺少任一能力不得注册。取消（`interrupt`）、原生用户问题（`userQuestions`）和原生子代理（`nativeSubagents`）可以声明差异。无原生取消能力时，用户停止仍关闭所属进程并维持持久停止状态；恢复必须回到原 session。能力声明不代替真实接入验收。
+
 需要按 harness 验证：
 
 - 创建 Agent 时建立原生 session，以及后续恢复同一 session。
@@ -337,11 +341,11 @@ MCP 工具列表按连接 Agent 的权限生成；没有相应权限的 Agent �
 
 ### 8.3 首批接入与后续候选
 
-**第一阶段接入范围已确定：Codex、Kimi Code、Claude Code CLI。** 三者均需验证固定 session、消息输入输出、MCP 权限工具列表、工作目录和原生状态管理。DSH 已移出第一阶段，后续是否支持另行决定。
+**2026-10-03 当前范围调整为先提取 harness 适配层，再添加新的 harness。** 仅注册 Codex，完整保留已验证的固定 session、消息输入输出、MCP 权限工具列表、工作目录和原生状态管理。本轮不新增真实 harness，独立的语义 fake adapter 用于验证平台不依赖 Codex 协议，不能作为新产品接入成功的证据。
 
-**接入以原生能力为主，顺序确定为 Codex → Kimi Code → Claude Agent SDK。** 首先以 Codex app-server 跑通主要使用链路，然后接入 Kimi 的原生 Server API，最后通过官方 Claude Agent SDK 的持续流式输入驱动 Claude Code。第三方 Claude ACP 适配器不纳入第一阶段实现路径；具体原生版本和配置仍须逐个验证。
+**Kimi Code 保留为后续候选，Claude Code / Claude Agent SDK 暂缓。** 新 harness 在适配层验收后另行确定具体范围，原生接口、版本、配置、规则入口和固定 session 行为均需逐个验证。DSH 和第三方 Claude ACP 不进入当前实施范围。
 
-后续扩展仍优先考虑模型厂商自己维护、执行核心开源的 harness。Claude Code 是用户明确纳入的例外：开源的 ACP 适配层不等于 Claude Code 执行核心开源。此前还调研过 Grok Build、Qwen Code、Gemini CLI、Mistral Vibe、ZCode 和 MiniMax Code CLI。
+后续扩展仍优先考虑模型厂商自己维护、执行核心开源的 harness。用户因重新考虑 Claude Code 的闭源执行核心而撤回当前接入安排；开源适配层不能改变执行核心的开源属性。此前还调研过 Grok Build、Qwen Code、Gemini CLI、Mistral Vibe、ZCode 和 MiniMax Code CLI。
 
 用户曾举例的 `OpenCode + DeepSeek` 等组合保留为后续候选，不属于首批范围。联系人由实际 harness 与模型组合定义，不要求两者来自同一厂商。
 
@@ -380,7 +384,7 @@ Agent 发布待审查产物或明确提交，邀请使用不同模型的 Agent �
 | 验证场景                        | 预期可观察结果                                                                                  |
 | ------------------------------- | ----------------------------------------------------------------------------------------------- |
 | 用户通过浏览器使用首版          | Web 服务与 harness 在同一台机器上运行，可以管理 Agent 并进行私聊、群聊，不依赖 Electron 或 IM。 |
-| 创建首批 harness 的 Agent       | Codex、Kimi Code、Claude Code 均能建立 Agent 并完成基本消息与协作工具交互。                     |
+| 创建已注册 harness 的 Agent     | 当前 Codex 能建立 Agent 并完成基本消息与协作工具交互；未接入候选不显示为可用选项。              |
 | AI 请求新增协作实例             | 由用户决定并创建，AI 无法通过 MCP 自行创建 Agent。                                              |
 | Agent 拥有或缺少拉群、私聊权限  | 对应工具仅出现在获授权 Agent 的工具列表中，越权调用被拒绝。                                     |
 | 同一 Agent 先私聊、再进入两个群 | 始终使用同一个原生 session，输入保留正确频道和发送者。                                          |
@@ -397,8 +401,8 @@ Agent 发布待审查产物或明确提交，邀请使用不同模型的 Agent �
 ## 11. 待确认事项
 
 1. **部署与访问**：技术栈与单用户、单机部署已确定；M1 只监听本机且暂不做管理入口鉴权；后续用户鉴权与远程访问另行设计。Electron 和 IM 留待后续。
-2. **首批 harness 接入细节**：Codex → Kimi Code → Claude Agent SDK 的原生路径和顺序已确定；版本基线、具体模型配置和原生状态隔离仍需验证。
-3. **Agent 管理与权限细节**：当前已支持名称/模型/推理等级/拉群权限修改及保留数据的删除。替换 harness、归档、撤销删除、永久清理，以及 Agent 之间私聊权限的细分仍待确认。
+2. **新 harness 接入细节**：先完成适配层；Kimi 是后续候选，Claude 暂缓。后续版本基线、模型配置、规则加载与原生状态隔离需独立验证。
+3. **Agent 管理与权限细节**：当前已支持名称/模型/推理等级/拉群权限修改及保留数据的删除，编辑不能替换 harness。归档、撤销删除、永久清理，以及 Agent 之间私聊权限的细分仍待确认。
 4. **消息调度**：已确定忙时排队且不提供 steer；2026-10-02 确认取消防抖，空闲立即唤醒、turn 结束后立即合并剩余未读，MCP 主动收信与历史读取共用接收记录，不提供阻塞等待工具。
 5. **发送机制**：正式发言统一 MCP、原生输出只在执行详情展示已确定；后续群聊仍需明确回复关系与交互细节。
 6. **讨论边界**：M2 已确定不设自动预算、由 Agent 自行判断是否回复，用户可以手动暂停群；长时间运行的资源控制留待后续。
@@ -411,7 +415,7 @@ Agent 发布待审查产物或明确提交，邀请使用不同模型的 Agent �
 
 ## 12. 当前范围边界
 
-- 首版为 Web，第一阶段接入 Codex、Kimi Code 和 Claude Code CLI；DSH 不纳入第一阶段，Electron、IM 及其他 harness 留待后续。
+- 首版为 Web，当前只注册 Codex；本轮提取 harness 适配层后再添加新 harness。Kimi 为后续候选，Claude Code / Claude Agent SDK 暂缓；DSH、Electron、IM 留待后续。
 - 首版为单用户、单机部署，Web 服务与 harness 在同一台电脑或服务器上运行；多用户和跨机器执行不纳入首版。
 - 当前阶段仅用户能创建 Agent；Agent 之间的拉群和私聊能力按 Agent 权限开放。
 - 不把固定角色扮演作为基础交互。

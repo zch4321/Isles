@@ -2,7 +2,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query';
 import { LoaderCircle, Plus, RefreshCw } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
-import { createAgent, fetchCodex, fetchModels } from '@/api/isles';
+import { createAgent, fetchHarnesses, fetchHarnessStatus, fetchModels } from '@/api/isles';
 import { invalidateAll } from '@/api/queries';
 import CodexPathSettings from '@/components/CodexPathSettings.vue';
 import { Button } from '@/components/ui/button';
@@ -24,10 +24,38 @@ const open = defineModel<boolean>('open', { required: true });
 const emit = defineEmits<{ created: [channelId: string] }>();
 
 const queryClient = useQueryClient();
-const codex = useQuery({ queryKey: ['codex'], queryFn: () => fetchCodex(), enabled: open });
-const models = useQuery({ queryKey: ['models'], queryFn: fetchModels, enabled: open });
-
-const form = ref({ name: '', model: '', reasoningEffort: '', canCreateGroups: false });
+const harnesses = useQuery({ queryKey: ['harnesses'], queryFn: fetchHarnesses, enabled: open });
+const form = ref({ harness: '', name: '', model: '', reasoningEffort: '', canCreateGroups: false });
+const selectedHarness = computed(() =>
+  harnesses.data.value?.harnesses.find((harness) => harness.id === form.value.harness),
+);
+const harnessName = computed(() => selectedHarness.value?.displayName ?? 'Harness');
+const queryEnabled = computed(() => open.value && Boolean(selectedHarness.value));
+const status = useQuery({
+  queryKey: computed(() => ['harness-status', form.value.harness]),
+  queryFn: () => fetchHarnessStatus(form.value.harness),
+  enabled: queryEnabled,
+});
+const models = useQuery({
+  queryKey: computed(() => ['models', form.value.harness]),
+  queryFn: () => fetchModels(form.value.harness),
+  enabled: queryEnabled,
+});
+watch(
+  harnesses.data,
+  (value) => {
+    if (!value || value.harnesses.some((harness) => harness.id === form.value.harness)) return;
+    form.value.harness = value.harnesses[0]?.id ?? '';
+  },
+  { immediate: true },
+);
+watch(
+  () => form.value.harness,
+  () => {
+    form.value.model = '';
+    form.value.reasoningEffort = '';
+  },
+);
 const current = computed(() =>
   models.data.value?.models.find((model) => model.model === form.value.model),
 );
@@ -52,17 +80,25 @@ watch(
   },
 );
 
-const checking = computed(() => codex.isFetching.value || models.isFetching.value);
-const ready = computed(() => Boolean(codex.data.value?.authenticated));
+const checking = computed(
+  () => harnesses.isFetching.value || status.isFetching.value || models.isFetching.value,
+);
+const ready = computed(() => Boolean(selectedHarness.value && status.data.value?.authenticated));
 const statusText = computed(() => {
-  if (checking.value && !codex.data.value) return '正在检测本机 Codex…';
-  if (ready.value) return `Codex ${codex.data.value?.version ?? ''} 已就绪`;
-  return 'Codex 尚未就绪';
+  if (checking.value && !status.data.value) return `正在检测本机 ${harnessName.value}…`;
+  if (ready.value) return `${harnessName.value} ${status.data.value?.version ?? ''} 已就绪`;
+  return `${harnessName.value} 尚未就绪`;
 });
 async function recheck() {
   try {
-    await queryClient.invalidateQueries({ queryKey: ['codex'], refetchType: 'none' });
-    await queryClient.fetchQuery({ queryKey: ['codex'], queryFn: () => fetchCodex(true) });
+    await queryClient.invalidateQueries({
+      queryKey: ['harness-status', form.value.harness],
+      refetchType: 'none',
+    });
+    await queryClient.fetchQuery({
+      queryKey: ['harness-status', form.value.harness],
+      queryFn: () => fetchHarnessStatus(form.value.harness, true),
+    });
     await models.refetch();
   } catch {
     /* The query error is shown below. */
@@ -85,8 +121,9 @@ watch(open, (value) => {
 });
 const problem = computed(
   () =>
-    codex.data.value?.error ||
-    codex.error.value?.message ||
+    harnesses.error.value?.message ||
+    status.data.value?.error ||
+    status.error.value?.message ||
     models.error.value?.message ||
     create.error.value?.message,
 );
@@ -104,7 +141,7 @@ function focusName(event: Event) {
       @open-auto-focus="focusName"
     >
       <DialogHeader>
-        <DialogTitle>新建 Codex Agent</DialogTitle>
+        <DialogTitle>新建 Agent</DialogTitle>
         <DialogDescription>
           每个 Agent 都有固定的原生会话和独立的工作目录。即使配置相同，不同 Agent
           之间也不共享上下文。
@@ -115,7 +152,7 @@ function focusName(event: Event) {
         class="flex items-center gap-2 rounded-md border bg-muted/50 py-1.5 pr-1.5 pl-3 text-[13px]"
       >
         <LoaderCircle
-          v-if="checking && !codex.data.value"
+          v-if="checking && !status.data.value"
           class="size-3.5 animate-spin text-muted-foreground"
         />
         <span v-else :class="cn('size-2 rounded-full', ready ? 'bg-success' : 'bg-destructive')" />
@@ -124,9 +161,9 @@ function focusName(event: Event) {
           type="button"
           variant="ghost"
           size="icon-xs"
-          aria-label="重新检测 Codex"
+          :aria-label="`重新检测 ${harnessName}`"
           title="重新检测"
-          :disabled="checking"
+          :disabled="checking || !selectedHarness"
           @click="recheck"
         >
           <RefreshCw :class="checking && 'animate-spin'" />
@@ -141,11 +178,24 @@ function focusName(event: Event) {
       </p>
 
       <CodexPathSettings
-        :failed="Boolean(codex.data.value && !codex.data.value.available)"
-        :binary-path="codex.data.value?.binaryPath ?? null"
+        v-if="selectedHarness?.configuration === 'codex-path'"
+        :failed="Boolean(status.data.value && !status.data.value.available)"
+        :binary-path="status.data.value?.binaryPath ?? null"
       />
 
       <form class="grid gap-4" @submit.prevent="create.mutate(form)">
+        <div v-if="(harnesses.data.value?.harnesses.length ?? 0) > 1" class="grid gap-2">
+          <Label for="agent-harness">Harness</Label>
+          <NativeSelect id="agent-harness" v-model="form.harness" required>
+            <option
+              v-for="harness in harnesses.data.value?.harnesses"
+              :key="harness.id"
+              :value="harness.id"
+            >
+              {{ harness.displayName }}
+            </option>
+          </NativeSelect>
+        </div>
         <div class="grid gap-2">
           <Label for="agent-name">名称</Label>
           <Input
@@ -154,7 +204,7 @@ function focusName(event: Event) {
             required
             maxlength="80"
             autocomplete="off"
-            placeholder="例如 codex-astra-1"
+            :placeholder="`例如 ${form.harness || 'agent'}-1`"
           />
         </div>
         <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_8.5rem]">

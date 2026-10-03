@@ -1,6 +1,6 @@
 # Isles（群岛）架构设计
 
-> 版本：0.14 · 日期：2026-10-03 · 状态：配置、工作区及 Agent/群聊管理已实现；群聊删除验证见 [验收记录](group-management-acceptance.md)
+> 版本：0.15 · 日期：2026-10-03 · 状态：现有 Codex 基础闭环已实现；本轮抽出 harness 适配层，验证见 [独立验收记录](harness-adapter-acceptance.md)
 >
 > 产品语义以 [需求文档](requirements.md) 为准。本文整理技术选型、模块边界和关键运行流程；已实现范围与阶段验收见 [实现计划](implementation-plan.md)。
 >
@@ -29,13 +29,13 @@ Isles 是一个让人类与独立 Agent 通过私聊、群聊协作的应用。�
 
 ### 2.1 已确认的选择
 
-| 部分         | 选择                                 | 责任                                                                       |
-| ------------ | ------------------------------------ | -------------------------------------------------------------------------- |
-| 前端框架     | Vue 3                                | 聊天、Agent 管理和运行状态界面。                                           |
-| 组件         | shadcn-vue                           | 基础组件源码纳入项目，按产品交互调整。                                     |
-| 样式         | Tailwind CSS                         | 布局、主题和组件样式。                                                     |
-| 数据访问     | Drizzle ORM                          | TypeScript 表结构、查询与事务；配套 Drizzle Kit 管理 schema 基线。         |
-| 首批 harness | Codex → Kimi Code → Claude Agent SDK | 以原生接口为主，Codex 为主要接入；DSH 与第三方 Claude ACP 不纳入第一阶段。 |
+| 部分         | 选择             | 责任                                                                                       |
+| ------------ | ---------------- | ------------------------------------------------------------------------------------------ |
+| 前端框架     | Vue 3            | 聊天、Agent 管理和运行状态界面。                                                           |
+| 组件         | shadcn-vue       | 基础组件源码纳入项目，按产品交互调整。                                                     |
+| 样式         | Tailwind CSS     | 布局、主题和组件样式。                                                                     |
+| 数据访问     | Drizzle ORM      | TypeScript 表结构、查询与事务；配套 Drizzle Kit 管理 schema 基线。                         |
+| 当前 harness | Codex app-server | 先完整提取适配层，再添加新 harness；Kimi 为后续候选，Claude Code / Claude Agent SDK 暂缓。 |
 
 ### 2.2 已确认的实施基线
 
@@ -79,7 +79,7 @@ flowchart TB
 
     STORE --> DB[(SQLite)]
     APP --> FILES[工作目录与共享产物]
-    AD <-->|原生双向协议| H[Codex / Kimi Code / Claude Code]
+    AD <-->|原生双向协议| H[Codex app-server：当前唯一注册项]
     H -->|协作工具调用| MCP
 ```
 
@@ -92,9 +92,10 @@ flowchart TB
 | MCP                | 识别调用 Agent、按权限提供工具、将调用转换为应用操作。         | 与 HTTP 共用业务和权限逻辑。                       |
 | 应用服务与领域规则 | Agent 创建/编辑/删除、成员关系、消息接收、权限检查、产物发布。 | 使用存储及 Runtime 接口，不依赖具体 harness 协议。 |
 | Runtime            | 输入排队、即时唤醒、固定 session 绑定、执行互斥、停止与恢复。  | 通过 adapter 使用原生能力，通过存储记录运行事实。  |
-| Adapters           | 原生协议、事件转换、会话恢复、取消和审批回传。                 | 保留各 harness 的能力差异，不自行创建聊天频道。    |
+| HarnessRegistry    | 已注册目录、能力约束及按 Agent harness 查找 adapter。          | 只公开实际注册项，不默认接入后续候选。             |
+| Adapters           | 原生协议、模型目录、环境、事件转换、会话恢复与问题回传。       | 保留各 harness 的能力差异，不自行创建聊天频道。    |
 | 存储               | 表结构、事务、基线初始化、投递记录、事件和查询。               | 承担持久化，不决定群聊如何分工。                   |
-| 工作目录与产物     | Agent 目录、原生状态位置、文件引用及共享操作。                 | 目录归属与操作系统隔离分别处理。                   |
+| AgentWorkspace     | 平台 data/shared 目录、MCP token、规则文件及敏感信息脱敏。     | 不处理原生协议；原生状态由对应 adapter 管理。      |
 
 Web API 和 MCP 是不同入口。二者共用应用服务，但调用者分别是人类身份和 Agent 身份，权限不能因进入同一个服务函数而混同。
 
@@ -116,10 +117,8 @@ apps/
       application/       # HTTP 与 MCP 共用的用例
       domain/            # Agent、频道、消息、权限规则
       runtime/           # Agent 控制器、排队、恢复、停止、规则文件维护与文本编码
-      adapters/
-        codex/
-        kimi/
-        claude/
+      harness/           # HarnessAdapter / HarnessSession 契约与注册目录
+      codex/             # 唯一已接入 adapter、app-server 协议、模型目录及环境
       storage/           # Drizzle schema、查询与事务
       artifacts/         # 目录与共享产物
       config/
@@ -161,6 +160,8 @@ shadcn-vue 的基础组件与聊天业务组件分别组织，便于检查上游
 Agent ID 应独立于显示名称。名称中的 `harness-model-1/2/3` 表达用户看到的实例身份，不宜作为数据库外键、凭据身份或目录定位的唯一依据。
 
 原生 session ID 需要结合 harness 和原生状态存储范围解释，不能假定不同 harness 返回的 ID 全局唯一。
+
+当前存储与 API 的 `threadId` 字段保留现有命名，表示 adapter 返回的不透明原生 session ID。数据库基线不限制 harness 只能为 Codex；原生 ID 的唯一性按 `(harness, nativeHome, threadId)` 限定。Runtime 通过 Agent 所属 controller 和 adapter 处理事件，同名 session ID 不得串到其他 Agent。创建必须指定已注册 harness，编辑不允许更换它。此轮不增加旧 schema 检测、数据迁移或兼容代码，不清理或搬移已有 Codex 数据。
 
 ### 5.2 三种顺序与游标
 
@@ -378,7 +379,7 @@ Codex 的子代理设置沿用用户自己的 Codex 配置。子代理运行在�
 
 ### 9.1 接口责任
 
-建议 adapter 对 Runtime 暴露以下能力，具体 TypeScript 签名在协议验证后确定：
+`harness/types.ts` 定义通用契约，`harness/registry.ts` 管理注册。Runtime 只依赖 `HarnessAdapter` / `HarnessSession` 及规范化事件，不发送 Codex RPC，不解析原生通知。Codex adapter 内部封装 app-server 协议、会话初始化、原生规则校验、模型目录和原生环境。
 
 | 接口职责            | 语义                                                     |
 | ------------------- | -------------------------------------------------------- |
@@ -387,12 +388,18 @@ Codex 的子代理设置沿用用户自己的 Codex 配置。子代理运行在�
 | 创建原生 session    | 仅用于创建新 Agent；返回可持久化的绑定信息。             |
 | 恢复原生 session    | 加载已有绑定，失败时报告原因，不隐式创建替代 session。   |
 | 提交输入            | 向绑定 session 提交一轮输入，并返回原生确认与关联信息。  |
-| 中途输入 / 取消     | 仅在已支持的能力范围内执行，并报告确认与终态。           |
-| 处理审批或用户问题  | 保留原生请求关联，将答复交回正确 session 和 turn。       |
+| 取消与停止          | 具备 interrupt 时调用取消；停止始终关闭所属进程。        |
+| 处理原生用户问题    | 保留原生请求关联，将答复交回正确 session 和 turn。       |
 | 接收事件            | 转换消息、工具、状态及错误事件，保留必要的原生关联信息。 |
 | 断开 / 释放运行资源 | 关闭连接和所属进程；是否保留持久化 session 必须明确。    |
 
-能力应逐项声明，包括恢复、查询历史、输入确认、steer、取消、审批、用户问题、文本增量、MCP 工具刷新和原生状态隔离。缺少某项能力时由 Runtime 和 UI 显式处理，不能用新 session 或猜测结果补齐。
+当前能力声明包含 `sessionResume`、`interrupt`、`userQuestions`、`nativeSubagents`、`mcp`、`workspaceInstructions`。注册强制要求 session 恢复、MCP 和原生工作区规则加载，其余能力可以不同。声明缺少 interrupt 的 adapter 仍必须关闭所属进程，以满足持久停止；不能通过新 session 补齐能力。重复 harness ID、无 adapter 或缺少必需能力在注册时明确失败。
+
+`connect()` 在等待原生初始化前通过 `connected(session)` 发布可关闭的连接，使创建/恢复期间的停止和应用关闭也能释放进程。`createSession(onCreated)` 先回调持久化原生 ID，再完成初始化和规则校验，避免后续失败后创建替代 session；`resumeSession()` 必须返回原绑定。`submit()` 接收平台文本、模型、等级和 workspace，adapter 自行构造原生参数。
+
+adapter 将原生 turn 与条目事件转换为 `HarnessEvent`，将用户问题转换为 `HarnessQuestion`，携带准确的 session、turn 与请求关联。确定原生拒绝用 `HarnessSubmissionRejected` 表达；超时、断连和其他提交错误保留结果不明语义，Runtime 不猜测是否执行，也不盲目重试。过期问题通过 adapter 拒绝，回答只交回仍有效的原请求。
+
+`GET /api/harnesses` 公开 descriptor；`GET /api/harnesses/:id/status` 与 `/models` 调用对应 catalog。Web 动态读取目录、模型和能力，只显示已注册项。旧 Codex 状态/模型路径删除，不加兼容别名；`GET/PUT /api/codex/config` 保留 Codex 可执行路径设置，并通过 adapter 失效发现/模型缓存。
 
 审批或提问需要保存 Agent、原生 session、turn 和请求 ID。用户答复前检查请求是否仍有效，过期或已取消的请求不得被转交给后续执行。
 
@@ -402,19 +409,19 @@ M1 已确定 Codex 使用 `danger-full-access` 和 `approvalPolicy: never`，不
 
 Codex 的可执行文件发现与平台协议分开处理：先按显式配置、PATH 和已知安装目录查找并验证 CLI 版本，再将统一的命令与参数交给版本检测和 app-server 启动。Windows npm/pnpm 启动脚本解析为 Node 与 Codex JS 入口，保持 stdio 直连。Isles 自己的 `config.toml` 的 `[codex].binary_path` 保存界面路径设置，不写入用户的 Codex 配置目录；更新或手动重新检测会失效模型目录缓存，正在运行的 Agent 仍使用原进程和 session。显式无效路径报错，不静默退回自动发现。
 
-下表的接入路径与顺序已确定。Codex M1 已完成本地真实原生链路验证，Kimi 与 Claude 尚未接入。首先以 Codex 完成主要产品链路，然后接入 Kimi，最后接入 Claude Agent SDK。实施时锁定版本，保存该版本的协议依据并运行适配测试。
+当前只注册 Codex。本轮保持其现有行为并完整提取适配边界；适配层验收完成后，再确定新 harness 的具体接入范围。Kimi 保留为后续候选，Claude Code / Claude Agent SDK 因用户重新考虑闭源执行核心而暂缓。下表区分已接入项与此前研究路径，不能将研究当作实现结果。
 
-| Harness     | 接入接口                                | 已查明的接口边界                                                                                                                               |
-| ----------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Codex       | `codex app-server`，优先 stdio JSON-RPC | 提供 thread 创建/恢复、turn 提交、steer、取消和服务端请求；可从对应 CLI 版本生成 TypeScript 协议定义。                                         |
-| Kimi Code   | `kimi web` 的 REST + WebSocket          | 官方提供 Server API；接口处于实验阶段，以安装版本实际提供的 `/openapi.json`、`/asyncapi.json` 为准。JSON 业务结果还需检查响应包络中的 `code`。 |
-| Claude Code | 官方 Claude Agent SDK 的持续流式输入    | 官方 SDK 运行 Claude Code binary，提供会话、权限及 MCP 能力；第一阶段直接对接 SDK。                                                            |
+| Harness     | 接入接口                                | 已查明的接口边界                                                                     |
+| ----------- | --------------------------------------- | ------------------------------------------------------------------------------------ |
+| Codex       | `codex app-server`，优先 stdio JSON-RPC | 已接入；协议和事件转换封装在 Codex adapter 内，保持固定 thread、MCP 与原生规则加载。 |
+| Kimi Code   | 此前研究 `kimi web` 的 REST + WebSocket | 后续候选，尚未接入；接入前重新核对安装版本的协议、响应语义、配置与规则入口。         |
+| Claude Code | 此前研究官方 Claude Agent SDK           | 暂缓；不安装 SDK，不实现 adapter，不承诺其恢复或协作能力。                           |
 
 使用子进程启动持续运行的 server 后，后续交互通过原生协议完成。连接重建与 session 恢复分别处理，不能把每条消息变成一次新的 CLI 执行。
 
 Codex `0.159.2` 的空 thread 仍需初始化历史才能恢复：`thread/start(ephemeral: false)` 返回后立即保存原生 ID，再以 `thread/inject_items` 写入一条中性的 assistant 标记 `Isles session initialized.`。该标记不含规则，不调用模型、不产生 Isles run。规则加载只依靠工作目录 AGENTS.md，并校验原生返回的 `instructionSources`；恢复与创建均不传 Isles 的 `developerInstructions`。已有原生历史不改写。2026-10-02 曾验证旧注入方式 thread 的恢复，这是历史证据，不要求保留旧版本兼容代码。
 
-DSH 不纳入第一阶段，原有 DSH ACP 能力限制不再作为首批实现的前提。三个 adapter 仍需分别验证事件、恢复、审批和 MCP 能力；历史与共享产物以协作工具提供的能力为基础。
+DSH 不纳入当前范围。后续每个新 adapter 仍需分别验证事件、恢复、原生问题与 MCP 能力；历史与共享产物以协作工具提供的能力为基础。
 
 Codex 按 Agent 运行独立原生进程，各自使用独立工作目录，共用用户的 `CODEX_HOME`：配置、登录、MCP server、插件、skills、全局 `AGENTS.md` 与长期记忆都是用户本人的那一份，Agent 的 session 也保存在其中。Isles 不复制、不写入该目录的配置，每个 Agent 的差异在 `thread/start` / `thread/resume` 的会话级 `config` 中传入：
 
@@ -424,25 +431,21 @@ Codex 按 Agent 运行独立原生进程，各自使用独立工作目录，共�
 
 Agent 记录创建时所用的 Codex 目录；当前目录与之不同时拒绝恢复并报错，不创建替代 thread。以上行为已在 `codex-cli 0.159.2` 上用真实 Codex 验证：用户自己的 MCP server 仍然可用，Isles 工具按权限出现，`config.toml` 前后一致。其他 harness 同样可以共用配置与记忆；无论如何，每个 Agent 的 session 必须独立，固定 session 约束始终成立。
 
-### 9.3 Claude Code 官方 SDK 接入
+### 9.3 后续 harness 与暂缓项
 
-**已确定直接使用官方 TypeScript Agent SDK。** 它的 streaming input 支持持续运行的交互进程，可向 `query()` 提供异步输入流，保留多轮上下文，并处理取消、权限请求与 MCP。Isles 的 Claude adapter 将 SDK 事件转换为平台事件。
+2026-10-03 用户重新考虑 Claude Code 闭源执行核心，Claude Code / Claude Agent SDK 接入暂缓。此前官方 SDK 的调研保留为背景资料，不再构成实施承诺。开源的桥接或适配代码不改变执行核心的开源属性。
 
-调用链为 Isles Runtime → Claude adapter → 官方 Agent SDK → Claude Code 原生进程。第一阶段不引入第三方 ACP 桥接。
+本轮不安装或运行 Claude SDK，也不引入第三方 ACP。Kimi Code 保留为适配层验收后的候选，尚未注册。新 harness 需要按同一契约实现原生模型目录、固定 session、生命周期、MCP 与原生规则发现，不将 Codex 参数或 JSON-RPC 方法推广为通用要求。
 
-必须持久化准确的原生 `session_id`，恢复时使用指定 ID，不能仅用 `continue` 选择目录下最近的会话，也不能调用 fork 来恢复。官方 TypeScript SDK 文档说明旧 V2 `createSession()` / `send` / `stream` 预览 API 已移除，实施应依据当前 `query()` 和 session 选项。
-
-接入时仍需验证恢复失败和上下文重置，并确认 Isles 始终恢复主 session；内置委派属于 Agent 自身能力，不作限制。工程初始化阶段不安装或运行该 SDK；在 Claude 接入阶段锁定实际版本并验证。
-
-Claude Code 执行核心不因 ACP 桥接开源而成为开源 harness，其官方仓库许可为保留权利并适用 Anthropic 条款。本次按用户明确选择纳入第一阶段，后续扩展仍保持优先选择厂商开源 harness 的原则。
+后续扩展优先考虑模型厂商自己维护、执行核心开源的 harness；每项支持须有真实原生验收。语义 fake adapter 只证明平台契约可独立于 Codex 协议运行，不证明 Kimi 或其他产品已可用。
 
 ### 9.4 规则与原生状态
 
 每个 Agent 的工作目录中以 `AGENTS.md` 持久保存身份、环境、文本消息格式、协作工具、权限及收信规则。Isles 准备文件，harness 原生加载；稳定说明不能以 Isles 的首次消息、`developerInstructions` 正文或历史注入作为来源。动态消息和状态仍走消息与 MCP。
 
-`resources/AGENTS.template.md` 是唯一规则模板，`runtime/guidance.ts` 填入 Agent 身份、工作目录与共享目录绝对路径，并维护 `<!-- isles:begin -->` / `<!-- isles:end -->` 托管段。共享规则说明主动共享文件的位置与消息引用方式，不引入额外文件权限。首次发现已有文件时插入托管段；以后仅替换该段，保留段外用户内容。重复或不配对的标记会报错，不覆盖原文件。`NativeEnvironment.prepareWorkspace()` 在原生进程启动前准备该文件和 `.isles-root`，原生全局指导继续由 Codex 自己加载。
+`resources/AGENTS.template.md` 是唯一规则模板，`runtime/guidance.ts` 填入 Agent 身份、工作目录与共享目录绝对路径，并维护 `<!-- isles:begin -->` / `<!-- isles:end -->` 托管段。共享规则说明主动共享文件的位置与消息引用方式，不引入额外文件权限。首次发现已有文件时插入托管段；以后仅替换该段，保留段外用户内容。重复或不配对的标记会报错，不覆盖原文件。`AgentWorkspace.prepareWorkspace()` 在原生进程启动前准备该文件和 `.isles-root`；平台 workspace、共享目录、token 和 redactor 从 Codex 环境模块抽离。Codex 环境模块只负责原生 executable、home 与协议配置，原生全局指导继续由 Codex 自己加载。
 
-Runtime 在 `thread/start` / `thread/resume` 响应中检查 workspace 的 AGENTS.md 路径。未发现加载证据就报错，不退回规则注入、不发起模型 turn；创建响应的 thread ID 仍先保存，以免后续恢复意外创建替代 thread。修改规则模板或段外用户说明后，下次启动/恢复进程时生效，不打断正在执行的 turn。
+Codex adapter 在 `thread/start` / `thread/resume` 响应的 `instructionSources` 中检查 workspace 的 AGENTS.md 路径。未发现加载证据就报错，不退回规则注入、不发起模型 turn；创建响应的 thread ID 仍先保存，以免后续恢复意外创建替代 thread。Runtime 不解析该 Codex 字段，后续 adapter 自行验证其原生加载证据。修改规则模板或段外用户说明后，下次启动/恢复进程时生效，不打断正在执行的 turn。
 
 模板首页用 Agent 名称标识自己，私聊地址写为 `private`，不再单独展示 Agent ID 或私聊 UUID。规则明确要求先用 `list_channels` / `list_agents` 查询完整 ID，再按名称选择群或提及对象；名称、显示短前缀不进入工具地址参数，改名或重名时重新查目录。内部路径仍按现有 Agent ID 定位。
 
@@ -506,13 +509,14 @@ UI 同样要说明：不同编号 Agent 具有独立上下文；同一 Agent 的
 
 ## 12. 验证与搭建顺序
 
-原生接入顺序已确定为 Codex → Kimi Code → Claude Agent SDK。更具体的产品阶段建议见 [实现计划](implementation-plan.md)：
+当前顺序为完整提取现有 Codex 的适配层，再添加新的 harness。Kimi 是后续候选，Claude 暂缓。更具体的阶段见 [实现计划](implementation-plan.md)：
 
 1. 搭建工程、Web 外壳、服务启动、配置和数据库基线入口。
 2. 依据 Codex 官方文档和版本对应的协议类型直接接入，完成单 Agent 私聊、固定 session、停止和恢复闭环；必要联调随功能开展，不单列前置协议验证阶段。
 3. 以多个 Codex Agent 实现 MCP 群聊、权限、消息路由和协作。
-4. 依次接入 Kimi 和 Claude Agent SDK，复用同一组行为契约并记录能力差异。
-5. 完善产物共享、历史、生命周期与长期运行体验。权限和恢复从功能引入时就验证。
+4. 完整提取通用 Runtime / Workspace 与 Codex adapter，使用独立语义 fake 验证平台契约，再完成完整检查和真实 Codex 回归。
+5. 按另行确定的范围接入新 harness，复用同一组行为契约并记录能力差异；当前 Kimi 尚未接入，Claude 暂缓。
+6. 完善产物共享、历史、生命周期与长期运行体验。权限和恢复从功能引入时就验证。
 
 重点验证会破坏产品语义的故障：
 
@@ -535,18 +539,18 @@ UI 同样要说明：不同编号 Agent 具有独立上下文；同一 Agent 的
 
 ## 13. 实施前及后续待确认事项
 
-| 时点                | 需要确认的问题                                                                                                          |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| 工程基线            | 技术选型已认可，按第 2.2 节初始化；版本记录在 package.json 和锁文件，后续升级需验证兼容性。                             |
-| 开放 Web 访问前     | 监听地址、用户认证、远程浏览器访问、Agent 凭据管理和管理接口边界。                                                      |
-| 实现消息调度前      | 已确认取消防抖、独立即时唤醒、合并剩余未读、MCP 主动收信去重；不提供阻塞等待工具、讨论预算或 steer。                    |
-| 实现输出展示前      | 正式消息是否统一经 MCP；原生最终输出的展示和路由。                                                                      |
-| 实现权限变更前      | M2 已确认拉群粒度、默认值与生效方式；Agent 之间私聊的发起/回复边界待确认。                                              |
-| 接入每个 harness 前 | 原生路径和顺序已确定；继续验证版本、模型配置、session 恢复、状态隔离、主 session 与内置委派的区分、审批及原生能力差异。 |
-| 实现生命周期操作前  | 改名、模型/harness 配置修改、暂停/恢复、归档与删除语义。                                                                |
-| 实现历史和共享前    | 入群前历史、退群后访问、跨频道转述、产物版本及文件隔离强度。                                                            |
-| 扩展协作约束前      | 是否增加可选的阶段和跨模型 review 门槛，以及审查产物的版本绑定。                                                        |
-| 持续运行前          | 日志与事件保留、容量限制、备份恢复、原生进程异常及无法核对状态的处理。                                                  |
+| 时点                | 需要确认的问题                                                                                                              |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| 工程基线            | 技术选型已认可，按第 2.2 节初始化；版本记录在 package.json 和锁文件，后续升级需验证兼容性。                                 |
+| 开放 Web 访问前     | 监听地址、用户认证、远程浏览器访问、Agent 凭据管理和管理接口边界。                                                          |
+| 实现消息调度前      | 已确认取消防抖、独立即时唤醒、合并剩余未读、MCP 主动收信去重；不提供阻塞等待工具、讨论预算或 steer。                        |
+| 实现输出展示前      | 正式消息是否统一经 MCP；原生最终输出的展示和路由。                                                                          |
+| 实现权限变更前      | M2 已确认拉群粒度、默认值与生效方式；Agent 之间私聊的发起/回复边界待确认。                                                  |
+| 接入每个 harness 前 | 先完成适配层，再确定接入范围；验证版本、模型配置、session 恢复、状态隔离、主 session 与内置委派、MCP 和规则加载及能力差异。 |
+| 实现生命周期操作前  | 改名、模型/harness 配置修改、暂停/恢复、归档与删除语义。                                                                    |
+| 实现历史和共享前    | 入群前历史、退群后访问、跨频道转述、产物版本及文件隔离强度。                                                                |
+| 扩展协作约束前      | 是否增加可选的阶段和跨模型 review 门槛，以及审查产物的版本绑定。                                                            |
+| 持续运行前          | 日志与事件保留、容量限制、备份恢复、原生进程异常及无法核对状态的处理。                                                      |
 
 未来 Electron 可以复用 Web 界面及本地服务能力，IM 可以作为新的消息入口接入应用服务。多用户和跨机器运行需要重新设计身份、执行所有权、凭据和文件访问，首版只保留清晰模块边界，不承诺可以无成本扩展。
 

@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { StdioClient } from '../src/codex/client.js';
-import { agentRoot, MCP_TOKEN_ENV, NativeEnvironment } from '../src/codex/environment.js';
+import { NativeEnvironment } from '../src/codex/environment.js';
+import { AgentWorkspace, agentRoot, MCP_TOKEN_ENV } from '../src/runtime/workspace.js';
 import { Redactor } from '../src/errors.js';
 import type { AgentRecord } from '../src/storage/store.js';
 import { testConfig } from './helpers.js';
@@ -37,7 +38,9 @@ describe('Codex native boundaries', () => {
     await writeFile(join(home, 'config.toml'), config);
     process.env.ISLES_TEST_PROVIDER_KEY = 'test-provider-secret';
     const before = await readdir(home);
-    const environment = new NativeEnvironment(testConfig(dir, { ISLES_CODEX_HOME: home }));
+    const appConfig = testConfig(dir, { ISLES_CODEX_HOME: home });
+    const appWorkspace = new AgentWorkspace(appConfig);
+    const environment = new NativeEnvironment(appConfig, appWorkspace);
     const agent = {
       id: 'agent-1',
       name: 'Test Agent',
@@ -48,7 +51,7 @@ describe('Codex native boundaries', () => {
     expect(env.CODEX_HOME).toBe(home);
     const token = env[MCP_TOKEN_ENV]!;
     expect(token).toMatch(/^[0-9a-f]{64}$/);
-    expect(await environment.token(agentRoot(dir, agent))).toBe(token);
+    expect(await appWorkspace.token(agentRoot(dir, agent))).toBe(token);
     // Windows does not implement POSIX permission bits; retain the mode assertion on Unix.
     if (process.platform !== 'win32')
       expect((await stat(join(agentRoot(dir, agent), 'isles-mcp-token'))).mode & 0o777).toBe(0o600);
@@ -59,9 +62,9 @@ describe('Codex native boundaries', () => {
     expect(await readFile(join(home, 'auth.json'), 'utf8')).toBe(auth);
     expect((await readdir(agentRoot(dir, agent))).sort()).toEqual(['isles-mcp-token']);
     expect(await readFile(join(workspace, 'AGENTS.md'), 'utf8')).toContain(
-      JSON.stringify(environment.sharedDir),
+      JSON.stringify(appWorkspace.sharedDir),
     );
-    expect(await readdir(environment.sharedDir)).toEqual([]);
+    expect(await readdir(appWorkspace.sharedDir)).toEqual([]);
     const thread = environment.threadConfig(agent, 'http://127.0.0.1:1');
     expect(thread).toMatchObject({
       'mcp_servers.isles': {

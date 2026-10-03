@@ -1,7 +1,7 @@
 CREATE TABLE `agents` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
-	`harness` text DEFAULT 'codex' NOT NULL,
+	`harness` text NOT NULL,
 	`model` text NOT NULL,
 	`reasoning_effort` text NOT NULL,
 	`workspace` text NOT NULL,
@@ -13,11 +13,10 @@ CREATE TABLE `agents` (
 	`status` text NOT NULL,
 	`error` text,
 	`created_at` text NOT NULL,
-	`updated_at` text NOT NULL,
-	CONSTRAINT "agents_codex" CHECK("agents"."harness" = 'codex')
+	`updated_at` text NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `agents_thread` ON `agents` (`thread_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `agents_thread` ON `agents` (`harness`,`native_home`,`thread_id`);--> statement-breakpoint
 CREATE TABLE `channel_members` (
 	`channel_id` text NOT NULL,
 	`agent_id` text NOT NULL,

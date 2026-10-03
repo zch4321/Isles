@@ -53,11 +53,12 @@ export type Sender = { type: 'user' } | { type: 'agent'; id: string };
 /** 'user' or the ID of the acting Agent. */
 export type Actor = string;
 export interface NewAgent {
+  harness: string;
   name: string;
   model: string;
   reasoningEffort: string;
   canCreateGroups: boolean;
-  /** The Codex home the Agent's thread lives in. */
+  /** Native storage scope of the Agent's fixed session. */
   nativeHome: string;
 }
 export interface MessageInput {
