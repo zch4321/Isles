@@ -74,7 +74,7 @@ port = 5173
 
 群消息不再使用防抖；旧的 `ISLES_GROUP_QUIET_MS` 与 `ISLES_GROUP_MAX_WAIT_MS` 环境变量不再生效。
 
-默认数据库为 `~/.Isles/data/isles.sqlite`，使用 WAL 模式。在用户明确宣布发布 v1 前，不提供向后兼容或旧数据迁移，数据库以当前 schema 的全新基线初始化。旧 `.isles` 由用户手动清理，旧 JSON 配置及旧数据库转换不再支持。历史迁移验收仅记录当时的实现，不构成当前升级承诺。
+默认数据库为 `~/.Isles/data/isles.sqlite`，使用 WAL 模式。在用户明确宣布首个 release 前，不提供向后兼容或旧数据迁移，数据库以当前 schema 的全新基线初始化。如果旧库阻碍启动，开发时可直接清理或覆盖并重建，无需保留旧数据或要求用户切换配置；操作前停止占用该数据目录的服务并核验目标属于 Isles。旧 JSON 配置及旧数据库转换不再支持。历史迁移验收仅记录当时的实现，不构成当前升级承诺。
 
 每个 Agent 默认使用 `~/.Isles/workspace/agents/<id>/workspace`，MCP token 单独保存在 `~/.Isles/data/agents/<id>/isles-mcp-token`（权限 `0600`）。共享目录为 `~/.Isles/workspace/shared`；各 Agent 的 `AGENTS.md` 写入共享目录绝对路径与使用约定，协作时将产物放入该目录并在消息中提供准确路径。共享目录不提供快照、版本管理或额外权限隔离。修改工作区根目录只影响新建 Agent；同版本已有 Agent 继续使用数据库中保存的工作区路径，共享根目录随配置更新，不搬移原有文件。
 
@@ -139,7 +139,7 @@ pnpm db:generate
 pnpm db:migrate
 ```
 
-schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 `apps/server/migrations/`。本次基线增加 Agent 的 `steerEnabled` 设置和 `steer_batches` 投递批次记录。上述命令用于生成和应用当前基线；启动及显式命令重复执行不会重建同版本数据，显式命令要求数据目录未被服务占用。发布 v1 前，schema 变更更新全新基线，不增加旧版本数据升级路径；不会自动升级、清空或清理已有用户数据库。旧版本数据的清理由用户在停止旧服务后手动处理。
+schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 `apps/server/migrations/`。本次基线增加 Agent 的 `steerEnabled` 设置和 `steer_batches` 投递批次记录。上述命令用于生成和应用当前基线；启动及显式命令重复执行不会重建同版本数据，显式命令要求数据目录未被服务占用。首个 release 前，schema 变更更新全新基线，不增加旧版本数据升级路径；开发时可直接重建阻碍启动的旧库，再运行 `pnpm db:migrate`，沿用既有数据目录配置。此授权不增加运行时的旧格式识别、迁移或兼容逻辑。
 
 ## 本机接口
 
