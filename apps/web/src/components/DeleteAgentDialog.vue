@@ -46,7 +46,8 @@ function focusCancel(event: Event) {
       <DialogHeader>
         <DialogTitle>删除 Agent</DialogTitle>
         <DialogDescription class="break-words">
-          确认删除“{{ agent.name }}”？Agent 会停止运行、退出所有群聊并从联系人中移除，无法恢复运行。
+          确认删除“{{ agent.name }}”？Agent
+          会停止运行、退出所有群聊并从联系人中移除，私聊保留为只读历史。
         </DialogDescription>
       </DialogHeader>
       <p class="rounded-md border bg-muted/50 px-3 py-2.5 text-[13px] leading-relaxed">

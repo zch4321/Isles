@@ -11,7 +11,7 @@ const health = useHealth();
 const state = computed(() =>
   health.isSuccess.value ? 'online' : health.isError.value ? 'offline' : 'connecting',
 );
-const labels = { online: '服务已连接', offline: '服务未连接', connecting: '正在连接服务' };
+const labels = { online: '服务已连接', offline: '服务连接异常', connecting: '正在连接服务' };
 const tones = {
   online: 'bg-success',
   offline: 'bg-destructive',

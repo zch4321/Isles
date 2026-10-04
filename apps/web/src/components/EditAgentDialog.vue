@@ -103,7 +103,7 @@ function submit() {
   validationError.value = '';
   if (!form.value.name.trim() || !hasChanges.value) return;
   if (changes.value.steerEnabled && !supportsSteer.value) {
-    validationError.value = '此 harness 不支持 steer，只能关闭实时接收。';
+    validationError.value = '请选择排队收信，当前 harness 采用该方式接收消息。';
     return;
   }
   if (changes.value.model !== undefined || changes.value.reasoningEffort !== undefined) {
@@ -134,7 +134,7 @@ function focusName(event: Event) {
       <DialogHeader>
         <DialogTitle>编辑 Agent</DialogTitle>
         <DialogDescription>
-          修改模型和推理等级会在下一次执行时生效，会话和工作目录保持不变。
+          模型和推理等级在下一次执行时生效，继续使用原有会话和工作目录。
         </DialogDescription>
       </DialogHeader>
       <p
@@ -145,7 +145,7 @@ function focusName(event: Event) {
         {{ validationError || save.error.value?.message }}
       </p>
       <p v-if="models.error.value" class="text-xs leading-relaxed text-muted-foreground">
-        暂时无法读取模型列表，仍可修改名称、协作权限和收信设置。
+        模型列表加载失败，可以继续修改名称、协作权限和收信设置。
       </p>
       <form class="grid gap-4" @submit.prevent="submit">
         <div class="grid gap-2">
@@ -213,10 +213,10 @@ function focusName(event: Event) {
           <div class="min-w-0 flex-1">
             <p id="edit-agent-steer" class="text-[13px] font-medium">忙碌时实时接收（steer）</p>
             <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-              关闭时新消息排队；开启时只向当前执行追加消息，不另开执行。修改立即生效，原生确认接收不表示工作完成。
+              开启时，新消息追加到当前执行；关闭时，新消息排队。修改立即生效。
             </p>
             <p v-if="!supportsSteer" class="mt-0.5 text-xs text-muted-foreground">
-              此 harness 不支持 steer，已开启时仍可关闭。
+              实时接收需要 harness 的 steer 支持，当前设置可关闭。
             </p>
           </div>
           <Switch

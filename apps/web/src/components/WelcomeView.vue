@@ -9,7 +9,7 @@ const principles = [
   {
     icon: FingerprintPattern,
     title: '独立身份',
-    text: '每个 Agent 对应一个 harness、模型和实例，配置相同也互不共享上下文。',
+    text: '每个 Agent 对应一个 harness、模型和实例，拥有独立的上下文和工作目录。',
   },
   {
     icon: MessagesSquare,

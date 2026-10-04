@@ -31,7 +31,7 @@ export async function api<T>(
       ? {}
       : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
   }).catch(() => {
-    throw new Error('无法连接 Isles 服务');
+    throw new Error('Isles 服务连接异常，请检查服务状态后重试');
   });
   // Proxies can answer with non-JSON bodies when the server is down.
   const body: unknown = await response.json().catch(() => undefined);

@@ -60,7 +60,7 @@ const error = computed(() => rename.error.value?.message ?? remove.error.value?.
         v-if="channel.deletedAt"
         class="rounded-md border bg-muted/50 px-3 py-2.5 text-[13px] leading-relaxed"
       >
-        此群聊已删除，无法恢复讨论。聊天历史和工作文件已保留，成员 Agent 仍可继续工作。
+        此群聊已删除，对话以只读方式保留。聊天历史和工作文件已保留，成员 Agent 保持各自运行状态。
       </p>
       <div v-if="channel.deletedAt" class="grid gap-2">
         <span class="text-[13px] font-semibold">群名</span>
@@ -110,7 +110,7 @@ const error = computed(() => rename.error.value?.message ?? remove.error.value?.
         </Button>
       </div>
       <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-        移出成员会取消它在本群尚未投递的消息。只有你可以移出成员。
+        移出成员时，会取消它在本群的待处理投递。
       </p>
       <ul class="mt-3 space-y-1" aria-label="群成员">
         <li v-for="member in members" :key="member.id" class="flex items-center gap-1">
@@ -146,7 +146,7 @@ const error = computed(() => rename.error.value?.message ?? remove.error.value?.
         v-if="!members.length"
         class="mt-3 rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground"
       >
-        群里还没有 Agent，添加成员后才会有人回复。
+        添加 Agent，一起开始讨论。
       </p>
     </section>
     <section v-if="!channel.deletedAt" class="border-t p-4">

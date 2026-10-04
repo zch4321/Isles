@@ -134,7 +134,7 @@ const notice = computed(() => {
   if (agent.value?.status === 'deleted')
     return { held: true, text: 'Agent 已删除，聊天历史和工作文件已保留。当前对话仅供查看。' };
   if (channel.value?.paused)
-    return { held: true, text: '讨论已暂停：新消息会保存，暂不自动投递；继续后汇总剩余未读。' };
+    return { held: true, text: '讨论已暂停：新消息会保存，继续后汇总剩余未读。' };
   const current = agent.value;
   if (!current) return undefined;
   const queued = messages.value.filter((m) => m.deliveries[0]?.status === 'queued').length;
@@ -145,7 +145,7 @@ const notice = computed(() => {
   if (steering)
     return {
       held: false,
-      text: `${steering} 条消息正在投递到当前执行。原生确认接收不表示工作完成。${count}`,
+      text: `${steering} 条消息正在投递到当前执行。${count}`,
     };
   if (!count) return undefined;
   return {
@@ -255,7 +255,7 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
       class="m-auto flex max-w-sm flex-col items-center px-6 text-center"
     >
       <CircleAlert class="size-6 text-destructive" aria-hidden="true" />
-      <h2 class="mt-3 font-medium">无法载入对话</h2>
+      <h2 class="mt-3 font-medium">对话加载失败</h2>
       <p role="alert" class="mt-1 text-[13px] text-muted-foreground">
         {{ (detail.error.value ?? agents.error.value)?.message }}
       </p>

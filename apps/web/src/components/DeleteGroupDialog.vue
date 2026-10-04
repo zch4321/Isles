@@ -46,12 +46,12 @@ function focusCancel(event: Event) {
         <DialogDescription class="break-words">
           确认删除“{{
             channel.name
-          }}”？群聊会移至历史对话，移出所有成员并停止本群的消息投递和访问，无法恢复讨论。
+          }}”？群聊会移至历史对话，移出所有成员并停止本群的消息投递和访问，聊天历史以只读方式保留。
         </DialogDescription>
       </DialogHeader>
       <p class="rounded-md border bg-muted/50 px-3 py-2.5 text-[13px] leading-relaxed">
         群聊历史、个人工作目录及共享文件都会保留。成员 Agent
-        不会被停止或删除，仍可在私聊和其他群聊中工作；正在执行的任务可能继续完成。
+        保持各自运行状态，可继续在私聊和其他群聊中工作。
       </p>
       <p
         v-if="remove.error.value"

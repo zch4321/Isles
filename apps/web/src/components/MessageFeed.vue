@@ -193,8 +193,9 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
           <ParticipantAvatar :name="agent.name" :identity="agent.id" size="lg" />
           <h2 class="mt-4 text-base font-semibold">与 {{ agent.name }} 开始对话</h2>
           <p class="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
-            {{ agent.name }} 使用固定的 Codex 会话和独立的工作目录，不与其他 Agent
-            共享上下文。正式回复会出现在这里，执行过程可以在 Agent 详情中查看。
+            {{ agent.name }}
+            拥有固定的原生会话、独立的上下文和工作目录。正式回复显示在这里，执行过程可以在 Agent
+            详情中查看。
           </p>
         </div>
         <div
@@ -204,8 +205,8 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
           <GroupAvatar :identity="channel.id" size="lg" />
           <h2 class="mt-4 text-base font-semibold">{{ channel.name }}</h2>
           <p class="mt-1.5 max-w-md text-[13px] leading-relaxed text-muted-foreground">
-            群里的每条消息都对全体成员可见，并在稍作汇总后唤醒其他成员。用 @
-            标明你特意对谁说；只想和某个 Agent 单独交流时，请使用私聊。
+            群里的每条消息都对全体成员可见，并唤醒其他成员参与讨论。用 @ 标明你特意对谁说，与单个
+            Agent 的交流可以通过私聊进行。
           </p>
         </div>
 

@@ -34,7 +34,7 @@ const deliveryStyles: Partial<
     icon: LoaderCircle,
     class: 'text-primary',
     spin: true,
-    hint: '正在向当前执行追加消息；原生确认接收不表示工作完成。',
+    hint: '正在向当前执行追加消息。',
   },
   accepted: { icon: LoaderCircle, class: 'text-primary', spin: true },
   cancelled: { icon: Ban, class: 'text-muted-foreground' },
@@ -42,7 +42,7 @@ const deliveryStyles: Partial<
   uncertain: {
     icon: CircleAlert,
     class: 'text-warning-strong',
-    hint: '无法确认原生会话是否已接收这条消息，Isles 不会自动重发。可在 Agent 详情中核对后决定是否重新发送。',
+    hint: '投递结果待核对，请在 Agent 详情中查看执行记录，再决定是否重新发送。',
   },
 };
 const style = computed(() => (props.delivery ? deliveryStyles[props.delivery.status] : undefined));

@@ -389,7 +389,7 @@ test('receives busy input through MCP without creating another native turn or le
 test('shows a recoverable connection error instead of a connected state', async ({ page }) => {
   await page.route('**/api/health', (route) => route.abort());
   await page.goto('/');
-  await expect(page.getByRole('status')).toContainText('服务未连接');
+  await expect(page.getByRole('status')).toContainText('服务连接异常');
   await page.unroute('**/api/health');
   await page.getByRole('button', { name: '重新连接服务' }).click();
   await expect(page.getByRole('status')).toContainText('服务已连接');
@@ -567,7 +567,7 @@ test('persists per-Agent steer selected at creation and can disable it without a
   const dialog = page.getByRole('dialog', { name: '编辑 Agent', exact: true });
   const steering = dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
   await expect(steering).toHaveAttribute('aria-checked', 'true');
-  await expect(dialog.getByText('暂时无法读取模型列表', { exact: false })).toBeVisible();
+  await expect(dialog.getByText('模型列表加载失败', { exact: false })).toBeVisible();
   await steering.click();
   const [save] = await Promise.all([
     page.waitForResponse(
@@ -628,7 +628,9 @@ test('allows switching saved steer off when the current harness directory no lon
   await page.getByRole('button', { name: '编辑 Agent', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '编辑 Agent', exact: true });
   const steering = dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
-  await expect(dialog.getByText('此 harness 不支持 steer，已开启时仍可关闭。')).toBeVisible();
+  await expect(
+    dialog.getByText('实时接收需要 harness 的 steer 支持，当前设置可关闭。'),
+  ).toBeVisible();
   await expect(steering).toHaveAttribute('aria-checked', 'true');
   await expect(steering).toBeEnabled();
   await steering.click();
@@ -750,7 +752,7 @@ test('deletes an Agent from contacts and groups while retaining read-only histor
   await expect(composer(page)).toHaveCount(0);
   await expect(page.getByRole('button', { name: '恢复 Agent', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
-  await expect(inspector).toContainText('此 Agent 已删除，无法恢复运行');
+  await expect(inspector).toContainText('此 Agent 已删除，对话以只读方式保留');
   await expect(inspector.locator('details[data-run]')).toHaveCount(2);
   await expect(inspector.getByRole('button', { name: '编辑 Agent', exact: true })).toHaveCount(0);
   await expect(inspector.getByRole('button', { name: '删除 Agent', exact: true })).toHaveCount(0);
@@ -808,7 +810,7 @@ test('deletes a group into read-only history without changing its member Agent',
   await inspector.getByRole('button', { name: '删除群聊', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '删除群聊', exact: true });
   await expect(dialog).toContainText('群聊历史、个人工作目录及共享文件都会保留');
-  await expect(dialog).toContainText('成员 Agent 不会被停止或删除');
+  await expect(dialog).toContainText('成员 Agent 保持各自运行状态');
   await expect(dialog.getByRole('button', { name: '取消', exact: true })).toBeFocused();
   await dialog.getByRole('button', { name: '取消', exact: true }).click();
   await expect(dialog).not.toBeVisible();
@@ -842,7 +844,7 @@ test('deletes a group into read-only history without changing its member Agent',
   expect(deleted.status()).toBe(200);
   expect(await deleted.json()).toMatchObject({ id: group.id, name: group.name, memberIds: [] });
   await expect(dialog).not.toBeVisible();
-  await expect(inspector).toContainText('此群聊已删除，无法恢复讨论');
+  await expect(inspector).toContainText('此群聊已删除，对话以只读方式保留');
   await expect(inspector.getByLabel('群名')).toHaveCount(0);
   await expect(inspector.getByRole('list', { name: '群成员' })).toHaveCount(0);
   await expect(inspector.getByRole('button', { name: '添加成员', exact: true })).toHaveCount(0);
@@ -884,7 +886,7 @@ test('deletes a group into read-only history without changing its member Agent',
     animations: 'disabled',
   });
   await page.getByRole('button', { name: '群聊详情', exact: true }).click();
-  await expect(inspector).toContainText('此群聊已删除，无法恢复讨论');
+  await expect(inspector).toContainText('此群聊已删除，对话以只读方式保留');
   await expect(inspector.getByText('创建', { exact: true })).toBeVisible();
   await expect(inspector.getByText('删除', { exact: true })).toBeVisible();
   await expect(inspector.getByRole('textbox')).toHaveCount(0);
@@ -947,7 +949,7 @@ test('returns an inspected group member to read-only group details after externa
   await expect(inspector.getByRole('heading', { name: agent.name, exact: true })).toBeVisible();
   expect((await page.request.delete(`/api/channels/${channel.id}`)).status()).toBe(200);
   await expect(inspector.getByRole('heading', { name: '群聊详情', exact: true })).toBeVisible();
-  await expect(inspector).toContainText('此群聊已删除，无法恢复讨论');
+  await expect(inspector).toContainText('此群聊已删除，对话以只读方式保留');
   await expect(inspector.getByRole('button', { name: '返回群聊详情', exact: true })).toHaveCount(0);
   await expect(inspector.getByRole('button', { name: '编辑 Agent', exact: true })).toHaveCount(0);
 });

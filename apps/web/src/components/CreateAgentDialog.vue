@@ -155,8 +155,7 @@ function focusName(event: Event) {
       <DialogHeader>
         <DialogTitle>新建 Agent</DialogTitle>
         <DialogDescription>
-          每个 Agent 都有固定的原生会话和独立的工作目录。即使配置相同，不同 Agent
-          之间也不共享上下文。
+          每个 Agent 都有固定的原生会话、独立的上下文和工作目录。
         </DialogDescription>
       </DialogHeader>
 
@@ -271,10 +270,10 @@ function focusName(event: Event) {
           <div class="min-w-0 flex-1">
             <p id="agent-steer" class="text-[13px] font-medium">忙碌时实时接收（steer）</p>
             <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-              关闭时新消息排队；开启时只向当前执行追加消息，不另开执行。原生确认接收不表示工作完成。
+              开启时，新消息追加到当前执行；关闭时，新消息排队。
             </p>
             <p v-if="!supportsSteer" class="mt-0.5 text-xs text-muted-foreground">
-              此 harness 不支持 steer。
+              实时接收需要 harness 的 steer 支持。
             </p>
           </div>
           <Switch
