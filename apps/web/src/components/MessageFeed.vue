@@ -29,12 +29,13 @@ const nameOf = (message: Message) => senderName(message, props.directory);
 const excerpt = (body: string) => body.replace(/\s+/g, ' ').slice(0, 80);
 
 // Worst state first; a group message settles once no member is still waiting for it.
-const pending = ['uncertain', 'failed', 'queued', 'submitting', 'accepted'] as const;
+const pending = ['uncertain', 'failed', 'queued', 'submitting', 'steering', 'accepted'] as const;
 const groupLabels = {
   uncertain: '待核对',
   failed: '部分投递失败',
   queued: '等待投递',
   submitting: '处理中',
+  steering: '投递中',
   accepted: '处理中',
 };
 function deliveryOf(message: Message) {

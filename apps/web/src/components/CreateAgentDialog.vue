@@ -25,11 +25,22 @@ const emit = defineEmits<{ created: [channelId: string] }>();
 
 const queryClient = useQueryClient();
 const harnesses = useQuery({ queryKey: ['harnesses'], queryFn: fetchHarnesses, enabled: open });
-const form = ref({ harness: '', name: '', model: '', reasoningEffort: '', canCreateGroups: false });
+const form = ref({
+  harness: '',
+  name: '',
+  model: '',
+  reasoningEffort: '',
+  canCreateGroups: false,
+  steerEnabled: false,
+});
 const selectedHarness = computed(() =>
   harnesses.data.value?.harnesses.find((harness) => harness.id === form.value.harness),
 );
 const harnessName = computed(() => selectedHarness.value?.displayName ?? 'Harness');
+const supportsSteer = computed(() => Boolean(selectedHarness.value?.capabilities.steer));
+watch(supportsSteer, (supported) => {
+  if (!supported) form.value.steerEnabled = false;
+});
 const queryEnabled = computed(() => open.value && Boolean(selectedHarness.value));
 const status = useQuery({
   queryKey: computed(() => ['harness-status', form.value.harness]),
@@ -114,6 +125,7 @@ const create = useMutation({
     open.value = false;
     form.value.name = '';
     form.value.canCreateGroups = false;
+    form.value.steerEnabled = false;
   },
 });
 watch(open, (value) => {
@@ -254,6 +266,22 @@ function focusName(event: Event) {
             </p>
           </div>
           <Switch v-model="form.canCreateGroups" aria-labelledby="agent-groups" />
+        </div>
+        <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
+          <div class="min-w-0 flex-1">
+            <p id="agent-steer" class="text-[13px] font-medium">忙碌时实时接收（steer）</p>
+            <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+              关闭时新消息排队；开启时只向当前执行追加消息，不另开执行。原生确认接收不表示工作完成。
+            </p>
+            <p v-if="!supportsSteer" class="mt-0.5 text-xs text-muted-foreground">
+              此 harness 不支持 steer。
+            </p>
+          </div>
+          <Switch
+            v-model="form.steerEnabled"
+            aria-labelledby="agent-steer"
+            :disabled="!supportsSteer || create.isPending.value"
+          />
         </div>
         <DialogFooter class="pt-1">
           <Button type="button" variant="outline" @click="open = false">取消</Button>

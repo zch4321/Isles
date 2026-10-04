@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query';
 import { LoaderCircle, Save } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
 import { fetchModels, updateAgent } from '@/api/isles';
-import { invalidateAll } from '@/api/queries';
+import { invalidateAll, useHarnessCapability } from '@/api/queries';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -22,12 +22,19 @@ import { Switch } from '@/components/ui/switch';
 const props = defineProps<{ agent: Agent }>();
 const open = defineModel<boolean>('open', { required: true });
 const queryClient = useQueryClient();
+const supportsSteer = useHarnessCapability(() => props.agent.harness, 'steer');
 const models = useQuery({
   queryKey: computed(() => ['models', props.agent.harness]),
   queryFn: () => fetchModels(props.agent.harness),
   enabled: open,
 });
-const form = ref({ name: '', model: '', reasoningEffort: '', canCreateGroups: false });
+const form = ref({
+  name: '',
+  model: '',
+  reasoningEffort: '',
+  canCreateGroups: false,
+  steerEnabled: false,
+});
 const validationError = ref('');
 const current = computed(() =>
   models.data.value?.models.find((model) => model.model === form.value.model),
@@ -47,6 +54,8 @@ const changes = computed<UpdateAgent>(() => {
     result.reasoningEffort = form.value.reasoningEffort;
   if (form.value.canCreateGroups !== props.agent.canCreateGroups)
     result.canCreateGroups = form.value.canCreateGroups;
+  if (form.value.steerEnabled !== props.agent.steerEnabled)
+    result.steerEnabled = form.value.steerEnabled;
   return result;
 });
 const hasChanges = computed(() => Object.keys(changes.value).length > 0);
@@ -67,6 +76,7 @@ watch(
       model: props.agent.model,
       reasoningEffort: props.agent.reasoningEffort,
       canCreateGroups: props.agent.canCreateGroups,
+      steerEnabled: props.agent.steerEnabled,
     };
     validationError.value = '';
     save.reset();
@@ -92,6 +102,10 @@ function selectModel(model: string | undefined) {
 function submit() {
   validationError.value = '';
   if (!form.value.name.trim() || !hasChanges.value) return;
+  if (changes.value.steerEnabled && !supportsSteer.value) {
+    validationError.value = '此 harness 不支持 steer，只能关闭实时接收。';
+    return;
+  }
   if (changes.value.model !== undefined || changes.value.reasoningEffort !== undefined) {
     if (!current.value) {
       validationError.value = '请从可用模型列表中选择模型。';
@@ -131,7 +145,7 @@ function focusName(event: Event) {
         {{ validationError || save.error.value?.message }}
       </p>
       <p v-if="models.error.value" class="text-xs leading-relaxed text-muted-foreground">
-        暂时无法读取模型列表，仍可修改名称和协作权限。
+        暂时无法读取模型列表，仍可修改名称、协作权限和收信设置。
       </p>
       <form class="grid gap-4" @submit.prevent="submit">
         <div class="grid gap-2">
@@ -193,6 +207,22 @@ function focusName(event: Event) {
             v-model="form.canCreateGroups"
             aria-labelledby="edit-agent-groups"
             :disabled="save.isPending.value"
+          />
+        </div>
+        <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
+          <div class="min-w-0 flex-1">
+            <p id="edit-agent-steer" class="text-[13px] font-medium">忙碌时实时接收（steer）</p>
+            <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+              关闭时新消息排队；开启时只向当前执行追加消息，不另开执行。修改立即生效，原生确认接收不表示工作完成。
+            </p>
+            <p v-if="!supportsSteer" class="mt-0.5 text-xs text-muted-foreground">
+              此 harness 不支持 steer，已开启时仍可关闭。
+            </p>
+          </div>
+          <Switch
+            v-model="form.steerEnabled"
+            aria-labelledby="edit-agent-steer"
+            :disabled="save.isPending.value || (!supportsSteer && !form.steerEnabled)"
           />
         </div>
         <DialogFooter class="pt-1">

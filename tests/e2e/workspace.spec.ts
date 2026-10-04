@@ -6,11 +6,16 @@ async function send(page: Page, body: string) {
   await composer(page).fill(body);
   await page.getByRole('button', { name: '发送消息' }).click();
 }
-async function createAgent(page: Page, name: string) {
+async function createAgent(page: Page, name: string, steerEnabled = false) {
   await page.getByRole('button', { name: '新建 Agent' }).first().click();
   await page.getByLabel('名称').fill(name);
   await page.getByLabel('模型', { exact: true }).selectOption('test-model');
   await page.getByLabel('推理等级').selectOption('max');
+  const steering = page
+    .getByRole('dialog', { name: '新建 Agent', exact: true })
+    .getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
+  await expect(steering).toHaveAttribute('aria-checked', 'false');
+  if (steerEnabled) await steering.click();
   const [response] = await Promise.all([
     page.waitForResponse(
       (response) =>
@@ -18,7 +23,7 @@ async function createAgent(page: Page, name: string) {
     ),
     page.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
-  expect(response.request().postDataJSON()).toMatchObject({ harness: 'codex' });
+  expect(response.request().postDataJSON()).toMatchObject({ harness: 'codex', steerEnabled });
   const created = (await response.json()) as Agent;
   await expect
     .poll(async () => (await (await page.request.get(`/api/agents/${created.id}`)).json()).agent)
@@ -84,6 +89,7 @@ test('switches registered harness catalogs and cached selections without applyin
     capabilities: {
       sessionResume: true,
       interrupt: false,
+      steer: false,
       userQuestions: false,
       nativeSubagents: false,
       mcp: true,
@@ -138,21 +144,29 @@ test('switches registered harness catalogs and cached selections without applyin
   const model = dialog.getByLabel('模型', { exact: true });
   const effort = dialog.getByLabel('推理等级');
   const codexSettings = dialog.getByRole('button', { name: 'Codex 路径设置', exact: true });
+  const steering = dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
   await expect(harness).toHaveValue('codex');
   await expect(harness.locator('option')).toHaveText(['Codex', 'Semantic Test']);
   await expect(model).toHaveValue('test-model');
   await expect(effort).toHaveValue('high');
   await expect(codexSettings).toBeVisible();
+  await expect(steering).toHaveAttribute('aria-checked', 'false');
+  await steering.click();
+  await expect(steering).toHaveAttribute('aria-checked', 'true');
   await dialog.getByLabel('名称').fill('Semantic catalog test');
   await harness.selectOption('semantic-test');
   await expect(model).toHaveValue('semantic-model');
   await expect(effort).toHaveValue('medium');
   await expect(effort.locator('option')).toHaveText(['low', 'medium']);
   await expect(codexSettings).toHaveCount(0);
+  await expect(steering).toHaveAttribute('aria-checked', 'false');
+  await expect(steering).toBeDisabled();
   await harness.selectOption('codex');
   await expect(model).toHaveValue('test-model');
   await expect(effort).toHaveValue('high');
   await expect(codexSettings).toBeVisible();
+  await expect(steering).toBeEnabled();
+  await expect(steering).toHaveAttribute('aria-checked', 'false');
   await Promise.all([
     page.waitForRequest((request) => request.url().endsWith('/api/harnesses/semantic-test/models')),
     harness.selectOption('semantic-test'),
@@ -174,6 +188,7 @@ test('switches registered harness catalogs and cached selections without applyin
     model: 'semantic-model',
     reasoningEffort: 'medium',
     canCreateGroups: false,
+    steerEnabled: false,
   });
   expect(creation.status()).toBe(404);
   await expect(dialog.getByRole('alert')).toContainText('未注册的 harness：semantic-test');
@@ -530,6 +545,110 @@ test('can edit name and permission when the model catalog is unavailable', async
   await expect(page.getByRole('heading', { name: '离线改名 Agent', level: 1 })).toBeVisible();
 });
 
+test('persists per-Agent steer selected at creation and can disable it without an available model catalog', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await createAgent(page, '实时收信配置 Agent', true);
+  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
+  const original = list.agents.find((agent) => agent.name === '实时收信配置 Agent')!;
+  expect(original.steerEnabled).toBe(true);
+  expect(original.threadId).toBeTruthy();
+  await page.route('**/api/harnesses/codex/models', (route) =>
+    route.fulfill({ status: 503, json: { error: '模型目录暂时不可用' } }),
+  );
+  await page.reload();
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  const inspector = page.getByTestId('inspector');
+  await expect(
+    inspector.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
+  await page.getByRole('button', { name: '编辑 Agent', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '编辑 Agent', exact: true });
+  const steering = dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
+  await expect(steering).toHaveAttribute('aria-checked', 'true');
+  await expect(dialog.getByText('暂时无法读取模型列表', { exact: false })).toBeVisible();
+  await steering.click();
+  const [save] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/agents/${original.id}`) &&
+        response.request().method() === 'PATCH',
+    ),
+    dialog.getByRole('button', { name: '保存修改', exact: true }).click(),
+  ]);
+  expect(save.request().postDataJSON()).toEqual({ steerEnabled: false });
+  expect(save.status()).toBe(200);
+  expect(await save.json()).toMatchObject({
+    id: original.id,
+    steerEnabled: false,
+    threadId: original.threadId,
+  });
+  await expect(dialog).not.toBeVisible();
+  await expect(
+    inspector.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
+  ).toHaveAttribute('aria-checked', 'false');
+  await page.reload();
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  await expect(
+    inspector.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
+  ).toHaveAttribute('aria-checked', 'false');
+  const restored = (await (await page.request.get(`/api/agents/${original.id}`)).json()) as {
+    agent: Agent;
+  };
+  expect(restored.agent).toMatchObject({
+    steerEnabled: false,
+    threadId: original.threadId,
+    workspace: original.workspace,
+  });
+});
+
+test('allows switching saved steer off when the current harness directory no longer advertises support', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await createAgent(page, '原生能力变化 Agent', true);
+  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
+  const original = list.agents.find((agent) => agent.name === '原生能力变化 Agent')!;
+  await page.route('**/api/harnesses', async (route) => {
+    const response = await route.fetch();
+    const directory = (await response.json()) as { harnesses: HarnessDescriptor[] };
+    await route.fulfill({
+      response,
+      json: {
+        harnesses: directory.harnesses.map((harness) => ({
+          ...harness,
+          capabilities: { ...harness.capabilities, steer: false },
+        })),
+      },
+    });
+  });
+  await page.reload();
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  await page.getByRole('button', { name: '编辑 Agent', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '编辑 Agent', exact: true });
+  const steering = dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
+  await expect(dialog.getByText('此 harness 不支持 steer，已开启时仍可关闭。')).toBeVisible();
+  await expect(steering).toHaveAttribute('aria-checked', 'true');
+  await expect(steering).toBeEnabled();
+  await steering.click();
+  await expect(steering).toBeDisabled();
+  const [save] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/agents/${original.id}`) &&
+        response.request().method() === 'PATCH',
+    ),
+    dialog.getByRole('button', { name: '保存修改', exact: true }).click(),
+  ]);
+  expect(save.request().postDataJSON()).toEqual({ steerEnabled: false });
+  expect(save.status()).toBe(200);
+  await expect(dialog).not.toBeVisible();
+  await page.getByRole('button', { name: '编辑 Agent', exact: true }).click();
+  await expect(steering).toHaveAttribute('aria-checked', 'false');
+  await expect(steering).toBeDisabled();
+});
+
 test('deletes an Agent from contacts and groups while retaining read-only history', async ({
   page,
 }, testInfo) => {
@@ -831,4 +950,49 @@ test('returns an inspected group member to read-only group details after externa
   await expect(inspector).toContainText('此群聊已删除，无法恢复讨论');
   await expect(inspector.getByRole('button', { name: '返回群聊详情', exact: true })).toHaveCount(0);
   await expect(inspector.getByRole('button', { name: '编辑 Agent', exact: true })).toHaveCount(0);
+});
+
+test('appends busy input through steer and displays pending delivery without starting another run', async ({
+  page,
+}, testInfo) => {
+  await page.goto('/');
+  await createAgent(page, '忙碌 steer 验证', true);
+  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
+  const agent = list.agents.find((item) => item.name === '忙碌 steer 验证')!;
+  await send(page, '保持执行以验证 steer');
+  await expect(page.getByTestId('agent-status')).toHaveText('执行中');
+  await send(page, '忙碌中的追加消息');
+  const message = page
+    .getByRole('article', { name: '你的消息', exact: true })
+    .filter({ hasText: '忙碌中的追加消息' });
+  await expect(message).toContainText('投递中');
+  await page.screenshot({
+    path: testInfo.outputPath('steer-pending.png'),
+    fullPage: true,
+    animations: 'disabled',
+  });
+  await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+    'MCP steer 回复：忙碌中的追加消息',
+  );
+  await expect(page.getByTestId('agent-status')).toHaveText('可用');
+  const detail = (await (await page.request.get(`/api/agents/${agent.id}`)).json()) as {
+    agent: Agent;
+    runs: { id: string; turnId: string; inputs: { channelId: string; messageSeqs: number[] }[] }[];
+  };
+  expect(detail.agent.threadId).toBe(agent.threadId);
+  expect(detail.runs).toHaveLength(1);
+  expect(detail.runs[0]!.inputs).toEqual([{ channelId: agent.channelId, messageSeqs: [1, 2] }]);
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  const steering = page
+    .getByTestId('inspector')
+    .getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
+  await steering.click();
+  await expect(steering).toHaveAttribute('aria-checked', 'false');
+  await page.reload();
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  await expect(
+    page
+      .getByTestId('inspector')
+      .getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
+  ).toHaveAttribute('aria-checked', 'false');
 });

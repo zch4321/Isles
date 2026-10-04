@@ -55,7 +55,9 @@ export class StdioClient implements NativeClient {
           this.pending.delete(frame.id);
           clearTimeout(pending.timer);
           if (frame.error)
-            pending.reject(new NativeRpcError(this.redactor.text(frame.error.message)));
+            pending.reject(
+              new NativeRpcError(this.redactor.text(frame.error.message), frame.error.code),
+            );
           else pending.resolve(frame.result);
         }
       } catch {

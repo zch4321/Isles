@@ -93,6 +93,7 @@ describe('database baseline', () => {
         'questions',
         'run_items',
         'runs',
+        'steer_batches',
       ].map((name) => ({ name })),
     );
     expect(sqlite.prepare('SELECT count(*) AS count FROM __drizzle_migrations').get()).toEqual({

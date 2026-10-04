@@ -25,6 +25,7 @@ export const agents = sqliteTable(
       .notNull()
       .default(false),
     canCreateGroups: integer('can_create_groups', { mode: 'boolean' }).notNull().default(false),
+    steerEnabled: integer('steer_enabled', { mode: 'boolean' }).notNull().default(false),
     desiredState: text('desired_state', { enum: ['running', 'stopped'] })
       .notNull()
       .default('running'),
@@ -120,6 +121,7 @@ export const deliveries = sqliteTable(
       enum: [
         'queued',
         'submitting',
+        'steering',
         'accepted',
         'received',
         'completed',
@@ -131,6 +133,7 @@ export const deliveries = sqliteTable(
     }).notNull(),
     runId: text('run_id'),
     turnId: text('turn_id'),
+    steerId: text('steer_id').references(() => steerBatches.id),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => [
@@ -141,6 +144,7 @@ export const deliveries = sqliteTable(
     }),
     index('deliveries_queue').on(t.agentId, t.status),
     index('deliveries_run').on(t.runId),
+    index('deliveries_steer').on(t.steerId),
   ],
 );
 
@@ -173,6 +177,31 @@ export const runItems = sqliteTable('run_items', {
   status: text().notNull(),
   text: text().notNull(),
 });
+
+export const steerBatches = sqliteTable(
+  'steer_batches',
+  {
+    id: text().primaryKey(),
+    agentId: text('agent_id')
+      .notNull()
+      .references(() => agents.id),
+    runId: text('run_id')
+      .notNull()
+      .references(() => runs.id),
+    turnId: text('turn_id').notNull(),
+    status: text({ enum: ['pending', 'accepted', 'rejected', 'uncertain'] }).notNull(),
+    // Audit references survive a definite rejection and subsequent delivery attempts.
+    included: text().notNull(),
+    skipped: text().notNull(),
+    error: text(),
+    createdAt: text('created_at').notNull(),
+    finishedAt: text('finished_at'),
+  },
+  (t) => [
+    index('steer_batches_run').on(t.runId),
+    index('steer_batches_pending').on(t.status, t.agentId),
+  ],
+);
 
 export const questions = sqliteTable('questions', {
   id: text().primaryKey(),
@@ -208,6 +237,7 @@ export const schema = {
   messages,
   deliveries,
   runs,
+  steerBatches,
   runItems,
   questions,
   events,

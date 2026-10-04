@@ -8,6 +8,7 @@ import {
   type HarnessHandlers,
   type HarnessRequestId,
   type HarnessSession,
+  type HarnessSteerInput,
   type HarnessTurnInput,
 } from '../harness/types.js';
 import type { AgentRecord } from '../storage/store.js';
@@ -20,6 +21,7 @@ import {
   threadResponseSchema,
   turnNotificationSchema,
   turnResponseSchema,
+  turnSteerResponseSchema,
   type NativeClient,
   type NativeHandlers,
 } from './protocol.js';
@@ -44,6 +46,7 @@ export class CodexAdapter implements HarnessAdapter {
       nativeSubagents: true,
       mcp: true,
       workspaceInstructions: true,
+      steer: true,
     },
   };
   private readonly factory: CodexClientFactory;
@@ -205,6 +208,29 @@ class CodexSession implements HarnessSession {
   }
   async interrupt(sessionId: string, turnId: string) {
     await this.native().request('turn/interrupt', { threadId: sessionId, turnId });
+  }
+  async steer(input: HarnessSteerInput) {
+    try {
+      const response = turnSteerResponseSchema.parse(
+        await this.native().request('turn/steer', {
+          threadId: input.sessionId,
+          expectedTurnId: input.expectedTurnId,
+          clientUserMessageId: input.batchId,
+          input: [{ type: 'text', text: input.text, text_elements: [] }],
+        }),
+      );
+      if (response.turnId !== input.expectedTurnId)
+        throw new Error('Codex steer 返回了不同 turn，执行结果待核对。');
+      return response;
+    } catch (error) {
+      const message = this.environment.redactor.text(error);
+      if (error instanceof NativeRpcError) {
+        if (error.code !== undefined && [-32600, -32601, -32602].includes(error.code))
+          throw new HarnessSubmissionRejected(message);
+        throw new NativeRpcError(message, error.code);
+      }
+      throw new Error(message, { cause: error });
+    }
   }
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
     this.native().respond(requestId, answer);

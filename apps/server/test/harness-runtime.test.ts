@@ -24,6 +24,7 @@ import {
 import type { AgentWorkspace } from '../src/runtime/workspace.js';
 
 const capabilities: HarnessCapabilities = {
+  steer: false,
   sessionResume: true,
   interrupt: true,
   userQuestions: true,

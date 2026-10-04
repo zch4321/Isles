@@ -138,16 +138,24 @@ const notice = computed(() => {
   const current = agent.value;
   if (!current) return undefined;
   const queued = messages.value.filter((m) => m.deliveries[0]?.status === 'queued').length;
+  const steering = messages.value.filter((m) => m.deliveries[0]?.status === 'steering').length;
   const count = queued ? `${queued} 条消息排队中。` : '';
   if (current.desiredState === 'stopped')
     return { held: true, text: `Agent 已停止，新消息会排队，恢复后处理。${count}` };
+  if (steering)
+    return {
+      held: false,
+      text: `${steering} 条消息正在投递到当前执行。原生确认接收不表示工作完成。${count}`,
+    };
   if (!count) return undefined;
   return {
     held: false,
     text:
       current.status === 'error'
         ? `${count}恢复 Agent 后继续处理。`
-        : `${count}当前执行结束后处理。`,
+        : current.steerEnabled && current.status === 'running'
+          ? `${count}已开启实时接收，等待向当前执行追加消息。`
+          : `${count}当前执行结束后处理。`,
   };
 });
 const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent';

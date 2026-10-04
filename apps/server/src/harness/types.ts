@@ -57,12 +57,21 @@ export interface HarnessTurnInput {
   workspace: string;
 }
 
+export interface HarnessSteerInput {
+  sessionId: string;
+  expectedTurnId: string;
+  batchId: string;
+  text: string;
+}
+
 /** Protocol-specific initialization, parameters and event parsing belong to the adapter. */
 export interface HarnessSession {
   /** Persist the native ID before initialization or guidance verification can fail. */
   createSession(onCreated: (sessionId: string) => void): Promise<string>;
   resumeSession(sessionId: string): Promise<string>;
   submit(input: HarnessTurnInput): Promise<{ turnId: string }>;
+  /** Append to the exact active turn; optional only when the adapter declares no steer support. */
+  steer?(input: HarnessSteerInput): Promise<{ turnId: string }>;
   interrupt(sessionId: string, turnId: string): Promise<void>;
   answer(requestId: HarnessRequestId, answer: QuestionAnswer): void;
   rejectQuestion(requestId: HarnessRequestId, reason: string): void;

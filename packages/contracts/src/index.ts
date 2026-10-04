@@ -20,6 +20,8 @@ export const agentStatusSchema = z.enum([
 export const deliveryStatusSchema = z.enum([
   'queued',
   'submitting',
+  // Appending to the active native turn; awaiting its acceptance acknowledgment.
+  'steering',
   'accepted',
   // Returned through an Agent's MCP inbox/history read; not a completed native turn.
   'received',
@@ -47,6 +49,7 @@ export const harnessIdSchema = z
 export const harnessCapabilitiesSchema = z.object({
   sessionResume: z.boolean(),
   interrupt: z.boolean(),
+  steer: z.boolean(),
   userQuestions: z.boolean(),
   nativeSubagents: z.boolean(),
   mcp: z.boolean(),
@@ -65,6 +68,7 @@ export const createAgentSchema = z
     model: z.string().min(1).max(120),
     reasoningEffort: z.string().min(1).max(24),
     canCreateGroups: z.boolean().default(false),
+    steerEnabled: z.boolean().default(false),
   })
   .strict();
 export const updateAgentSchema = z
@@ -73,6 +77,7 @@ export const updateAgentSchema = z
     model: z.string().trim().min(1).max(120).optional(),
     reasoningEffort: z.string().trim().min(1).max(24).optional(),
     canCreateGroups: z.boolean().optional(),
+    steerEnabled: z.boolean().optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, { message: '请至少修改一个字段' });
@@ -112,6 +117,7 @@ export const agentSchema = z.object({
   workspace: z.string(),
   threadId: z.string().nullable(),
   canCreateGroups: z.boolean(),
+  steerEnabled: z.boolean(),
   desiredState: z.enum(['running', 'stopped']),
   status: agentStatusSchema,
   error: z.string().nullable(),

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CodexAdapter } from '../src/codex/adapter.js';
+import { StdioClient } from '../src/codex/client.js';
 import { NativeEnvironment } from '../src/codex/environment.js';
 import { NativeRpcError, type NativeClient, type NativeHandlers } from '../src/codex/protocol.js';
 import {
@@ -44,6 +45,7 @@ async function fixture() {
     threadId: null,
     threadCreationAttempted: false,
     canCreateGroups: false,
+    steerEnabled: false,
     desiredState: 'running',
     status: 'creating',
     error: null,
@@ -332,5 +334,112 @@ describe('Codex adapter protocol boundary', () => {
     adapter.invalidate();
     expect(invalidate).toHaveBeenCalledOnce();
     expect(catalog.invalidate).toHaveBeenCalledOnce();
+  });
+
+  it('steers only the expected turn with a separately identified text batch', async () => {
+    const { session, calls, input, setRequest, adapter } = await fixture();
+    const batch = {
+      sessionId: input.sessionId,
+      expectedTurnId: 'active-turn',
+      batchId: randomUUID(),
+      text: '[channel: test] Change direction',
+    };
+    setRequest(async () => ({ turnId: batch.expectedTurnId }));
+    expect(adapter.descriptor.capabilities.steer).toBe(true);
+    await expect(session.steer(batch)).resolves.toEqual({ turnId: 'active-turn' });
+    expect(calls).toEqual([
+      {
+        method: 'turn/steer',
+        params: {
+          threadId: batch.sessionId,
+          expectedTurnId: batch.expectedTurnId,
+          clientUserMessageId: batch.batchId,
+          input: [{ type: 'text', text: batch.text, text_elements: [] }],
+        },
+      },
+    ]);
+    for (const invalid of [{ turnId: 'replacement-turn' }, { turnId: '' }, {}, null]) {
+      setRequest(async () => invalid);
+      try {
+        await session.steer(batch);
+        expect.fail('Invalid steer acknowledgement must fail');
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect(error).not.toBeInstanceOf(HarnessSubmissionRejected);
+      }
+    }
+  });
+
+  it('permits queue fallback only for definite steer refusals and scrubs every failure', async () => {
+    const { session, input, environment, setRequest } = await fixture();
+    const batch = {
+      sessionId: input.sessionId,
+      expectedTurnId: 'active-turn',
+      batchId: randomUUID(),
+      text: 'Follow-up',
+    };
+    const secret = 'steer-private-secret-123456';
+    environment.redactor.add(secret);
+    for (const code of [-32600, -32601, -32602, -32603, -32000, undefined]) {
+      setRequest(async () => {
+        throw new NativeRpcError(`steer failed: ${secret}`, code);
+      });
+      try {
+        await session.steer(batch);
+        expect.fail('Native error must fail');
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe('steer failed: [redacted]');
+        if (code !== undefined && [-32600, -32601, -32602].includes(code))
+          expect(error).toBeInstanceOf(HarnessSubmissionRejected);
+        else {
+          expect(error).not.toBeInstanceOf(HarnessSubmissionRejected);
+          expect(error).toBeInstanceOf(NativeRpcError);
+          expect((error as NativeRpcError).code).toBe(code);
+        }
+      }
+    }
+    setRequest(async () => {
+      throw new Error(`timeout after write ${secret}`);
+    });
+    await expect(session.steer(batch)).rejects.toThrow('timeout after write [redacted]');
+  });
+
+  it('retains RPC error codes from native frames and closes pending steer safely', async () => {
+    const { root, environment } = await fixture();
+    const script = join(root, 'steer-server.cjs');
+    await writeFile(
+      script,
+      `const readline = require('node:readline');
+readline.createInterface({input:process.stdin}).on('line', line => {
+  const frame = JSON.parse(line);
+  if (frame.method === 'initialize')
+    process.stdout.write(JSON.stringify({id:frame.id,result:{}}) + '\\n');
+  if (frame.method === 'turn/steer' && frame.params.input.length)
+    process.stdout.write(JSON.stringify({id:frame.id,error:{code:-32602,message:'Bearer frame-private-secret'}}) + '\\n');
+});
+`,
+    );
+    const client = new StdioClient(
+      { file: process.execPath, args: [script] },
+      root,
+      {},
+      { notification: () => {}, request: () => {}, exit: () => {} },
+      environment.redactor,
+    );
+    try {
+      await client.initialize();
+      await expect(client.request('turn/steer', { input: [{}] })).rejects.toMatchObject({
+        code: -32602,
+        message: 'Bearer [redacted]',
+      });
+      const pending = client.request('turn/steer', { input: [] });
+      const rejected = expect(pending).rejects.toThrow('连接已关闭');
+      await client.close();
+      await rejected;
+      await client.close();
+    } finally {
+      await client.close();
+    }
   });
 });

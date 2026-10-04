@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "c5c4c168-611f-493d-9cb0-66801295a2cb",
+  "id": "a78465d0-8b5a-4531-a9f8-e4e75d0afe9b",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "agents": {
@@ -73,6 +73,14 @@
         },
         "can_create_groups": {
           "name": "can_create_groups",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "steer_enabled": {
+          "name": "steer_enabled",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
@@ -337,6 +345,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "steer_id": {
+          "name": "steer_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "updated_at": {
           "name": "updated_at",
           "type": "text",
@@ -355,6 +370,11 @@
           "name": "deliveries_run",
           "columns": ["run_id"],
           "isUnique": false
+        },
+        "deliveries_steer": {
+          "name": "deliveries_steer",
+          "columns": ["steer_id"],
+          "isUnique": false
         }
       },
       "foreignKeys": {
@@ -372,6 +392,15 @@
           "tableFrom": "deliveries",
           "tableTo": "channels",
           "columnsFrom": ["channel_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "deliveries_steer_id_steer_batches_id_fk": {
+          "name": "deliveries_steer_id_steer_batches_id_fk",
+          "tableFrom": "deliveries",
+          "tableTo": "steer_batches",
+          "columnsFrom": ["steer_id"],
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -802,6 +831,116 @@
           "tableFrom": "runs",
           "tableTo": "agents",
           "columnsFrom": ["agent_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "steer_batches": {
+      "name": "steer_batches",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "agent_id": {
+          "name": "agent_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "turn_id": {
+          "name": "turn_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "included": {
+          "name": "included",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "skipped": {
+          "name": "skipped",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "finished_at": {
+          "name": "finished_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "steer_batches_run": {
+          "name": "steer_batches_run",
+          "columns": ["run_id"],
+          "isUnique": false
+        },
+        "steer_batches_pending": {
+          "name": "steer_batches_pending",
+          "columns": ["status", "agent_id"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "steer_batches_agent_id_agents_id_fk": {
+          "name": "steer_batches_agent_id_agents_id_fk",
+          "tableFrom": "steer_batches",
+          "tableTo": "agents",
+          "columnsFrom": ["agent_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "steer_batches_run_id_runs_id_fk": {
+          "name": "steer_batches_run_id_runs_id_fk",
+          "tableFrom": "steer_batches",
+          "tableTo": "runs",
+          "columnsFrom": ["run_id"],
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"

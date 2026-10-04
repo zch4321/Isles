@@ -29,6 +29,9 @@ interface Active {
   done: Promise<void>;
   finish: () => void;
   requests: Map<string, HarnessRequestId>;
+  steerTask?: Promise<void>;
+  steerBatchId?: string;
+  steerRejected?: boolean;
 }
 interface Handle {
   session?: HarnessSession;
@@ -74,6 +77,7 @@ export class Runtime {
   async createAgent(input: CreateAgent) {
     if (!this.baseUrl) throw new HttpError(503, 'Runtime 尚未监听本机端口');
     const adapter = this.harnesses.get(input.harness);
+    this.validateSteer(adapter.descriptor.capabilities.steer, input.steerEnabled);
     const status = await adapter.catalog.status();
     if (!status.available || !status.authenticated)
       throw new HttpError(503, status.error ?? `${adapter.descriptor.displayName} 原生认证不可用`);
@@ -83,6 +87,7 @@ export class Runtime {
     const agent = this.store.createAgent({
       ...input,
       canCreateGroups: input.canCreateGroups ?? false,
+      steerEnabled: input.steerEnabled ?? false,
       nativeHome: adapter.nativeHome,
     });
     this.kick(agent.id);
@@ -91,6 +96,7 @@ export class Runtime {
   async updateAgent(id: string, update: UpdateAgent) {
     let agent = this.managed(id);
     const adapter = this.harnesses.get(agent.harness);
+    this.validateSteer(adapter.descriptor.capabilities.steer, update.steerEnabled);
     const changesModel = () =>
       (update.model !== undefined && update.model !== agent.model) ||
       (update.reasoningEffort !== undefined && update.reasoningEffort !== agent.reasoningEffort);
@@ -122,18 +128,23 @@ export class Runtime {
       Object.entries(update).filter(
         ([key, value]) => value !== undefined && value !== agent[key as keyof AgentRecord],
       ),
-    ) as Partial<Pick<AgentRecord, 'name' | 'model' | 'reasoningEffort' | 'canCreateGroups'>>;
+    ) as Partial<
+      Pick<AgentRecord, 'name' | 'model' | 'reasoningEffort' | 'canCreateGroups' | 'steerEnabled'>
+    >;
     if (Object.keys(changed).length) {
       this.store.updateAgent(id, changed);
       // The running turn keeps its captured configuration; reconnect loads guidance and MCP tools
       // for the next turn while resuming the same native thread.
       const handle = this.handles.get(id);
       if (handle) {
-        handle.refresh = true;
+        if (Object.keys(changed).some((key) => key !== 'steerEnabled')) handle.refresh = true;
         this.kick(id);
       }
     }
     return this.store.publicAgent(id);
+  }
+  private validateSteer(supported: boolean, enabled: boolean | undefined) {
+    if (enabled && !supported) throw new HttpError(400, '该 Harness 不支持 steer 投递');
   }
   send(channelId: string, input: SendMessage) {
     const channel = this.store.getChannel(channelId);
@@ -215,13 +226,82 @@ export class Runtime {
   kick(id: string) {
     if (this.closing || !this.baseUrl) return;
     const handle = this.handle(id);
-    if (handle.task || handle.active) return;
+    if (handle.active) {
+      this.kickSteer(id, handle, handle.active);
+      return;
+    }
+    if (handle.task) return;
     handle.task = this.pump(id, handle).finally(() => {
       delete handle.task;
       // Also covers input that arrived after the pump decided to stop.
       if (this.closing || !handle.session || !this.runnable(id)) return;
       if (handle.refresh || this.store.hasPendingMessages(id)) this.kick(id);
     });
+  }
+  private canSteer(id: string, handle: Handle, active: Active) {
+    const agent = this.store.getAgent(id);
+    return (
+      !this.closing &&
+      !this.deleting.has(id) &&
+      handle.active === active &&
+      !!handle.session &&
+      !!active.turnId &&
+      !active.steerRejected &&
+      agent.steerEnabled &&
+      this.runnable(id) &&
+      this.harnesses.get(agent.harness).descriptor.capabilities.steer &&
+      !this.store.getRun(active.run.id).finishedAt
+    );
+  }
+  private kickSteer(id: string, handle: Handle, active: Active) {
+    if (active.steerTask || !this.canSteer(id, handle, active)) return;
+    // Let native callbacks finish binding the initial turn before claiming more input.
+    active.steerTask = Promise.resolve()
+      .then(async () => {
+        if (!this.canSteer(id, handle, active)) return;
+        const client = handle.session!;
+        const turnId = active.turnId!;
+        const batch = this.store.claimSteer(id, active.run.id, turnId);
+        if (!batch) return;
+        active.steerBatchId = batch.id;
+        try {
+          const response = await client.steer!({
+            sessionId: active.run.threadId,
+            expectedTurnId: turnId,
+            batchId: batch.id,
+            text: formatMessages(this.messageLabels(id), batch.input),
+          });
+          if (response.turnId !== turnId) throw new Error('Steer 确认返回了不同的原生 turn');
+          this.store.acceptSteer(batch.id, response.turnId);
+        } catch (error) {
+          const reason = this.workspace.redactor.text(error);
+          if (error instanceof HarnessSubmissionRejected) {
+            this.store.rejectSteer(batch.id, reason);
+            // A turn may have ended before its completion notification arrived. Retry only
+            // through the next normal turn, not repeatedly against this native turn.
+            active.steerRejected = true;
+          } else {
+            this.store.uncertainSteer(batch.id, reason);
+            if (
+              !this.closing &&
+              !this.deleting.has(id) &&
+              handle.active === active &&
+              handle.session === client &&
+              this.store.getAgent(id).desiredState === 'running'
+            )
+              this.store.updateAgent(id, {
+                status: 'error',
+                error: `Steer 投递结果待核对，不会自动重投：${reason}`,
+              });
+          }
+        }
+      })
+      .finally(() => {
+        delete active.steerBatchId;
+        delete active.steerTask;
+        if (this.canSteer(id, handle, active) && this.store.hasPendingMessages(id))
+          this.kickSteer(id, handle, active);
+      });
   }
   private async connect(id: string, handle: Handle) {
     const agent = this.store.getAgent(id);
@@ -258,6 +338,8 @@ export class Runtime {
     });
     if (connection !== session) throw new Error('Harness 未发布正确的原生连接');
     handle.session = session;
+    if (adapter.descriptor.capabilities.steer && !session.steer)
+      throw new Error('Harness 声明支持 steer，但未提供投递方法');
     if (this.store.getAgent(id).desiredState !== 'running' || this.closing) {
       await session.close();
       if (handle.session === session) delete handle.session;
@@ -345,8 +427,11 @@ export class Runtime {
         reasoningEffort: agent.reasoningEffort,
         workspace: agent.workspace,
       });
+      if (active.turnId && active.turnId !== response.turnId)
+        throw new Error('原生 turn 确认与已绑定的运行不一致，结果待核对');
       active.turnId = response.turnId;
       this.store.acceptRun(run.id, response.turnId);
+      this.kickSteer(id, handle, active);
       await done;
     } catch (error) {
       const rejected = error instanceof HarnessSubmissionRejected && !active.turnId;
@@ -362,8 +447,14 @@ export class Runtime {
           status: 'error',
           error: this.workspace.redactor.text(error),
         });
+      // An uncertain initial submission must not leave its pending steer RPC waiting
+      // on an untracked native turn. Closing settles outstanding adapter requests.
+      if (active.steerTask) await client.close();
       return;
     } finally {
+      // A completion event can precede the steer ACK. Settle it before another turn
+      // starts, so definite refusal can safely return the claimed messages to the queue.
+      await active.steerTask;
       if (handle.active === active) delete handle.active;
     }
     if (!this.closing && this.runnable(id)) this.store.updateAgent(id, { status: 'ready' });
@@ -394,6 +485,7 @@ export class Runtime {
       if (active.turnId && active.turnId !== event.turnId) return;
       active.turnId = event.turnId;
       this.store.acceptRun(active.run.id, active.turnId);
+      if (event.type === 'turn_started') this.kickSteer(id, handle, active);
       if (event.type === 'turn_completed') {
         const error = event.error ? this.workspace.redactor.text(event.error) : null;
         this.store.finishRun(
@@ -442,6 +534,7 @@ export class Runtime {
       if (main) {
         active.turnId = request.turnId;
         this.store.acceptRun(active.run.id, active.turnId);
+        this.kickSteer(id, handle, active);
       }
       const definitions: QuestionDefinition[] = request.questions.map((definition) => {
         const q = questionDefinitionSchema.parse(definition);
@@ -589,17 +682,23 @@ export class Runtime {
   async close() {
     this.closing = true;
     for (const handle of this.handles.values()) {
-      if (handle.active && !this.store.getRun(handle.active.run.id).finishedAt) {
+      if (
+        handle.active &&
+        (!this.store.getRun(handle.active.run.id).finishedAt ||
+          (handle.active.steerBatchId &&
+            this.store.getSteer(handle.active.steerBatchId).status === 'pending'))
+      ) {
         this.store.finishRun(
           handle.active.run.id,
           'uncertain',
           'uncertain',
           '服务关闭时原生执行尚未结束，结果待核对；不会自动重投。',
         );
-        this.store.updateAgent(handle.active.run.agentId, {
-          status: 'error',
-          error: '上次执行结果待核对，请查看原生记录后显式恢复。',
-        });
+        if (this.store.getAgent(handle.active.run.agentId).desiredState === 'running')
+          this.store.updateAgent(handle.active.run.agentId, {
+            status: 'error',
+            error: '上次执行结果待核对，请查看原生记录后显式恢复。',
+          });
         handle.active.finish();
       }
     }

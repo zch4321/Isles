@@ -1,6 +1,6 @@
 # Agent 消息文本协议
 
-> 日期：2026-10-03 · 自动 turn 输入、MCP `receive_messages` 和 `read_messages` 共用此格式。
+> 日期：2026-10-04 · 自动 turn 输入、当前 turn 的 steer 追加、MCP `receive_messages` 和 `read_messages` 共用此格式。
 >
 > Agent 运行时的说明由 [AGENTS.md 模板](../apps/server/resources/AGENTS.template.md)生成到它的工作目录，交给 harness 原生加载。本文说明接口与数据版本边界，不通过首次聊天注入。
 
@@ -70,6 +70,8 @@
 - 只有实际返回的消息会按接收 Agent 标记为 `received`，不会将分页探测行或整个频道一并标记。暂停群里的主动读取也计为接收。
 
 ## 工具与 Web 接口
+
+Agent 的 `steerEnabled` 默认关闭。支持且开启时，忙碌期间的新 queued 输入按同一截取和头部规则追加到已绑定的当前 turn；关闭或不支持时留到下一轮。追加发出前领取消息并标记 `steering`，MCP 收件箱只取 queued，避免同一消息自动追加后再次收取。原生 ACK 只表示接受；无法确认的结果不自动重投，明确拒绝则退回下一轮。开关、持久化与故障边界见 [Steer 投递验收](steer-delivery-acceptance.md)。
 
 MCP `send_message`、`read_messages`、`receive_messages` 的 `channelId` 接受完整频道 UUID 或 `private`，不接受群名、Agent 名称或显示用的短后缀。别名始终在服务端绑定到当前调用 Agent 的私聊，不能用于访问其他 Agent 私聊。
 

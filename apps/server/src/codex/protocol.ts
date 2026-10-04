@@ -1,4 +1,4 @@
-// Deliberately small projection of Codex CLI 0.159.2 generated protocol.
+// Deliberately small projection of Codex CLI 0.160.0 generated protocol.
 // Regenerate for comparison: codex app-server generate-ts --out /tmp/isles-protocol
 // Official wire format: https://learn.chatgpt.com/docs/app-server (JSONL, no jsonrpc header).
 import { questionDefinitionSchema } from '@isles/contracts';
@@ -17,6 +17,7 @@ export const threadResponseSchema = z.object({
   instructionSources: z.array(z.string()).default([]),
 });
 export const turnResponseSchema = z.object({ turn: z.object({ id: z.string().min(1) }) });
+export const turnSteerResponseSchema = z.object({ turnId: z.string().min(1) });
 export const turnNotificationSchema = z.object({
   threadId: z.string(),
   turn: z.object({
@@ -44,4 +45,11 @@ export interface NativeClient {
   reject(id: RequestId, message: string): void;
   close(): Promise<void>;
 }
-export class NativeRpcError extends Error {}
+export class NativeRpcError extends Error {
+  constructor(
+    message: string,
+    readonly code?: number,
+  ) {
+    super(message);
+  }
+}

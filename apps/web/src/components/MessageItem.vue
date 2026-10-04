@@ -30,6 +30,12 @@ const deliveryStyles: Partial<
 > = {
   queued: { icon: Clock3, class: 'text-muted-foreground' },
   submitting: { icon: LoaderCircle, class: 'text-primary', spin: true },
+  steering: {
+    icon: LoaderCircle,
+    class: 'text-primary',
+    spin: true,
+    hint: '正在向当前执行追加消息；原生确认接收不表示工作完成。',
+  },
   accepted: { icon: LoaderCircle, class: 'text-primary', spin: true },
   cancelled: { icon: Ban, class: 'text-muted-foreground' },
   failed: { icon: CircleAlert, class: 'text-destructive' },

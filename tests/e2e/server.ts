@@ -101,6 +101,7 @@ harness.onTurn = (client) => {
     return latest ? [{ channelId: channel.channel_id, message: latest }] : [];
   });
   const receiveDuringTurn = targets.some((t) => t.message.body === '请在执行中收信');
+  if (targets.some((t) => t.message.body === '保持执行以验证 steer')) return;
   const publish = async () => {
     if (receiveDuringTurn) {
       const inbox = await callMcp<Envelope>(client, 'receive_messages', {});
@@ -131,6 +132,23 @@ harness.onTurn = (client) => {
     setTimeout(() => {
       void publish();
     }, 250);
+};
+harness.onSteer = async (client) => {
+  const { envelope } = harness.steers.at(-1)!;
+  // Keep the RPC pending long enough to observe the delivery state through SSE.
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  if (client.closed) return;
+  for (const channel of envelope.channels) {
+    const message = channel.messages.filter((item) => item.sender.type === 'user').at(-1);
+    if (message)
+      await callMcp(client, 'send_message', {
+        channelId: channel.channel_id,
+        body: `MCP steer 回复：${message.body}`,
+        replyTo: message.seq,
+        clientId: `steer-reply-${message.seq}`,
+      });
+  }
+  client.complete();
 };
 await app.listen({ host: config.current.host, port: config.current.port });
 const close = async () => {

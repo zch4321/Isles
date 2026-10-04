@@ -1,13 +1,13 @@
 # Isles 实现计划
 
-> 版本：0.16 · 日期：2026-10-03 · 状态：现有 Codex 基础闭环已完成；harness 适配层已完成；新 harness 随后添加，Claude 暂缓
+> 版本：0.17 · 日期：2026-10-04 · 状态：harness 适配层与按 Agent 配置 steer 已完成并验收；Claude 暂缓
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
 ## 1. 已确定的方向
 
 - 采用已讨论的 Vue 3、Vite、TypeScript、shadcn-vue、Tailwind CSS、Fastify、SQLite/Drizzle 和 pnpm workspace。
-- 以官方原生接口为主；当前先完整提取现有 **Codex 的 harness 适配层**，验收后再添加新的 harness。
+- 以官方原生接口为主；现有 **Codex 的 harness 适配层**已完成；本次增加默认关闭的 steer，新增 harness 后续另定。
 - Codex 是主要接入，首先用它跑通 Agent、固定 session、私聊和多 Agent 协作。
 - Kimi Code 保留为后续候选，本轮不接入；新增 harness 复用业务层与 Runtime，通过 adapter 表达能力差异。
 - 2026-10-03 用户重新考虑 Claude Code 闭源执行核心，Claude Code / Claude Agent SDK 接入暂缓；不安装 SDK，不实现其 adapter。DSH 与第三方 Claude ACP 不进入当前范围。
@@ -34,17 +34,18 @@
 | 名称消息呈现           | 自动输入、收信与历史共用安全名称标签；目录保留完整 ID 寻址，更新持久规则。 | 108 项测试、10 项浏览器测试与真实 Codex 同名寻址/重启验证通过；见 [验收记录](name-message-acceptance.md)。      |
 | 群聊基础管理           | 创建/查询/改名/成员管理及保留历史的删除，成员继续使用同一 session。        | 本轮检查与真实 Codex 验证见 [群聊管理验收](group-management-acceptance.md)。                                    |
 | Harness 适配层         | 通用契约、注册目录、规范化生命周期与事件；完整抽出既有 Codex 行为。        | 128 项测试、13 项浏览器测试与两套真实 Codex 回归通过，见 [独立验收](harness-adapter-acceptance.md)。            |
+| Agent 实时收信开关     | 默认关闭的 steer 偏好、同 turn 追加、批次结算与 Web 创建/编辑入口。        | 实现完成；完整检查、浏览器与真实原生证据待汇总，见 [Steer 投递验收](steer-delivery-acceptance.md)。             |
 | M3 新 harness 接入     | 通过 adapter 加入既有协作；Kimi Code 保留为后续候选。                      | 适配层验收后另行确定范围，本轮不实施。                                                                          |
 | M4 Claude 接入（暂缓） | 此前计划通过官方 Agent SDK 接入 Claude Code。                              | 因用户重新考虑闭源执行核心而暂缓，不再作为已承诺阶段。                                                          |
 | M5 完整体验与长期运行  | 完善文件共享、生命周期、历史检索、备份和长时间运行体验。                   | 细分范围待讨论。                                                                                                |
 
 消息持久化、权限检查、停止和恢复从相应功能的第一阶段就实现；M5 扩展故障覆盖和体验，不用于推迟基础正确性。
 
-统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。当前先提取适配层，只注册 Codex；随后再确定新 harness 接入范围，Kimi 仍是候选，Claude 明确暂缓。
+统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前只注册 Codex，本次增加默认关闭的 steer；随后再确定新 harness 接入范围，Kimi 仍是候选，Claude 明确暂缓。
 
 配置与目录拆分的验收覆盖优先级、路径解析、数据库/token 位置、Codex 发现及错误、UI 保存与实时检测、工作区稳定性、共享目录和原生规则加载。当前结果为 89 项测试、7 项浏览器测试与两个真实 Codex Agent 的读写/重启验证通过。旧目录清理仍有进程占用及工具审批限制，具体边界见 [验收记录](config-workspace-acceptance.md#4-旧目录清理遗留项)。
 
-当前单用户、本机、Codex 范围的基础闭环可收口：配置和独立工作区、Agent/群聊管理、私聊与群聊、MCP 共享文件协作、持久规则、停止/恢复与固定 thread 已有自动化、浏览器和真实 Codex 证据。群聊管理的检查与边界见 [验收记录](group-management-acceptance.md)。下一步完成适配层，再添加新 harness；M5 的检索、产物版本、备份和更长时间运行不作为接入前置条件。当前 Codex 或 fake adapter 验证都不能代替其他 harness 的原生能力验收。
+当前单用户、本机、Codex 范围的基础闭环可收口：配置和独立工作区、Agent/群聊管理、私聊与群聊、MCP 共享文件协作、持久规则、停止/恢复与固定 thread 已有自动化、浏览器和真实 Codex 证据。群聊管理的检查与边界见 [验收记录](group-management-acceptance.md)。适配层与按 Agent 配置 steer 已完成验收，新增 harness 之后另定；M5 的检索、产物版本、备份和更长时间运行不作为接入前置条件。当前 Codex 或 fake adapter 验证都不能代替其他 harness 的原生能力验收。
 
 ## 3. M0：工程初始化
 
@@ -101,7 +102,7 @@
 | 项目           | 已确认行为                                                              |
 | -------------- | ----------------------------------------------------------------------- |
 | 正式回复       | 统一由 MCP 发进私聊；原生输出显示在执行详情，不自动转成正式聊天消息。   |
-| 忙碌时输入     | 持久排队，M1 不提供 steer。                                             |
+| 忙碌时输入     | M1 当时采用持久排队；当前已增加默认关闭的 steer 偏好，见第 6.1 节。     |
 | Codex 执行权限 | `danger-full-access` + `approvalPolicy: never`，不弹执行审批。          |
 | 管理入口       | M1 暂不做登录鉴权，只监听本机；MCP 仍绑定 Agent 身份并校验所属私聊。    |
 | 实现与验收     | 一个活动的 `gpt-6.1-sol / max` 子 agent 实现并自测，主 agent 独立验收。 |
@@ -131,7 +132,7 @@
 | 项目           | 已确认行为                                                                                                                                                            |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 唤醒           | 群内任何发言（用户或 Agent）都唤醒除发言者以外的全体成员。`@` 只在群内公开标明“特意对谁说”，不改变唤醒范围；只想与某个 Agent 交流时使用私聊。                         |
-| 即时唤醒       | 私聊与群聊均不防抖。空闲 Agent 立即开始 turn；忙碌时消息独立排队，原生 turn 结束后立即合并剩余未读，不等待其他 Agent 对齐轮次。                                       |
+| 即时唤醒       | 私聊与群聊均不防抖。空闲 Agent 立即开始 turn；忙碌默认排队，开启且支持 steer 时向当前 turn 追加。未追加的剩余未读在 turn 结束后立即合并，不等待其他 Agent 对齐轮次。  |
 | 合并输入       | 一次唤醒只提交一条输入，包含所有频道的未读消息：每个频道最近 10 条未读，加上更早的全部未读 `@` 该 Agent 的消息；已投递的消息不重复发送。不设总条数上限。              |
 | 被跳过的未读   | 超出上述范围的未读消息标记为已跳过，不再进入后续输入；输入中注明条数，Agent 可用历史工具读取。私聊中用户的消息都视为对该 Agent 说，不会被跳过。                       |
 | 发言           | 正式发言只能通过 MCP；原生输出只在执行详情展示。规则说明只写明“只有你认为需要回复时，才调用 MCP 发送消息”，不额外规定沉默或确认方式。                                 |
@@ -147,9 +148,9 @@
 
 建议第一轮验收使用两个独立 Codex Agent，验证私聊与群聊切换时原生 ID 不变，再测试多群并发输入、暂停和权限撤销。多人类用户、跨机器执行与固定角色系统不进入本阶段。
 
-## 6. 当前阶段：Harness 适配层
+## 6. Harness 适配层与 Agent 实时收信
 
-本轮只完整提取已有 Codex 行为，不新增真实 harness。交付边界如下：
+适配层阶段已完整提取 Codex 行为，不新增真实 harness。其交付边界如下；本次 steer 增量见第 6.1 节：
 
 - `HarnessAdapter` / `HarnessSession` 规范化目录、创建/恢复、提交、取消、回答/拒绝问题、关闭与事件。Runtime 仅处理平台排队、固定绑定、执行互斥、持久停止及结果不明；Codex RPC、原生通知与 `instructionSources` 不进入通用控制器。
 - Codex adapter 封装 app-server、原生模型目录/环境、中性初始化、原生 AGENTS.md 加载验证，保留先保存原生 ID 再初始化的行为。
@@ -158,9 +159,20 @@
 - Web 动态读取 `/api/harnesses` 及所选 harness 的状态/模型目录；只注册和展示 Codex。创建必传 harness，编辑不能替换；保留 `/api/codex/config`，移除旧状态/模型路由，不增加兼容别名。
 - 保留存储/API 的 `threadId` 命名，其含义为不透明原生 session ID；当前数据库基线以 `(harness, nativeHome, threadId)` 约束绑定，不限定仅 Codex。按首发前政策不增加迁移、旧 schema 检测或兼容代码，不清理或自动搬移现有 Codex 数据。
 
-验收需要三类独立证据：语义 fake adapter 验证平台协议无关的派发、相同 session ID 跨 harness、注册约束、生命周期与确定拒绝/结果不明；Codex 原生协议模拟验证 adapter 转换；完整检查、浏览器流程及真实 Codex 回归验证现有使用链路。创建/恢复期间停止、固定绑定、失效问题、子代理问题关联和关闭清理也须覆盖。本轮 128 项测试、13 项浏览器测试及两套真实 Codex 回归均通过，最终结果和边界见 [独立验收](harness-adapter-acceptance.md)。
+验收需要三类独立证据：语义 fake adapter 验证平台协议无关的派发、相同 session ID 跨 harness、注册约束、生命周期与确定拒绝/结果不明；Codex 原生协议模拟验证 adapter 转换；完整检查、浏览器流程及真实 Codex 回归验证现有使用链路。创建/恢复期间停止、固定绑定、失效问题、子代理问题关联和关闭清理也须覆盖。适配层阶段的 128 项测试、13 项浏览器测试及两套真实 Codex 回归均通过，结果和边界见 [独立验收](harness-adapter-acceptance.md)；这些历史证据不代替第 6.1 节新增 steer 的验收。
 
-### 6.1 M3：新增 harness（后续）
+### 6.1 按 Agent 配置 steer（已完成并验收）
+
+- 新增 `capabilities.steer` 与持久 `steerEnabled`，创建默认关闭；支持 harness 也可保持关闭，创建/编辑/详情都可配置。unsupported 禁用开启且 API 独立拒绝，已有开启值仍可关闭。
+- 仅修改收信偏好不查模型目录、不重启原生连接，不改 thread。开启时忙碌 queued 输入立即向当前 thread/turn 追加，保留频道、序号、来源、回复和提及；关闭或 unsupported 继续排队到下一轮。
+- 新基线增加 `steer_batches`，发出前保存批次与关联；`steering` 在 Web 显示“投递中”。原生 ACK 表示接受，MCP received 表示工具接收，两者都不是工作完成证明。
+- Codex steer 只有 `-32600` / `-32601` / `-32602` 明确拒绝可退回队列到下一 turn；未知错误、超时、断连不自动重投。关闭开关只影响后续输入，已发 RPC 按实际结果结算；停止、暂停群、删除群和移出成员继续分别执行原控制规则。
+- `receive_messages` 保持立即返回，不新增 wait 参数或阻塞 MCP；稳定 AGENTS.md 只解释机制，不写实时开关值。不新增 harness，Claude 继续暂缓。
+- 发布 v1 前仍只更新当前全新 schema 基线，不增加兼容、旧库迁移或自动清库；验收使用独立临时配置/数据，现有用户库由用户自行决定如何处理。
+
+2026-10-04 验收通过：`pnpm check` 的 166 项测试、完整构建、16 项 Chrome 浏览器测试，以及真实 `codex-cli 0.160.0` / `gpt-6.1-sol` 的三来源 steer 验证。私聊、用户群消息与 Agent 群消息均进入原 thread/turn；reader 只有一次 turn/start，无收件箱或历史读取；重启保留开关和原 thread。数据库脚本使用独立配置，确认 10 表新基线无差异并成功初始化。完整证据与边界见 [独立验收](steer-delivery-acceptance.md)。
+
+### 6.2 M3：新增 harness（后续）
 
 适配层验收后确定新接入的具体范围。Kimi Code 保留为候选；接入前核对安装版本的原生协议、认证/配置与规则加载入口。模型目录、固定 session 创建/恢复、事件、停止、用户交互、MCP 与进程关闭都须独立验证。不为它建立新的聊天业务模型。
 

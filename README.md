@@ -2,15 +2,19 @@
 
 **让独立的 AI 一起工作。**
 
-面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前只接入 **Codex app-server**；先将已有 Codex 行为完整抽入 harness 适配层，再添加新的 harness。Kimi Code 保留为后续候选，Claude Code / Claude Agent SDK 因用户重新考虑闭源执行核心而暂缓。
+面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前只接入 **Codex app-server**；已将 Codex 行为完整抽入 harness 适配层，并增加默认关闭的实时收信开关；新的 harness 留待后续接入。Kimi Code 保留为后续候选，Claude Code / Claude Agent SDK 因用户重新考虑闭源执行核心而暂缓。
 
 Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到 `[channel: "评审", seq: 12, from: agent:"Alice"]` 这样的文本头部，自己的私聊显示为 `private`。普通消息用名称呈现群、发送者与提及对象，重名时在引号外附加 ID 短前缀；工具仍通过目录查询完整 UUID 寻址，消息仍以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，本轮验证见 [名称消息验收](docs/name-message-acceptance.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。
 
-当前已实现 M1 的 Codex 私聊闭环、M2 的 Codex 群聊与 Agent 基础管理。用户创建多个 Agent，与每个 Agent 私聊，或把几个 Agent 拉进群讨论；Agent 通过 Isles MCP 发布正式消息，原生输出只在执行详情展示。群内用户或 Agent 的发言立即唤醒其他空闲成员；忙碌成员独立积累未读，原生 turn 结束后立即合并剩余未读开始下一 turn，不做防抖、不等待其他成员结束。Agent 可以在当前 turn 内通过 `receive_messages` 主动收信，或通过 `read_messages` 读取历史，实际返回的消息不再自动投递；`@` 只公开标明特意对谁说。用户可以暂停群讨论、管理成员，并按 Agent 开启拉群权限。每个 Agent 在私聊和所有群中始终使用同一个原生 thread，消息与投递持久化，应用重启后继续。Agent 之间私聊、其他 harness 与用户登录留在后续阶段。
+当前已实现 M1 的 Codex 私聊闭环、M2 的 Codex 群聊与 Agent 基础管理。用户创建多个 Agent，与每个 Agent 私聊，或把几个 Agent 拉进群讨论；Agent 通过 Isles MCP 发布正式消息，原生输出只在执行详情展示。群内用户或 Agent 的发言立即唤醒其他空闲成员；忙碌成员默认独立积累未读，原生 turn 结束后立即合并剩余未读开始下一 turn。用户可按 Agent 开启“忙碌时实时接收（steer）”，把新消息追加到同一 thread 的当前 turn，不另开 turn。调度不做防抖、不等待其他成员结束。Agent 可以在当前 turn 内通过 `receive_messages` 主动收信，或通过 `read_messages` 读取历史，实际返回的消息不再自动投递；`@` 只公开标明特意对谁说。用户可以暂停群讨论、管理成员，并按 Agent 开启拉群权限。每个 Agent 在私聊和所有群中始终使用同一个原生 thread，消息与投递持久化，应用重启后继续。Agent 之间私聊、其他 harness 与用户登录留在后续阶段。
 
 Web 界面采用工作台布局：左侧分为“群聊”和“Agents”，有已删除 Agent 或群聊时增加“历史对话”，支持按名称、成员或模型搜索并查看最近消息；中间是按发送者分组的对话，Agent 消息渲染 Markdown（不加载图片、不执行 HTML），用户消息按原文显示并高亮 `@`，系统消息居中显示。群聊输入框输入 `@` 可选择成员。右侧检查器在私聊中显示 Agent 配置、拉群权限和执行记录，在群聊中显示成员（可添加、移出或查看任一成员的执行详情）；宽屏常驻、较窄时浮层打开。窄屏下在聊天列表与单个对话之间切换。界面跟随系统的亮色/暗色设置。输入框支持 Enter 发送、Shift + Enter 换行（也兼容 Ctrl / ⌘ + Enter），切换聊天会保留各自尚未发送的草稿；草稿仅保存在当前页面，刷新后清空。
 
-在私聊或群成员的 Agent 详情中点击“编辑 Agent”，可修改名称、模型、推理等级和拉群权限。ID、工作目录及原生 thread 保持不变；运行中的 turn 使用原配置，下一次执行使用新模型和推理等级。停止的 Agent 修改后仍保持停止。名称与权限可在模型目录暂时不可用时修改，切换模型或等级需要原生目录确认支持。
+在私聊或群成员的 Agent 详情中点击“编辑 Agent”，可修改名称、模型、推理等级、拉群权限和实时收信开关。ID、工作目录及原生 thread 保持不变；运行中的 turn 使用原配置，下一次执行使用新模型和推理等级。停止的 Agent 修改后仍保持停止。名称、权限和收信开关可在模型目录暂时不可用时修改，切换模型或等级需要原生目录确认支持。
+
+实时收信开关 `steerEnabled` 默认关闭，支持 steer 的 harness 也可在创建、编辑或 Agent 详情中保持关闭。未声明 `capabilities.steer` 的 harness 禁止开启，界面禁用该选项，服务端也拒绝开启；已保存开启值但当前 harness 不再支持时仍可关闭。只修改收信偏好不会重启原生进程、不查询模型目录，也不更换 session。开启后，忙碌 Agent 的可投递未读立即追加到当前 turn，消息仍保留频道、序号、发送者、回复和提及；关闭或不支持时继续排队到下一轮。关闭开关只影响后续调度，已经发出的原生 RPC 仍按实际响应结算。
+
+追加请求原生确认前显示“投递中”（`steering`）；确认只表示接受输入，不表示消息中的工作已经完成。Codex steer 仅将 `-32600`、`-32601`、`-32602` 视为明确拒绝，未接受的消息退回队列，当前 turn 结束后按下一轮处理；超时、断连或其他未知结果显示“待核对”，不自动重投。停止 Agent、暂停群、删除群和移出成员仍分别遵守既有规则，较晚原生回调不能覆盖取消结果。本次验证和未完成的真实原生验证见 [Steer 投递验收](docs/steer-delivery-acceptance.md)。
 
 “删除 Agent”先停止执行，再退出所有群聊并从联系人移除。当前采用保留数据的删除方式：私聊、群聊发言、执行记录、个人工作目录、共享文件与原生 session 都保留；私聊在“历史对话”中只读展示，删除后不能恢复、编辑、继续发言或加入群聊，MCP 身份失效。删除需要确认，尚不提供永久清理文件或恢复已删除 Agent 的入口。
 
@@ -20,7 +24,7 @@ Web 界面采用工作台布局：左侧分为“群聊”和“Agents”，有�
 
 创建 Agent 时会自动检测本机 Codex。发现顺序为启动配置 `ISLES_CODEX_BIN`、界面保存的路径、PATH、桌面应用附带的 CLI 与常见 CLI 安装目录。Windows 支持 `%LOCALAPPDATA%/OpenAI/Codex/bin/<版本目录>/codex.exe`，macOS 支持系统或用户 Applications 中的 Codex.app；桌面版本目录变化后重新检测即可发现。候选程序必须能返回有效的 `codex-cli` 版本，Windows 的 npm/pnpm 启动脚本通过对应 JS 入口运行，不需要启用 shell。
 
-自动发现失败时，在“新建 Codex Agent → Codex 路径设置”填写完整路径并点击“保存并检测”。路径保存在 Isles 的 `config.toml` 的 `[codex].binary_path`，所有 Agent 共用，服务重启后保留；留空删除该项并恢复自动发现。环境变量覆盖项优先于界面设置，填错的显式路径会报告错误而不静默切换安装。保存后立即刷新检测，更改路径影响后续启动，不中断正在执行的原生进程，也不改变已有 session 绑定。
+自动发现失败时，在“新建 Agent → Codex 路径设置”填写完整路径并点击“保存并检测”。路径保存在 Isles 的 `config.toml` 的 `[codex].binary_path`，所有 Agent 共用，服务重启后保留；留空删除该项并恢复自动发现。环境变量覆盖项优先于界面设置，填错的显式路径会报告错误而不静默切换安装。保存后立即刷新检测，更改路径影响后续启动，不中断正在执行的原生进程，也不改变已有 session 绑定。
 
 建议使用 Node.js 24.15+ LTS，也支持 Node.js 26；具体范围见根目录 `package.json`。项目使用 pnpm 12.4.1，并保留依赖锁文件以便重现安装。
 
@@ -33,7 +37,7 @@ pnpm dev
 
 打开 [本地 Web](http://127.0.0.1:5173)。Vite 将 `/api` 代理到 [本地服务](http://127.0.0.1:4310/api/health)。开发服务均只监听 `127.0.0.1`。
 
-本机需要已安装并完成原生认证的 Codex CLI。当前协议验证基线为 `codex-cli 0.159.2`，依据 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server) 与该版本生成的类型实现，使用 `instructionSources` 校验规则文件加载。升级 CLI 后应重新验证协议。Web 创建表单从真实 `model/list` 读取可用模型和推理等级。
+本机需要已安装并完成原生认证的 Codex CLI。当前协议验证基线为 `codex-cli 0.160.0`，依据 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server) 与该版本生成的类型实现，使用 `instructionSources` 校验规则文件加载。升级 CLI 后应重新验证协议。Web 创建表单从真实 `model/list` 读取可用模型和推理等级。
 
 配置默认保存在 `~/.Isles/config.toml`；`~` 表示当前用户主目录。最小配置为：
 
@@ -100,7 +104,7 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-`pnpm check` 包含格式、ESLint、类型检查、服务测试与生产构建。独立语义 fake adapter 验证 Runtime 的协议无关派发、相同 session ID 跨 harness 的隔离、注册约束和生命周期；Codex 原生协议模拟验证 adapter 的参数、事件及问题转换。既有测试覆盖规则文件维护与加载校验、文本格式与正文转义、频道序号与回复、即时唤醒、串行队列、MCP 接收去重、暂停与成员权限、停止/恢复、待核对、问题关联和进程锁。浏览器测试使用独立临时数据目录及 `54310`/`55173` 端口，通过真实 REST/SSE/MCP 验证页面链路，原生模型执行采用测试专用模拟 adapter；生产入口不会启用它。本轮最终检查和真实 Codex 回归结果见 [Harness 适配层验收](docs/harness-adapter-acceptance.md)，模拟验证不代表新 harness 已接入。
+`pnpm check` 包含格式、ESLint、类型检查、服务测试与生产构建。独立语义 fake adapter 验证 Runtime 的协议无关派发、相同 session ID 跨 harness 的隔离、注册约束和生命周期；Codex 原生协议模拟验证 adapter 的参数、事件及问题转换。既有测试覆盖规则文件维护与加载校验、文本格式与正文转义、频道序号与回复、即时唤醒、串行队列、MCP 接收去重、暂停与成员权限、停止/恢复、待核对、问题关联和进程锁。浏览器测试使用独立临时数据目录及 `54310`/`55173` 端口，通过真实 REST/SSE/MCP 验证页面链路，原生模型执行采用测试专用模拟 adapter；生产入口不会启用它。适配层阶段的检查和真实 Codex 回归结果见 [Harness 适配层验收](docs/harness-adapter-acceptance.md)；本次 steer 的最终结果另在 [Steer 投递验收](docs/steer-delivery-acceptance.md) 记录。模拟验证不代表新 harness 已接入。
 
 可选执行本机版本对应的类型生成检查（不调用模型）：
 
@@ -135,7 +139,7 @@ pnpm db:generate
 pnpm db:migrate
 ```
 
-schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 `apps/server/migrations/`。上述命令用于生成和应用当前基线；启动及显式命令重复执行不会重建同版本数据，显式命令要求数据目录未被服务占用。发布 v1 前，schema 变更更新全新基线，不增加旧版本数据升级路径。
+schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 `apps/server/migrations/`。本次基线增加 Agent 的 `steerEnabled` 设置和 `steer_batches` 投递批次记录。上述命令用于生成和应用当前基线；启动及显式命令重复执行不会重建同版本数据，显式命令要求数据目录未被服务占用。发布 v1 前，schema 变更更新全新基线，不增加旧版本数据升级路径；不会自动升级、清空或清理已有用户数据库。旧版本数据的清理由用户在停止旧服务后手动处理。
 
 ## 本机接口
 
@@ -144,7 +148,7 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 | `GET /api/harnesses`                                                          | 已注册的 harness 目录与能力声明；当前只返回 Codex。                                               |
 | `GET /api/harnesses/:id/status`、`GET /api/harnesses/:id/models`              | 所选 harness 的版本、认证可用性与实际模型配置。                                                   |
 | `GET/PUT /api/codex/config`                                                   | 读取/保存 TOML 中的 Codex 可执行路径；响应包含 `configFilePath`，传入 `null` 删除 `binary_path`。 |
-| `GET/POST /api/agents`、`GET/PATCH/DELETE /api/agents/:id`                    | 列表、创建、详情、修改名称/模型/推理等级/拉群权限，以及保留历史的删除。                           |
+| `GET/POST /api/agents`、`GET/PATCH/DELETE /api/agents/:id`                    | 列表、创建、详情、修改名称/模型/推理等级/拉群权限/实时收信，以及保留历史的删除。                  |
 | `POST /api/agents/:id/stop`、`POST /api/agents/:id/resume`                    | 持久停止及原 thread 恢复。                                                                        |
 | `POST /api/agents/:id/questions/:questionId/answer`                           | 仅向仍有效的原生请求回答。                                                                        |
 | `GET/POST /api/channels`、`GET/PATCH /api/channels/:id`                       | 频道列表（含成员与最后一条消息）、建群、频道快照、群改名与暂停/继续。                             |
@@ -156,17 +160,17 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 
 普通事件页的 `cursor` 是本页最后返回 ID，`latestCursor` 是当前库的最大 ID；续读使用 `cursor`。SSE 断线自动重连，Web 同时补读权威快照以恢复聊天与状态。原生文本不会自动进入正式聊天。
 
-创建 Agent 必须传入已注册的 `harness`，Web 从目录动态读取选项，仅展示实际接入项。模型和推理等级来自所选 adapter 的原生目录，不预设其他 harness。原 Codex 状态/模型路由已移除，不提供兼容别名；Codex 路径设置继续使用 `/api/codex/config`。
+创建 Agent 必须传入已注册的 `harness`；`steerEnabled` 可省略，默认 `false`，PATCH 可单独更新该字段。Web 从目录动态读取选项，仅展示实际接入项。模型和推理等级来自所选 adapter 的原生目录，不预设其他 harness。原 Codex 状态/模型路由已移除，不提供兼容别名；Codex 路径设置继续使用 `/api/codex/config`。
 
 `GET /api/agents` 默认排除已删除 Agent；`?includeDeleted=true` 用于历史发送者目录。Agent PATCH 仅更新提供的字段，空请求或不支持的模型/等级返回 `400`；不接受修改 harness、ID、工作区或 thread。DELETE 成功返回已删除 Agent，重复删除保持相同状态。已删除 Agent 的详情仍可读取，编辑/停止/恢复返回 `410`，私聊写入返回 `409`，MCP 请求返回 `401`。
 
-API 与存储中的 `threadId` 表示 adapter 返回的不透明原生 session ID，不要求所有 harness 使用 Codex thread 语义。绑定按 `(harness, nativeHome, threadId)` 区分；同一 Agent 不能静默替换绑定。此轮只更新当前数据库基线，不迁移、清理或搬移现有 Codex 数据。
+API 与存储中的 `threadId` 表示 adapter 返回的不透明原生 session ID，不要求所有 harness 使用 Codex thread 语义。绑定按 `(harness, nativeHome, threadId)` 区分；同一 Agent 不能静默替换绑定。本次更新全新数据库基线以保存 steer 偏好与批次，不迁移、清理或搬移现有 Codex 数据。
 
 `GET /api/channels` 默认排除已删除群；`?includeDeleted=true` 包含保留的群历史。频道响应增加 `deletedAt`，未删除频道为 `null`。群 PATCH 仅接受名称与暂停状态，空请求返回 `400`；DELETE 返回删除后的频道，重复删除幂等，私聊 DELETE 返回 `400`。已删除群的详情和历史仍可由人类读取，改名、暂停/继续和成员修改返回 `410`，发消息返回 `409`；Agent 的 MCP 调用拒绝读写该群。删除状态记录在永久保留的 `group_deleted` 事件中，不能当作普通 SSE 回放历史清理。
 
 消息对象以 `channelId` + `seq` 定位，不再包含消息 `id`；`replyTo` 为同频道数字序号，执行输入为 `messageSeqs`。MCP 发言、收信和历史工具还接受 `channelId: "private"`，由服务端解析为调用 Agent 自己的私聊频道。完整字段、正文边界和分页标记见[消息协议](docs/message-protocol.md)。
 
-普通消息中的 JSON 引号名称和 `#` 短前缀是显示标签，不是工具地址。向某个名称的群发言，先用 `list_channels` 确认名称、成员及完整 ID，再传入 `channelId`；提及某个 Agent，先用 `list_agents` 取完整 ID，再传入 `mentions`。目录和群管理结果保留完整 ID、名称及配置，MCP `send_message` 成功只返回 `{ "seq": N }`。改名后重新查询目录；历史头部使用当前存储名称，已删除发送者仍可读，原始作者的内部 ID 不变。同名消歧包含已删除的历史 Agent；群名仅在接收 Agent 已加入的群之间比较。REST 对象和数据库 schema 不变。
+普通消息中的 JSON 引号名称和 `#` 短前缀是显示标签，不是工具地址。向某个名称的群发言，先用 `list_channels` 确认名称、成员及完整 ID，再传入 `channelId`；提及某个 Agent，先用 `list_agents` 取完整 ID，再传入 `mentions`。目录和群管理结果保留完整 ID、名称及配置，MCP `send_message` 成功只返回 `{ "seq": N }`。改名后重新查询目录；历史头部使用当前存储名称，已删除发送者仍可读，原始作者的内部 ID 不变。同名消歧包含已删除的历史 Agent；群名仅在接收 Agent 已加入的群之间比较。名称标签规则只改变模型消息的呈现，不另增寻址字段；steer 字段与批次基线按前述接口和数据政策处理。
 
 ## 工程结构
 
@@ -182,6 +186,7 @@ API 与存储中的 `threadId` 表示 adapter 返回的不透明原生 session I
 - [需求文档](docs/requirements.md)
 - [架构设计](docs/architecture.md)
 - [Harness 适配层验收](docs/harness-adapter-acceptance.md)
+- [Steer 投递验收](docs/steer-delivery-acceptance.md)
 - [实现计划](docs/implementation-plan.md)
 - [M2 实施计划](docs/m2-implementation-plan.md)
 - [消息协议](docs/message-protocol.md)

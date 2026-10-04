@@ -1,4 +1,4 @@
-import type { Agent } from '@isles/contracts';
+import type { Agent, HarnessCapabilities } from '@isles/contracts';
 import { useQuery, type QueryClient } from '@tanstack/vue-query';
 import { computed, toValue, type MaybeRefOrGetter } from 'vue';
 import { fetchHealth } from './health';
@@ -18,6 +18,20 @@ export function useHarnessName(id: MaybeRefOrGetter<string>) {
     () =>
       harnesses.data.value?.harnesses.find((harness) => harness.id === toValue(id))?.displayName ??
       toValue(id),
+  );
+}
+
+export function useHarnessCapability(
+  id: MaybeRefOrGetter<string>,
+  capability: keyof HarnessCapabilities,
+) {
+  const harnesses = useHarnesses();
+  return computed(() =>
+    Boolean(
+      harnesses.data.value?.harnesses.find((harness) => harness.id === toValue(id))?.capabilities[
+        capability
+      ],
+    ),
   );
 }
 

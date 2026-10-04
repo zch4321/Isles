@@ -31,6 +31,7 @@ import {
   questions,
   runItems,
   runs,
+  steerBatches,
 } from './schema.js';
 
 export type AgentRecord = typeof agents.$inferSelect & { channelId: string };
@@ -44,6 +45,7 @@ type AgentUpdate = Partial<
     | 'error'
     | 'threadCreationAttempted'
     | 'canCreateGroups'
+    | 'steerEnabled'
     | 'name'
     | 'model'
     | 'reasoningEffort'
@@ -58,6 +60,7 @@ export interface NewAgent {
   model: string;
   reasoningEffort: string;
   canCreateGroups: boolean;
+  steerEnabled?: boolean;
   /** Native storage scope of the Agent's fixed session. */
   nativeHome: string;
 }
@@ -240,7 +243,7 @@ export class Store {
         .where(
           and(
             eq(deliveries.agentId, id),
-            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'accepted']),
+            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'steering', 'accepted']),
           ),
         )
         .returning({ channelId: deliveries.channelId })
@@ -257,6 +260,16 @@ export class Store {
         .where(and(eq(questions.agentId, id), eq(questions.status, 'pending')))
         .returning({ id: questions.id })
         .all();
+      for (const batch of this.db
+        .select({ runId: steerBatches.runId })
+        .from(steerBatches)
+        .where(and(eq(steerBatches.agentId, id), eq(steerBatches.status, 'pending')))
+        .all())
+        this.settlePendingSteers(
+          batch.runId,
+          'cancelled',
+          'Agent 已删除，未确认的 steer 不再投递。',
+        );
       this.event('agent', { agentId: id }, update);
       for (const channel of joined) {
         if (channel.kind === 'group')
@@ -422,7 +435,7 @@ export class Store {
         .where(
           and(
             eq(deliveries.channelId, id),
-            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'accepted']),
+            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'steering', 'accepted']),
           ),
         )
         .returning({ agentId: deliveries.agentId })
@@ -497,7 +510,7 @@ export class Store {
           and(
             eq(deliveries.channelId, id),
             eq(deliveries.agentId, agentId),
-            eq(deliveries.status, 'queued'),
+            inArray(deliveries.status, ['queued', 'skipped', 'steering']),
           ),
         )
         .run();
@@ -551,7 +564,9 @@ export class Store {
   }
   /** Record only the messages actually returned, without changing existing run outcomes. */
   private recordReceipt(agentId: string, refs: MessageRef[]) {
-    refs = refs.filter((ref) => !this.groupDeletedAt(ref.channelId));
+    refs = refs.filter(
+      (ref) => !this.groupDeletedAt(ref.channelId) && this.isMember(ref.channelId, agentId),
+    );
     if (!refs.length) return;
     const updated = this.db
       .update(deliveries)
@@ -734,85 +749,239 @@ export class Store {
         .get(),
     );
   }
-  /**
-   * Claims the merged input for one turn: per unpaused channel, the most recent unread
-   * messages plus all unread mentions (every user message in a private chat), and marks
-   * the rest skipped. Returns undefined when there is nothing to submit.
-   */
+  /** Read only queued deliveries; initial turns and steering share the same trim policy. */
+  private selectQueued(agentId: string) {
+    const rows = this.db
+      .select({ message: messages, channel: channels })
+      .from(deliveries)
+      .innerJoin(messages, deliveryMessageJoin)
+      .innerJoin(channels, eq(deliveries.channelId, channels.id))
+      .innerJoin(
+        channelMembers,
+        and(eq(channelMembers.channelId, channels.id), eq(channelMembers.agentId, agentId)),
+      )
+      .where(
+        and(
+          eq(deliveries.agentId, agentId),
+          eq(deliveries.status, 'queued'),
+          eq(channels.paused, false),
+          this.liveChannel(),
+        ),
+      )
+      .orderBy(asc(channels.createdAt), asc(messages.seq))
+      .all();
+    if (!rows.length) return undefined;
+    const byChannel = new Map<string, { channel: ChannelRecord; rows: typeof rows }>();
+    for (const row of rows) {
+      const entry = byChannel.get(row.channel.id) ?? { channel: row.channel, rows: [] };
+      entry.rows.push(row);
+      byChannel.set(row.channel.id, entry);
+    }
+    const included: MessageRef[] = [];
+    const skipped: MessageRef[] = [];
+    const claims: { channel: ChannelRecord; refs: MessageRef[]; skipped: number }[] = [];
+    for (const { channel, rows: unread } of byChannel.values()) {
+      const refs: MessageRef[] = [];
+      let skippedHere = 0;
+      unread.forEach(({ message }, index) => {
+        const addressed =
+          channel.kind === 'private'
+            ? message.sender === 'user'
+            : (JSON.parse(message.mentions) as string[]).includes(agentId);
+        if (addressed || index >= unread.length - RECENT_PER_CHANNEL) refs.push(message);
+        else {
+          skipped.push(message);
+          skippedHere++;
+        }
+      });
+      included.push(...refs);
+      claims.push({ channel, refs, skipped: skippedHere });
+    }
+    return { rows, included, skipped, claims };
+  }
+  private markClaim(
+    agentId: string,
+    refs: MessageRef[],
+    set: Partial<typeof deliveries.$inferInsert>,
+  ) {
+    if (refs.length)
+      this.db
+        .update(deliveries)
+        .set({ ...set, updatedAt: now() })
+        .where(
+          and(eq(deliveries.agentId, agentId), eq(deliveries.status, 'queued'), deliveryRefs(refs)),
+        )
+        .run();
+  }
+  private claimedInput(
+    selection: NonNullable<ReturnType<Store['selectQueued']>>,
+  ): ClaimedChannel[] {
+    const messagesByKey = new Map(
+      this.withDeliveries(selection.rows.map((r) => r.message)).map((m) => [messageKey(m), m]),
+    );
+    return selection.claims.map((claim) => ({
+      channel: claim.channel,
+      messages: claim.refs.map((m) => messagesByKey.get(messageKey(m))!),
+      skipped: claim.skipped,
+    }));
+  }
+  /** Atomically claim one initial input using the same policy as in-turn steering. */
   startRun(agentId: string, threadId: string): { run: Run; input: ClaimedChannel[] } | undefined {
     return this.change(() => {
-      const rows = this.db
-        .select({ message: messages, channel: channels })
-        .from(deliveries)
-        .innerJoin(messages, deliveryMessageJoin)
-        .innerJoin(channels, eq(deliveries.channelId, channels.id))
-        .where(
-          and(
-            eq(deliveries.agentId, agentId),
-            eq(deliveries.status, 'queued'),
-            eq(channels.paused, false),
-            this.liveChannel(),
-          ),
-        )
-        .orderBy(asc(channels.createdAt), asc(messages.seq))
-        .all();
-      if (!rows.length) return undefined;
-      const byChannel = new Map<string, { channel: ChannelRecord; rows: typeof rows }>();
-      for (const row of rows) {
-        const entry = byChannel.get(row.channel.id) ?? { channel: row.channel, rows: [] };
-        entry.rows.push(row);
-        byChannel.set(row.channel.id, entry);
-      }
-      const included: MessageRef[] = [];
-      const skipped: MessageRef[] = [];
-      const claims: { channel: ChannelRecord; refs: MessageRef[]; skipped: number }[] = [];
-      for (const { channel, rows: unread } of byChannel.values()) {
-        const refs: MessageRef[] = [];
-        let skippedHere = 0;
-        unread.forEach(({ message }, index) => {
-          const addressed =
-            channel.kind === 'private'
-              ? message.sender === 'user'
-              : (JSON.parse(message.mentions) as string[]).includes(agentId);
-          if (addressed || index >= unread.length - RECENT_PER_CHANNEL) refs.push(message);
-          else {
-            skipped.push(message);
-            skippedHere++;
-          }
-        });
-        included.push(...refs);
-        claims.push({ channel, refs, skipped: skippedHere });
-      }
+      const selection = this.selectQueued(agentId);
+      if (!selection) return undefined;
       const id = randomUUID();
       this.db
         .insert(runs)
         .values({ id, agentId, threadId, status: 'starting', createdAt: now() })
         .run();
-      const mark = (refs: MessageRef[], set: Partial<typeof deliveries.$inferInsert>) => {
-        if (refs.length)
-          this.db
-            .update(deliveries)
-            .set({ ...set, updatedAt: now() })
-            .where(and(eq(deliveries.agentId, agentId), deliveryRefs(refs)))
-            .run();
-      };
-      mark(included, { status: 'submitting', runId: id });
-      mark(skipped, { status: 'skipped' });
+      this.markClaim(agentId, selection.included, { status: 'submitting', runId: id });
+      this.markClaim(agentId, selection.skipped, { status: 'skipped' });
       this.event('run', { agentId }, { runId: id });
-      for (const claim of claims)
+      for (const claim of selection.claims)
         this.event('delivery', { agentId, channelId: claim.channel.id }, { runId: id });
-      const messagesByKey = new Map(
-        this.withDeliveries(rows.map((r) => r.message)).map((m) => [messageKey(m), m]),
-      );
       return {
         run: this.getRun(id),
-        input: claims.map((claim) => ({
-          channel: claim.channel,
-          messages: claim.refs.map((m) => messagesByKey.get(messageKey(m))!),
-          skipped: claim.skipped,
-        })),
+        input: this.claimedInput(selection),
       };
     });
+  }
+  claimSteer(
+    agentId: string,
+    runId: string,
+    turnId: string,
+  ): { id: string; input: ClaimedChannel[] } | undefined {
+    return this.change(() => {
+      const agent = this.getAgent(agentId);
+      const run = this.db.select().from(runs).where(eq(runs.id, runId)).get();
+      if (
+        !agent.steerEnabled ||
+        agent.desiredState !== 'running' ||
+        agent.status !== 'running' ||
+        !run ||
+        run.agentId !== agentId ||
+        run.turnId !== turnId ||
+        run.finishedAt ||
+        !['running', 'waiting'].includes(run.status)
+      )
+        return undefined;
+      const selection = this.selectQueued(agentId);
+      if (!selection) return undefined;
+      const id = randomUUID();
+      // Persist only addressing metadata, never a second copy of message bodies or credentials.
+      const refs = (items: MessageRef[]) => items.map(({ channelId, seq }) => ({ channelId, seq }));
+      this.db
+        .insert(steerBatches)
+        .values({
+          id,
+          agentId,
+          runId,
+          turnId,
+          status: 'pending',
+          included: JSON.stringify(refs(selection.included)),
+          skipped: JSON.stringify(refs(selection.skipped)),
+          createdAt: now(),
+        })
+        .run();
+      this.markClaim(agentId, selection.included, {
+        status: 'steering',
+        runId,
+        turnId,
+        steerId: id,
+      });
+      this.markClaim(agentId, selection.skipped, { status: 'skipped', runId, turnId, steerId: id });
+      for (const claim of selection.claims)
+        this.event(
+          'delivery',
+          { agentId, channelId: claim.channel.id },
+          { runId, steerId: id, status: 'steering' },
+        );
+      return { id, input: this.claimedInput(selection) };
+    });
+  }
+  getSteer(id: string) {
+    const row = this.db.select().from(steerBatches).where(eq(steerBatches.id, id)).get();
+    if (!row) throw new HttpError(404, 'Steer 批次不存在');
+    return {
+      ...row,
+      included: JSON.parse(row.included) as MessageRef[],
+      skipped: JSON.parse(row.skipped) as MessageRef[],
+    };
+  }
+  private settleSteer(
+    id: string,
+    status: 'accepted' | 'rejected' | 'uncertain',
+    error: string | null,
+    delivery: DeliveryStatus,
+  ) {
+    const batch = this.getSteer(id);
+    if (batch.status !== 'pending') return;
+    this.db
+      .update(steerBatches)
+      .set({ status, error, finishedAt: now() })
+      .where(eq(steerBatches.id, id))
+      .run();
+    const restored = status === 'rejected';
+    const changed = this.db
+      .update(deliveries)
+      .set({
+        status: delivery,
+        ...(restored ? { runId: null, turnId: null, steerId: null } : {}),
+        updatedAt: now(),
+      })
+      .where(
+        and(
+          eq(deliveries.steerId, id),
+          inArray(deliveries.status, restored ? ['steering', 'skipped'] : ['steering']),
+        ),
+      )
+      .returning({ channelId: deliveries.channelId })
+      .all();
+    for (const channelId of new Set(changed.map((d) => d.channelId)))
+      this.event(
+        'delivery',
+        { agentId: batch.agentId, channelId },
+        { runId: batch.runId, steerId: id, status: delivery },
+      );
+  }
+  acceptSteer(id: string, acceptedTurnId: string) {
+    this.change(() => {
+      const batch = this.getSteer(id);
+      if (batch.status !== 'pending') return;
+      if (batch.turnId !== acceptedTurnId)
+        throw new HttpError(409, 'Steer 确认的原生 turn 与目标不符');
+      const run = this.db.select().from(runs).where(eq(runs.id, batch.runId)).get()!;
+      const terminal: Partial<Record<RunStatus, DeliveryStatus>> = {
+        completed: 'completed',
+        interrupted: 'cancelled',
+        failed: 'failed',
+        uncertain: 'uncertain',
+      };
+      this.settleSteer(
+        id,
+        'accepted',
+        null,
+        run.finishedAt ? (terminal[run.status] ?? 'uncertain') : 'accepted',
+      );
+    });
+  }
+  rejectSteer(id: string, error: string) {
+    this.change(() => this.settleSteer(id, 'rejected', error, 'queued'));
+  }
+  uncertainSteer(id: string, error: string) {
+    this.change(() => this.settleSteer(id, 'uncertain', error, 'uncertain'));
+  }
+  private settlePendingSteers(
+    runId: string,
+    delivery: 'cancelled' | 'uncertain',
+    error: string | null,
+  ) {
+    const batches = this.db
+      .select({ id: steerBatches.id })
+      .from(steerBatches)
+      .where(and(eq(steerBatches.runId, runId), eq(steerBatches.status, 'pending')))
+      .all();
+    for (const batch of batches) this.settleSteer(batch.id, 'uncertain', error, delivery);
   }
   acceptRun(runId: string, turnId: string) {
     this.change(() => {
@@ -844,6 +1013,10 @@ export class Store {
   ) {
     this.change(() => {
       const run = this.getRun(runId);
+      // Completion cannot acknowledge a pending steer. Stop/shutdown must settle it,
+      // including when the native completion arrived before its submission ACK.
+      if (delivery === 'cancelled' || delivery === 'uncertain')
+        this.settlePendingSteers(runId, delivery, error);
       if (run.finishedAt) return;
       this.db
         .update(runs)
@@ -873,13 +1046,22 @@ export class Store {
     const row = this.db.select().from(runs).where(eq(runs.id, id)).get();
     if (!row) throw new HttpError(404, '执行不存在');
     const inputs: Run['inputs'] = [];
+    const steerInputs = new Map(
+      this.db
+        .select({ id: steerBatches.id, included: steerBatches.included })
+        .from(steerBatches)
+        .where(eq(steerBatches.runId, id))
+        .all()
+        .map((b) => [b.id, new Set((JSON.parse(b.included) as MessageRef[]).map(messageKey))]),
+    );
     for (const d of this.db
-      .select({ channelId: deliveries.channelId, seq: deliveries.seq })
+      .select({ channelId: deliveries.channelId, seq: deliveries.seq, steerId: deliveries.steerId })
       .from(deliveries)
       .innerJoin(messages, deliveryMessageJoin)
       .where(eq(deliveries.runId, id))
       .orderBy(asc(messages.createdAt), asc(messages.seq))
       .all()) {
+      if (d.steerId && !steerInputs.get(d.steerId)?.has(messageKey(d))) continue;
       const group = inputs.find((i) => i.channelId === d.channelId);
       if (group) group.messageSeqs.push(d.seq);
       else inputs.push({ channelId: d.channelId, messageSeqs: [d.seq] });
@@ -1018,6 +1200,39 @@ export class Store {
     };
   }
   recoverOnBoot() {
+    // Pending ACKs also exist after a normal native completion. They must never fall
+    // through the active-run query and become silently eligible for another input.
+    const pendingSteers = this.db
+      .select({ id: steerBatches.id, agentId: steerBatches.agentId })
+      .from(steerBatches)
+      .where(eq(steerBatches.status, 'pending'))
+      .all();
+    // Batch outcome and the Agent's recovery barrier must persist together: another
+    // crash between them must not turn a completed run's uncertain input into a resume.
+    this.change(() => {
+      for (const batch of pendingSteers)
+        this.settleSteer(
+          batch.id,
+          'uncertain',
+          '服务在 steer 确认持久化前退出，原生结果待核对；不会自动重投。',
+          'uncertain',
+        );
+      for (const agentId of new Set(pendingSteers.map((b) => b.agentId))) {
+        const agent = this.getAgent(agentId);
+        if (agent.status !== 'deleted' && agent.desiredState === 'running') {
+          const update = {
+            status: 'error' as const,
+            error: '上次 steer 结果待核对，请查看原生记录后显式恢复。',
+          };
+          this.db
+            .update(agents)
+            .set({ ...update, updatedAt: now() })
+            .where(eq(agents.id, agentId))
+            .run();
+          this.event('agent', { agentId }, update);
+        }
+      }
+    });
     const active = this.db
       .select({ id: runs.id, agentId: runs.agentId })
       .from(runs)
@@ -1034,10 +1249,11 @@ export class Store {
         'uncertain',
         '服务在执行结束前退出，原生结果待核对；不会自动重投。',
       );
-      this.updateAgent(r.agentId, {
-        status: 'error',
-        error: '上次执行结果待核对，请查看原生记录后显式恢复。',
-      });
+      if (this.getAgent(r.agentId).desiredState === 'running')
+        this.updateAgent(r.agentId, {
+          status: 'error',
+          error: '上次执行结果待核对，请查看原生记录后显式恢复。',
+        });
     }
     for (const agent of this.listAgents()) {
       if (agent.desiredState === 'stopped') this.updateAgent(agent.id, { status: 'stopped' });

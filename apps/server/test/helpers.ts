@@ -53,6 +53,7 @@ export class MockClient implements NativeClient {
   closed = false;
   turnId = '';
   threadId: string;
+  private pendingSteers = new Set<(error: Error) => void>();
   constructor(
     readonly agent: AgentRecord,
     readonly handlers: NativeHandlers,
@@ -109,6 +110,34 @@ export class MockClient implements NativeClient {
       this.complete('interrupted');
       return {} as T;
     }
+    if (method === 'turn/steer') {
+      if (this.harness.failSteer === 'reject') throw new NativeRpcError('steer rejected', -32600);
+      if (this.harness.failSteer === 'unknown') throw new Error('steer connection result unknown');
+      if (params.expectedTurnId !== this.turnId)
+        throw new NativeRpcError('different expected turn', -32600);
+      this.harness.steers.push({
+        agentId: this.agent.id,
+        turnId: this.turnId,
+        batchId: params.clientUserMessageId as string,
+        envelope: parseMessageText(
+          (params.input as { text: string }[])[0]!.text,
+          this.agent.channelId,
+          this.agent.id,
+          this.harness.directory(),
+        ),
+      });
+      let rejectClosed: (error: Error) => void = () => {};
+      const closed = new Promise<never>((_resolve, reject) => {
+        rejectClosed = reject;
+        this.pendingSteers.add(rejectClosed);
+      });
+      try {
+        await Promise.race([Promise.resolve(this.harness.onSteer?.(this, params)), closed]);
+        return { turnId: this.turnId } as T;
+      } finally {
+        this.pendingSteers.delete(rejectClosed);
+      }
+    }
     throw new Error(`Unexpected mock request ${method}`);
   }
   complete(status = 'completed') {
@@ -152,6 +181,7 @@ export class MockClient implements NativeClient {
   }
   async close() {
     this.closed = true;
+    for (const reject of this.pendingSteers) reject(new Error('native connection closed'));
   }
 }
 export interface Envelope {
@@ -182,10 +212,14 @@ export class MockHarness {
   persistedThreads = new Set<string>();
   turns = 0;
   inputs: { agentId: string; envelope: Envelope }[] = [];
+  steers: { agentId: string; turnId: string; batchId: string; envelope: Envelope }[] = [];
   failResume = false;
   missingGuidance = false;
   failTurn: 'reject' | 'unknown' | undefined;
+  failSteer: 'reject' | 'unknown' | undefined;
   onTurn: ((client: MockClient, params: Record<string, unknown>) => void) | undefined;
+  onSteer:
+    ((client: MockClient, params: Record<string, unknown>) => void | Promise<void>) | undefined;
   factory: CodexClientFactory = async (agent, handlers, baseUrl) => {
     const client = new MockClient(agent, handlers, this, baseUrl);
     this.clients.push(client);

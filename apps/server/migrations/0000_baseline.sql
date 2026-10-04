@@ -9,6 +9,7 @@ CREATE TABLE `agents` (
 	`thread_id` text,
 	`thread_creation_attempted` integer DEFAULT false NOT NULL,
 	`can_create_groups` integer DEFAULT false NOT NULL,
+	`steer_enabled` integer DEFAULT false NOT NULL,
 	`desired_state` text DEFAULT 'running' NOT NULL,
 	`status` text NOT NULL,
 	`error` text,
@@ -50,15 +51,18 @@ CREATE TABLE `deliveries` (
 	`status` text NOT NULL,
 	`run_id` text,
 	`turn_id` text,
+	`steer_id` text,
 	`updated_at` text NOT NULL,
 	PRIMARY KEY(`channel_id`, `seq`, `agent_id`),
 	FOREIGN KEY (`agent_id`) REFERENCES `agents`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`channel_id`) REFERENCES `channels`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`steer_id`) REFERENCES `steer_batches`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`channel_id`,`seq`) REFERENCES `messages`(`channel_id`,`seq`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE INDEX `deliveries_queue` ON `deliveries` (`agent_id`,`status`);--> statement-breakpoint
 CREATE INDEX `deliveries_run` ON `deliveries` (`run_id`);--> statement-breakpoint
+CREATE INDEX `deliveries_steer` ON `deliveries` (`steer_id`);--> statement-breakpoint
 CREATE TABLE `events` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`type` text NOT NULL,
@@ -123,4 +127,21 @@ CREATE TABLE `runs` (
 	FOREIGN KEY (`agent_id`) REFERENCES `agents`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
-CREATE INDEX `runs_agent` ON `runs` (`agent_id`,`created_at`);
+CREATE INDEX `runs_agent` ON `runs` (`agent_id`,`created_at`);--> statement-breakpoint
+CREATE TABLE `steer_batches` (
+	`id` text PRIMARY KEY NOT NULL,
+	`agent_id` text NOT NULL,
+	`run_id` text NOT NULL,
+	`turn_id` text NOT NULL,
+	`status` text NOT NULL,
+	`included` text NOT NULL,
+	`skipped` text NOT NULL,
+	`error` text,
+	`created_at` text NOT NULL,
+	`finished_at` text,
+	FOREIGN KEY (`agent_id`) REFERENCES `agents`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `steer_batches_run` ON `steer_batches` (`run_id`);--> statement-breakpoint
+CREATE INDEX `steer_batches_pending` ON `steer_batches` (`status`,`agent_id`);

@@ -4,7 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/vue-query';
 import { Check, Copy, LoaderCircle, Pencil, SquareTerminal, Trash2 } from '@lucide/vue';
 import { computed, onBeforeUnmount, ref } from 'vue';
 import { updateAgent } from '@/api/isles';
-import { invalidateAll, useChannels, useHarnessName } from '@/api/queries';
+import { invalidateAll, useChannels, useHarnessName, useHarnessCapability } from '@/api/queries';
 import RunCard from './RunCard.vue';
 import StatusBadge from './StatusBadge.vue';
 import EditAgentDialog from './EditAgentDialog.vue';
@@ -19,6 +19,7 @@ defineEmits<{ deleted: [] }>();
 const queryClient = useQueryClient();
 const channels = useChannels();
 const harnessName = useHarnessName(() => props.agent.harness);
+const supportsSteer = useHarnessCapability(() => props.agent.harness, 'steer');
 const editOpen = ref(false);
 const deleteOpen = ref(false);
 
@@ -46,6 +47,14 @@ const canCreateGroups = computed({
   get: () =>
     permission.isPending.value ? permission.variables.value! : props.agent.canCreateGroups,
   set: (value: boolean) => permission.mutate(value),
+});
+const steering = useMutation({
+  mutationFn: (steerEnabled: boolean) => updateAgent(props.agent.id, { steerEnabled }),
+  onSettled: () => invalidateAll(queryClient),
+});
+const steerEnabled = computed({
+  get: () => (steering.isPending.value ? steering.variables.value! : props.agent.steerEnabled),
+  set: (value: boolean) => steering.mutate(value),
 });
 
 function inputs(run: Run) {
@@ -124,6 +133,33 @@ function inputs(run: Run) {
       <p class="text-xs leading-relaxed text-muted-foreground">
         Agent 在私聊和所有群中始终使用这一个原生会话和工作目录。不同 Agent
         之间不共享对话上下文；原生配置、插件和长期记忆由 {{ harnessName }} 管理。
+      </p>
+    </section>
+
+    <section v-if="agent.status !== 'deleted'" class="border-b p-4">
+      <h3 class="text-[13px] font-semibold">收信设置</h3>
+      <div class="mt-2.5 flex items-start gap-3">
+        <div class="min-w-0 flex-1">
+          <p :id="`steer-${agent.id}`" class="text-[13px] font-medium">忙碌时实时接收（steer）</p>
+          <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            关闭时新消息排队；开启时只向当前执行追加消息，不另开执行。修改立即生效，原生确认接收不表示工作完成。
+          </p>
+          <p v-if="!supportsSteer" class="mt-0.5 text-xs text-muted-foreground">
+            此 harness 不支持 steer，已开启时仍可关闭。
+          </p>
+        </div>
+        <LoaderCircle
+          v-if="steering.isPending.value"
+          class="mt-0.5 size-4 animate-spin text-muted-foreground"
+        />
+        <Switch
+          v-model="steerEnabled"
+          :aria-labelledby="`steer-${agent.id}`"
+          :disabled="steering.isPending.value || (!supportsSteer && !steerEnabled)"
+        />
+      </div>
+      <p v-if="steering.error.value" role="alert" class="mt-2 text-xs text-destructive">
+        {{ steering.error.value.message }}
       </p>
     </section>
 
