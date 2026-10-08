@@ -25,6 +25,9 @@ const fileSchema = z.strictObject({
   codex: z
     .strictObject({ binary_path: binarySchema.optional(), home: pathSchema.optional() })
     .optional(),
+  claude: z
+    .strictObject({ binary_path: binarySchema.optional(), home: pathSchema.optional() })
+    .optional(),
   dev: z.strictObject({ port: portSchema.optional() }).optional(),
 });
 const environmentSchema = z.object({
@@ -34,6 +37,9 @@ const environmentSchema = z.object({
   ISLES_CODEX_BIN: binarySchema.optional(),
   ISLES_CODEX_HOME: pathSchema.optional(),
   CODEX_HOME: pathSchema.optional(),
+  ISLES_CLAUDE_BIN: binarySchema.optional(),
+  ISLES_CLAUDE_HOME: pathSchema.optional(),
+  CLAUDE_CONFIG_DIR: pathSchema.optional(),
 });
 
 const defaultToml = `# Isles configuration. Paths are relative to this file's directory.
@@ -48,6 +54,10 @@ workspace_dir = "workspace"
 [codex]
 # binary_path = "codex"
 # home = "~/.codex"
+
+[claude]
+# binary_path = "claude"
+# home = "~/.claude"
 
 [dev]
 port = 5173
@@ -65,9 +75,11 @@ export interface AppConfig {
   readonly sharedDir: string;
   readonly codexHome: string;
   readonly codexBinaryPath: string | null;
+  readonly claudeHome: string;
+  readonly claudeBinaryPath: string | null;
 }
 
-export interface CodexConfiguration {
+export interface CliConfiguration {
   binaryPath: string | null;
   environmentBinaryPath: string | null;
   configFilePath: string;
@@ -102,6 +114,8 @@ export class ConfigManager {
   private readonly homeDir: string;
   private readonly environmentBinaryPath: string | null;
   private binaryPath: string | null;
+  private readonly claudeEnvironmentBinaryPath: string | null;
+  private claudeBinaryPath: string | null;
 
   constructor(options: ConfigManagerOptions = {}) {
     this.homeDir = resolve(options.homeDir ?? homedir());
@@ -130,6 +144,8 @@ export class ConfigManager {
     const workspaceDir = this.resolvePath(file.paths?.workspace_dir ?? 'workspace', base);
     this.binaryPath = this.resolveBinary(file.codex?.binary_path, base);
     this.environmentBinaryPath = this.resolveBinary(env.ISLES_CODEX_BIN, base);
+    this.claudeBinaryPath = this.resolveBinary(file.claude?.binary_path, base);
+    this.claudeEnvironmentBinaryPath = this.resolveBinary(env.ISLES_CLAUDE_BIN, base);
     this.snapshot = Object.freeze({
       configFilePath,
       host: '127.0.0.1',
@@ -143,6 +159,14 @@ export class ConfigManager {
         base,
       ),
       codexBinaryPath: this.environmentBinaryPath ?? this.binaryPath,
+      claudeHome: this.resolvePath(
+        env.ISLES_CLAUDE_HOME ??
+          file.claude?.home ??
+          env.CLAUDE_CONFIG_DIR ??
+          join(this.homeDir, '.claude'),
+        base,
+      ),
+      claudeBinaryPath: this.claudeEnvironmentBinaryPath ?? this.claudeBinaryPath,
     });
   }
 
@@ -150,7 +174,7 @@ export class ConfigManager {
     return this.snapshot;
   }
 
-  codexConfiguration(): CodexConfiguration {
+  codexConfiguration(): CliConfiguration {
     return {
       binaryPath: this.binaryPath,
       environmentBinaryPath: this.environmentBinaryPath,
@@ -158,12 +182,31 @@ export class ConfigManager {
     };
   }
 
-  async configureCodexBinary(binaryPath: string | null): Promise<CodexConfiguration> {
+  claudeConfiguration(): CliConfiguration {
+    return {
+      binaryPath: this.claudeBinaryPath,
+      environmentBinaryPath: this.claudeEnvironmentBinaryPath,
+      configFilePath: this.current.configFilePath,
+    };
+  }
+
+  configureCodexBinary(binaryPath: string | null): Promise<CliConfiguration> {
+    return this.configureBinary('codex', binaryPath);
+  }
+
+  configureClaudeBinary(binaryPath: string | null): Promise<CliConfiguration> {
+    return this.configureBinary('claude', binaryPath);
+  }
+
+  private async configureBinary(
+    harness: 'codex' | 'claude',
+    binaryPath: string | null,
+  ): Promise<CliConfiguration> {
     const selected = binaryPath === null ? null : binarySchema.safeParse(binaryPath);
     if (selected !== null && !selected.success) {
       throw this.configurationError(
         this.current.configFilePath,
-        'codex.binary_path must be nonempty',
+        `${harness}.binary_path must be nonempty`,
       );
     }
     const value = selected === null ? null : selected.data;
@@ -172,9 +215,9 @@ export class ConfigManager {
     const operation = previous.then(async () => {
       const file = this.readFile(filePath);
       if (value === null) {
-        if (file.codex) delete file.codex.binary_path;
+        if (file[harness]) delete file[harness].binary_path;
       } else {
-        file.codex = { ...file.codex, binary_path: value };
+        file[harness] = { ...file[harness], binary_path: value };
       }
       const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
       try {
@@ -188,12 +231,21 @@ export class ConfigManager {
         await unlink(temporaryPath).catch(() => undefined);
         throw this.configurationError(filePath, `cannot write file: ${String(error)}`);
       }
-      this.binaryPath = this.resolveBinary(value ?? undefined, dirname(filePath));
+      const resolved = this.resolveBinary(value ?? undefined, dirname(filePath));
+      if (harness === 'codex') {
+        this.binaryPath = resolved;
+        this.snapshot = Object.freeze({
+          ...this.snapshot,
+          codexBinaryPath: this.environmentBinaryPath ?? resolved,
+        });
+        return this.codexConfiguration();
+      }
+      this.claudeBinaryPath = resolved;
       this.snapshot = Object.freeze({
         ...this.snapshot,
-        codexBinaryPath: this.environmentBinaryPath ?? this.binaryPath,
+        claudeBinaryPath: this.claudeEnvironmentBinaryPath ?? resolved,
       });
-      return this.codexConfiguration();
+      return this.claudeConfiguration();
     });
     const settled = operation.then(
       () => undefined,

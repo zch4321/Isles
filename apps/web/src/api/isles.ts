@@ -5,7 +5,7 @@ import {
   channelSchema,
   harnessStatusSchema,
   harnessDescriptorSchema,
-  codexConfigurationSchema,
+  cliConfigurationSchema,
   messagePageSchema,
   messageSchema,
   modelSchema,
@@ -49,9 +49,10 @@ export const fetchHarnessStatus = (id: string, refresh = false) =>
     `/harnesses/${encodeURIComponent(id)}/status${refresh ? '?refresh=true' : ''}`,
     harnessStatusSchema,
   );
-export const fetchCodexConfiguration = () => api('/codex/config', codexConfigurationSchema);
-export const saveCodexConfiguration = (binaryPath: string | null) =>
-  api('/codex/config', codexConfigurationSchema, { binaryPath }, 'PUT');
+export const fetchHarnessConfiguration = (id: 'codex' | 'claude') =>
+  api(`/${id}/config`, cliConfigurationSchema);
+export const saveHarnessConfiguration = (id: 'codex' | 'claude', binaryPath: string | null) =>
+  api(`/${id}/config`, cliConfigurationSchema, { binaryPath }, 'PUT');
 export const fetchModels = (id: string) =>
   api(`/harnesses/${encodeURIComponent(id)}/models`, z.object({ models: z.array(modelSchema) }));
 

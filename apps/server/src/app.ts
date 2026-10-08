@@ -4,7 +4,7 @@ import {
   addMembersSchema,
   answerQuestionSchema,
   createAgentSchema,
-  codexConfigurationUpdateSchema,
+  cliConfigurationUpdateSchema,
   createGroupSchema,
   sendMessageSchema,
   updateAgentSchema,
@@ -110,9 +110,8 @@ export async function buildApp(options: AppOptions) {
 
   app.addHook('onClose', async () => {
     try {
-      await runtime.close();
-    } finally {
       database.sqlite.close();
+    } finally {
       releaseDataLock();
     }
   });
@@ -138,8 +137,16 @@ export async function buildApp(options: AppOptions) {
   app.get('/api/codex/config', () => options.config.codexConfiguration());
   app.put('/api/codex/config', async (request) => {
     const adapter = runtime.harnesses.get('codex');
-    const { binaryPath } = codexConfigurationUpdateSchema.parse(request.body);
+    const { binaryPath } = cliConfigurationUpdateSchema.parse(request.body);
     const configuration = await options.config.configureCodexBinary(binaryPath);
+    adapter.invalidate();
+    return configuration;
+  });
+  app.get('/api/claude/config', () => options.config.claudeConfiguration());
+  app.put('/api/claude/config', async (request) => {
+    const adapter = runtime.harnesses.get('claude');
+    const { binaryPath } = cliConfigurationUpdateSchema.parse(request.body);
+    const configuration = await options.config.configureClaudeBinary(binaryPath);
     adapter.invalidate();
     return configuration;
   });
@@ -284,7 +291,12 @@ export async function buildApp(options: AppOptions) {
         if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.write(': heartbeat\n\n');
       }, 15_000);
   });
-  registerMcp(app, runtime);
+  const closeMcpConnections = registerMcp(app, runtime);
+  // Native MCP clients can hold SSE requests open. Release processes and transports
+  // before Fastify waits for the HTTP server's connections to close.
+  app.addHook('preClose', async () => {
+    await Promise.all([runtime.close(), closeMcpConnections()]);
+  });
 
   if (options.webRoot && existsSync(join(options.webRoot, 'index.html'))) {
     try {

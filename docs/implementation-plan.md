@@ -1,16 +1,16 @@
 # Isles 实现计划
 
-> 版本：0.17 · 日期：2026-10-04 · 状态：harness 适配层与按 Agent 配置 steer 已完成并验收；Claude 暂缓
+> 版本：0.18 · 日期：2026-10-08 · 状态：Claude CLI 已接入并通过真实混合群聊验收；Codex steer 保持原行为
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
 ## 1. 已确定的方向
 
 - 采用已讨论的 Vue 3、Vite、TypeScript、shadcn-vue、Tailwind CSS、Fastify、SQLite/Drizzle 和 pnpm workspace。
-- 以官方原生接口为主；现有 **Codex 的 harness 适配层**已完成；本次增加默认关闭的 steer，新增 harness 后续另定。
+- 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex 与 Claude CLI，按能力配置 steer。
 - Codex 是主要接入，首先用它跑通 Agent、固定 session、私聊和多 Agent 协作。
 - Kimi Code 保留为后续候选，本轮不接入；新增 harness 复用业务层与 Runtime，通过 adapter 表达能力差异。
-- 2026-10-03 用户重新考虑 Claude Code 闭源执行核心，Claude Code / Claude Agent SDK 接入暂缓；不安装 SDK，不实现其 adapter。DSH 与第三方 Claude ACP 不进入当前范围。
+- 2026-10-03 用户曾暂缓 Claude，2026-10-08 已恢复并授权本机 CLI 接入；新增 ClaudeAdapter，创建时发送中性用户消息使 session 落盘。DSH 与第三方 Claude ACP 留待后续。
 - M0 已完成。M1 链路验收及 AGENTS.md 原生加载、真实压缩和恢复的补充验收已通过，最新证据见 [基础修复计划](foundation-repair-plan.md)。原 [实施计划](m1-implementation-plan.md)和[验收记录](m1-acceptance.md)保留为历史事实。
 - M2 规则于 2026-09-30 确认，2026-10-02 调整为即时唤醒与 MCP 主动收信；任务与验收标准见 [M2 实施计划](m2-implementation-plan.md)。
 - 产品中的 AI 参与者统一称为 **Agent**（M1 文档中的“对象”）；M1 实施计划和验收记录作为历史记录保留原用词。
@@ -36,16 +36,16 @@
 | Harness 适配层         | 通用契约、注册目录、规范化生命周期与事件；完整抽出既有 Codex 行为。        | 128 项测试、13 项浏览器测试与两套真实 Codex 回归通过，见 [独立验收](harness-adapter-acceptance.md)。            |
 | Agent 实时收信开关     | 默认关闭的 steer 偏好、同 turn 追加、批次结算与 Web 创建/编辑入口。        | 实现完成；完整检查、浏览器与真实原生证据待汇总，见 [Steer 投递验收](steer-delivery-acceptance.md)。             |
 | M3 新 harness 接入     | 通过 adapter 加入既有协作；Kimi Code 保留为后续候选。                      | 适配层验收后另行确定范围，本轮不实施。                                                                          |
-| M4 Claude 接入（暂缓） | 此前计划通过官方 Agent SDK 接入 Claude Code。                              | 因用户重新考虑闭源执行核心而暂缓，不再作为已承诺阶段。                                                          |
+| M4 Claude CLI 接入     | 独立 adapter、固定 session、MCP、原生问答与 Codex 混合协作。               | 已接入；自动化和真实原生验收见 [记录](claude-cli-acceptance.md)。                                               |
 | M5 完整体验与长期运行  | 完善文件共享、生命周期、历史检索、备份和长时间运行体验。                   | 细分范围待讨论。                                                                                                |
 
 消息持久化、权限检查、停止和恢复从相应功能的第一阶段就实现；M5 扩展故障覆盖和体验，不用于推迟基础正确性。
 
-统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前只注册 Codex，本次增加默认关闭的 steer；随后再确定新 harness 接入范围，Kimi 仍是候选，Claude 明确暂缓。
+统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex 与 Claude CLI；Codex 支持默认关闭的 steer，Claude 使用排队与主动收信。Kimi 仍是候选。
 
 配置与目录拆分的验收覆盖优先级、路径解析、数据库/token 位置、Codex 发现及错误、UI 保存与实时检测、工作区稳定性、共享目录和原生规则加载。当前结果为 89 项测试、7 项浏览器测试与两个真实 Codex Agent 的读写/重启验证通过。旧目录清理仍有进程占用及工具审批限制，具体边界见 [验收记录](config-workspace-acceptance.md#4-旧目录清理遗留项)。
 
-当前单用户、本机、Codex 范围的基础闭环可收口：配置和独立工作区、Agent/群聊管理、私聊与群聊、MCP 共享文件协作、持久规则、停止/恢复与固定 thread 已有自动化、浏览器和真实 Codex 证据。群聊管理的检查与边界见 [验收记录](group-management-acceptance.md)。适配层与按 Agent 配置 steer 已完成验收，新增 harness 之后另定；M5 的检索、产物版本、备份和更长时间运行不作为接入前置条件。当前 Codex 或 fake adapter 验证都不能代替其他 harness 的原生能力验收。
+当前单用户、本机、Codex 范围的基础闭环可收口：配置和独立工作区、Agent/群聊管理、私聊与群聊、MCP 共享文件协作、持久规则、停止/恢复与固定 thread 已有自动化、浏览器和真实 Codex 证据。群聊管理的检查与边界见 [验收记录](group-management-acceptance.md)。适配层、按 Agent 配置 steer 与 Claude CLI 接入已完成验收，其他 harness 之后另定；M5 的检索、产物版本、备份和更长时间运行不作为接入前置条件。当前 Codex 或 fake adapter 验证都不能代替其他 harness 的原生能力验收。
 
 ## 3. M0：工程初始化
 
@@ -178,9 +178,19 @@
 
 新增 harness 的真实验收应包含与 Codex 同群完成小任务和交换明确版本产物进行 review；不增加全局强制 review 流水线，也不能用本轮 fake adapter 测试代替真实混合协作。
 
-## 7. M4：Claude Code / Claude Agent SDK（暂缓）
+## 7. M4：Claude Code CLI（已接入）
 
-2026-10-03 用户因重新考虑 Claude Code 闭源执行核心而暂缓此前官方 SDK 接入计划。本轮不安装 SDK、不实现 adapter、不开展三个真实 harness 的混合验收。是否恢复此方向由用户后续决定，旧研究路径保留为背景，不作为实施承诺。
+2026-10-08 用户恢复并授权本机 CLI 接入，创建时发送一条中性用户消息解决空 session。通过独立 ClaudeAdapter 复用通用 Runtime、聊天、权限与存储，直接启动本机 CLI 的常驻双向 stream-json。
+
+- 自动发现 CLI，增加独立路径设置及 `[claude]` TOML 配置；复用原生 home、认证、用户配置、插件与记忆。
+- 原生初始化响应提供模型和 effort 目录；default effort 沿用原生配置。
+- 创建先保存 UUID，发送中性消息并等待内部模型回合成功；工具调用在该阶段被拒绝，结果不生成 Isles 消息或 run。
+- CLAUDE.md 原生导入唯一 AGENTS.md，通过 get_context_usage 校验加载文件，并检查 Isles MCP 连接。
+- 将 replay/started、result、工具和 AskUserQuestion 转为既有平台事件与问答；只恢复原 UUID，失效问题拒绝，未知结果不重投。
+- Claude steer 关闭，忙碌输入排队；保留主动 receive_messages 和原生子代理能力。
+- preClose 释放原生进程与 MCP 流，随后关闭 HTTP 与数据库，覆盖持久 SSE 连接阻塞退出的回归。
+
+macOS 原生私聊、问答、停止/恢复、改名、Codex/Claude 混合群聊、同 session 服务重启和保留历史删除均已通过。自动化、浏览器与真实验证分层记录在 [Claude CLI 验收](claude-cli-acceptance.md)。
 
 ## 8. M5：完整体验与长期运行
 

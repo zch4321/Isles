@@ -58,7 +58,7 @@ export const harnessCapabilitiesSchema = z.object({
 export const harnessDescriptorSchema = z.object({
   id: harnessIdSchema,
   displayName: z.string(),
-  configuration: z.enum(['codex-path']).nullable(),
+  configuration: z.enum(['codex-path', 'claude-path']).nullable(),
   capabilities: harnessCapabilitiesSchema,
 });
 export const createAgentSchema = z
@@ -238,12 +238,12 @@ export const harnessStatusSchema = z.object({
   binaryPath: z.string().nullable(),
   error: z.string().nullable(),
 });
-export const codexConfigurationUpdateSchema = z
+export const cliConfigurationUpdateSchema = z
   .object({
     binaryPath: z.string().trim().min(1).max(32_768).nullable(),
   })
   .strict();
-export const codexConfigurationSchema = codexConfigurationUpdateSchema.extend({
+export const cliConfigurationSchema = cliConfigurationUpdateSchema.extend({
   environmentBinaryPath: z.string().nullable(),
   configFilePath: z.string(),
 });

@@ -6,6 +6,9 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { buildApp } from '../../apps/server/src/app.js';
+import type { Store } from '../../apps/server/src/storage/store.js';
+import { claudeFixture } from '../../apps/server/test/claude-fixture.js';
+import { claudeBrowserAdapter } from './claude.js';
 import { agentRoot } from '../../apps/server/src/runtime/workspace.js';
 import {
   MockHarness,
@@ -27,6 +30,8 @@ const config = new ConfigManager({
   environment: { ISLES_SERVER_PORT: process.env.ISLES_SERVER_PORT ?? '54310' },
 });
 const { dataDir } = config.current;
+const claude = await claudeFixture(root);
+await config.configureClaudeBinary(claude.binary);
 const harness = new MockHarness();
 const tokens = new Map<string, string>();
 const factory = harness.factory;
@@ -39,25 +44,29 @@ harness.factory = async (agent, handlers, baseUrl) => {
 };
 const app = await buildApp({
   config,
-  adapterFactory: codexAdapters(
-    {
-      ...testCatalog,
-      models: async () => [
-        ...(await testCatalog.models()),
-        {
-          id: 'test-model-2',
-          model: 'test-model-2',
-          displayName: '测试模型 2',
-          description: '模拟模型，仅用于编辑验证',
-          supportedReasoningEfforts: ['high', 'max'],
-          defaultReasoningEffort: 'high',
-          isDefault: false,
-        },
-      ],
-    },
-    harness.factory,
-  ),
+  adapterFactory: (workspace, configuration) => [
+    ...codexAdapters(
+      {
+        ...testCatalog,
+        models: async () => [
+          ...(await testCatalog.models()),
+          {
+            id: 'test-model-2',
+            model: 'test-model-2',
+            displayName: '测试模型 2',
+            description: '模拟模型，仅用于编辑验证',
+            supportedReasoningEfforts: ['high', 'max'],
+            defaultReasoningEffort: 'high',
+            isDefault: false,
+          },
+        ],
+      },
+      harness.factory,
+    )(workspace, configuration),
+    claudeBrowserAdapter(workspace, configuration, () => browserStore),
+  ],
 });
+const browserStore: Store = app.isles.store;
 harness.useStore(app.isles.store);
 
 async function callMcp<T>(client: MockClient, name: string, args: Record<string, unknown>) {

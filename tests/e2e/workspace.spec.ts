@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { Agent, Channel, HarnessDescriptor } from '@isles/contracts';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const composer = (page: Page) => page.getByRole('textbox', { name: '消息输入' });
 async function send(page: Page, body: string) {
@@ -37,6 +39,7 @@ test('saves the Codex executable path in the creation dialog and restores automa
   page,
 }, testInfo) => {
   let unavailable = true;
+  const customPath = join(tmpdir(), 'Codex Custom', 'codex.exe');
   await page.route('**/api/harnesses/codex/status*', (route) =>
     unavailable
       ? route.fulfill({
@@ -56,7 +59,7 @@ test('saves the Codex executable path in the creation dialog and restores automa
   const path = page.getByLabel('Codex 可执行文件路径');
   await expect(path).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('未找到本机 Codex');
-  await path.fill('C:\\Codex Custom\\codex.exe');
+  await path.fill(customPath);
   unavailable = false;
   await page.getByRole('button', { name: '保存并检测', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: '路径设置已保存' })).toBeVisible();
@@ -64,7 +67,7 @@ test('saves the Codex executable path in the creation dialog and restores automa
   await page.getByRole('button', { name: '新建 Agent', exact: true }).first().click();
   if (!(await path.isVisible()))
     await page.getByRole('button', { name: 'Codex 路径设置', exact: true }).click();
-  await expect(path).toHaveValue('C:\\Codex Custom\\codex.exe');
+  await expect(path).toHaveValue(customPath);
   await path.fill('');
   const [response] = await Promise.all([
     page.waitForResponse(
@@ -146,7 +149,7 @@ test('switches registered harness catalogs and cached selections without applyin
   const codexSettings = dialog.getByRole('button', { name: 'Codex 路径设置', exact: true });
   const steering = dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
   await expect(harness).toHaveValue('codex');
-  await expect(harness.locator('option')).toHaveText(['Codex', 'Semantic Test']);
+  await expect(harness.locator('option')).toHaveText(['Codex', 'Claude Code', 'Semantic Test']);
   await expect(model).toHaveValue('test-model');
   await expect(effort).toHaveValue('high');
   await expect(codexSettings).toBeVisible();
@@ -997,4 +1000,101 @@ test('appends busy input through steer and displays pending delivery without sta
       .getByTestId('inspector')
       .getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
   ).toHaveAttribute('aria-checked', 'false');
+});
+
+test('creates Claude with independent path/model settings and joins a Codex/Claude group', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto('/');
+  const originalPath = (await (await page.request.get('/api/claude/config')).json())
+    .binaryPath as string;
+  const codexPath = (await (await page.request.get('/api/codex/config')).json()).binaryPath;
+  await page.getByRole('button', { name: '新建 Agent' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
+  await dialog.getByLabel('Harness').selectOption('claude');
+  await expect(dialog.getByLabel('模型', { exact: true })).toHaveValue('test-claude-model');
+  await expect(dialog.getByLabel('推理等级')).toHaveValue('default');
+  await expect(
+    dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
+  ).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Claude Code 路径设置', exact: true }).click();
+  await expect(dialog.getByLabel('Claude Code 可执行文件路径')).toHaveValue(originalPath);
+  await dialog.getByRole('button', { name: '保存并检测', exact: true }).click();
+  await expect(dialog.getByRole('status')).toHaveText('路径设置已保存');
+  expect((await (await page.request.get('/api/codex/config')).json()).binaryPath).toBe(codexPath);
+  await dialog.getByLabel('Harness').selectOption('codex');
+  await expect(dialog.getByLabel('模型', { exact: true })).toHaveValue('test-model');
+  await expect(dialog.getByRole('button', { name: 'Codex 路径设置', exact: true })).toBeVisible();
+  await dialog.getByLabel('Harness').selectOption('claude');
+  await dialog.getByLabel('名称').fill('Claude 浏览器验证');
+  await dialog.getByLabel('推理等级').selectOption('high');
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  expect(created.request().postDataJSON()).toMatchObject({
+    harness: 'claude',
+    model: 'test-claude-model',
+    reasoningEffort: 'high',
+    steerEnabled: false,
+  });
+  const claude = (await created.json()) as Agent;
+  await expect
+    .poll(
+      async () => (await (await page.request.get(`/api/agents/${claude.id}`)).json()).agent.status,
+    )
+    .toBe('ready');
+  const binding = (await (await page.request.get(`/api/agents/${claude.id}`)).json()).agent
+    .threadId;
+  expect(
+    (await (await page.request.get(`/api/channels/${claude.channelId}`)).json()).messages,
+  ).toEqual([]);
+  await page.getByRole('textbox', { name: '消息输入' }).fill('浏览器 Claude 私聊');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+    'Claude MCP 回复：浏览器 Claude 私聊',
+  );
+  await page.getByRole('button', { name: '停止 Agent', exact: true }).click();
+  await expect(page.getByTestId('agent-status')).toHaveText('已停止');
+  await page.getByRole('button', { name: '恢复 Agent', exact: true }).click();
+  await expect(page.getByTestId('agent-status')).toHaveText('可用');
+  expect((await (await page.request.get(`/api/agents/${claude.id}`)).json()).agent.threadId).toBe(
+    binding,
+  );
+
+  const codex = (await (
+    await page.request.post('/api/agents', {
+      data: {
+        harness: 'codex',
+        name: 'Codex 混合浏览器验证',
+        model: 'test-model',
+        reasoningEffort: 'high',
+      },
+    })
+  ).json()) as Agent;
+  await expect
+    .poll(
+      async () => (await (await page.request.get(`/api/agents/${codex.id}`)).json()).agent.status,
+    )
+    .toBe('ready');
+  await page.getByRole('button', { name: '新建群聊', exact: true }).click();
+  await page.getByLabel('群名').fill('浏览器混合群');
+  await page.getByRole('checkbox', { name: /Claude 浏览器验证/ }).check();
+  await page.getByRole('checkbox', { name: /Codex 混合浏览器验证/ }).check();
+  await page.getByRole('button', { name: '创建群聊', exact: true }).click();
+  await page.getByRole('textbox', { name: '消息输入' }).fill('混合群浏览器消息');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  const feed = page.locator('[aria-label="群聊消息"]');
+  await expect(feed.getByRole('article', { name: 'Claude 浏览器验证的消息' })).toContainText(
+    'Claude MCP 回复：混合群浏览器消息',
+  );
+  await expect(feed.getByRole('article', { name: 'Codex 混合浏览器验证的消息' })).toContainText(
+    'MCP 回复：混合群浏览器消息',
+  );
+  expect(errors).toEqual([]);
 });

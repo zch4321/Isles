@@ -42,12 +42,15 @@ describe('ConfigManager startup configuration', () => {
       sharedDir: join(homeDir, '.Isles', 'workspace', 'shared'),
       codexHome: join(homeDir, '.codex'),
       codexBinaryPath: null,
+      claudeHome: join(homeDir, '.claude'),
+      claudeBinaryPath: null,
     });
     const contents = readFileSync(configFilePath, 'utf8');
     expect(parse(contents)).toEqual({
       server: { port: 4310 },
       paths: { data_dir: 'data', workspace_dir: 'workspace' },
       codex: {},
+      claude: {},
       dev: { port: 5173 },
     });
     create();

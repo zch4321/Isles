@@ -1,6 +1,6 @@
 # Isles（群岛）需求文档
 
-> 版本：0.19 · 日期：2026-10-04 · 状态：harness 适配层与按 Agent 配置 steer 已完成并验收；产品文案采用直接、正向表达
+> 版本：0.20 · 日期：2026-10-08 · 状态：Codex 与 Claude CLI 接入已完成；保持固定 session、MCP 协作和按能力配置 steer
 >
 > 本文整理当前讨论中已明确的产品方向、首批接入范围与技术选型。标记为“待确认”的事项不视为已决定的实现方案；未确认的技术栈与排期不作预设。
 >
@@ -22,8 +22,8 @@ Isles 是面向人类与多个 Agent 的聊天协作产品。用户像使用聊�
 - **前端采用 Vue 3、Vite 和 TypeScript**，组件采用 shadcn-vue，样式采用 Tailwind CSS，服务端状态使用 TanStack Vue Query。
 - **后端采用 Node.js 与 Fastify**，通过 pnpm workspace 管理前端、后端及共享协议；浏览器接口采用 REST + SSE。
 - **数据库采用 SQLite，启用 WAL；数据访问采用 Drizzle ORM**，使用配套 Drizzle Kit 管理当前 schema 基线。
-- **当前只接入 Codex，通用 harness 适配层已完成**；本次增加默认关闭的 Agent steer 偏好，保持私聊、群聊与固定 session，新的 harness 随后另行确定。本轮不接入 Kimi 或其他新 harness。
-- **以原生接口为主**。Codex 使用 app-server；Kimi Code 保留为后续候选。用户重新考虑 Claude Code 闭源执行核心后，Claude Code / Claude Agent SDK 接入暂缓，不再作为已承诺阶段。DeepSeek Harness（DSH）不纳入当前范围。
+- **当前接入 Codex 与 Claude Code CLI，通用 harness 适配层已完成**；保持私聊、混合群聊与固定 session。Codex 支持默认关闭的 Agent steer 偏好，Claude 当前采用忙碌排队与 MCP 主动收信。Kimi 留待后续。
+- **以原生接口为主**。Codex 使用 app-server，Claude Code 使用本机 CLI 的双向 stream-json；2026-10-08 用户恢复并授权 Claude CLI 接入，创建时发送一条中性用户消息使 session 落盘。Kimi Code 保留为后续候选。DeepSeek Harness（DSH）不纳入当前范围。
 - Electron 桌面端和 IM 接入留待后续考虑，不纳入首版交付范围。
 - **首版采用单用户、单机部署**：Web 服务与所有 harness 在同一台电脑或服务器上运行，不要求跨机器调度执行。
 - M1 只监听本机，管理页面和 HTTP API 暂不做登录鉴权；Codex 使用 `danger-full-access` 与 `approvalPolicy: never`。远程访问与后续用户鉴权另行设计。
@@ -327,6 +327,8 @@ adapter 必须具备固定 session 恢复（`sessionResume`）、MCP（`mcp`）�
 
 “能连接 MCP”不代表“能自动唤醒已结束的执行轮次”。Isles 的运行管理需要负责新消息触发、排队、恢复和停止。
 
+2026-10-08 Claude CLI 接入确认：每位 Agent 固定一个 UUID，创建时发送中性用户消息并等待模型回合成功，初始化由 adapter 内部处理，不产生 Isles 正式消息或 run。初始化工具调用被拦截，规则继续由工作目录文件原生加载；CLAUDE.md 导入唯一 AGENTS.md，并通过原生上下文目录验证。恢复使用原 UUID，失败显式报告。Claude 路径保存到 `[claude].binary_path`，home 采用 `ISLES_CLAUDE_HOME`、TOML、`CLAUDE_CONFIG_DIR`、`~/.claude` 的优先级；原生用户配置、认证、插件、MCP 与记忆共用。当前支持原生提问与停止，steer 关闭，忙碌消息排队，主动 MCP 收信可用。
+
 ### 8.2 协作工具
 
 通过 MCP 向 Agent 提供一套共同的交流能力，首批候选包括：
@@ -349,9 +351,9 @@ MCP 工具列表按连接 Agent 的权限生成；没有相应权限的 Agent �
 
 **2026-10-03 完成 harness 适配层范围确认；2026-10-04 增加按 Agent 配置的 steer，不新增 harness。** 仅注册 Codex，完整保留已验证的固定 session、消息输入输出、MCP 权限工具列表、工作目录和原生状态管理。本轮不新增真实 harness，独立的语义 fake adapter 用于验证平台不依赖 Codex 协议，不能作为新产品接入成功的证据。
 
-**Kimi Code 保留为后续候选，Claude Code / Claude Agent SDK 暂缓。** 新 harness 在适配层验收后另行确定具体范围，原生接口、版本、配置、规则入口和固定 session 行为均需逐个验证。DSH 和第三方 Claude ACP 不进入当前实施范围。
+**Kimi Code 保留为后续候选；Claude Code CLI 已于 2026-10-08 恢复接入。** Claude 原生模型与 effort 目录、固定 session、规则文件、MCP、问题与混合群聊已分别验证，见 [验收](claude-cli-acceptance.md)。其余新 harness 的原生接口、版本、配置与规则入口仍需逐个验证。DSH 和第三方 Claude ACP 不进入当前实施范围。
 
-后续扩展仍优先考虑模型厂商自己维护、执行核心开源的 harness。用户因重新考虑 Claude Code 的闭源执行核心而撤回当前接入安排；开源适配层不能改变执行核心的开源属性。此前还调研过 Grok Build、Qwen Code、Gemini CLI、Mistral Vibe、ZCode 和 MiniMax Code CLI。
+后续扩展仍优先考虑模型厂商自己维护、执行核心开源的 harness。用户曾于 2026-10-03 暂缓 Claude，2026-10-08 已明确恢复本机 CLI 接入。此方向以用户最新授权为准；开源适配层不改变原生执行核心的属性。此前还调研过 Grok Build、Qwen Code、Gemini CLI、Mistral Vibe、ZCode 和 MiniMax Code CLI。
 
 用户曾举例的 `OpenCode + DeepSeek` 等组合保留为后续候选，不属于首批范围。联系人由实际 harness 与模型组合定义，不要求两者来自同一厂商。
 
@@ -407,7 +409,7 @@ Agent 发布待审查产物或明确提交，邀请使用不同模型的 Agent �
 ## 11. 待确认事项
 
 1. **部署与访问**：技术栈与单用户、单机部署已确定；M1 只监听本机且暂不做管理入口鉴权；后续用户鉴权与远程访问另行设计。Electron 和 IM 留待后续。
-2. **新 harness 接入细节**：适配层已完成；Kimi 是后续候选，Claude 暂缓。后续版本基线、模型配置、规则加载与原生状态隔离需独立验证。
+2. **新 harness 接入细节**：Codex 与 Claude CLI 已接入；Kimi 是后续候选。后续版本基线、模型配置、规则加载与原生状态隔离需独立验证。
 3. **Agent 管理与权限细节**：当前已支持名称/模型/推理等级/拉群权限修改及保留数据的删除，编辑不能替换 harness。归档、撤销删除、永久清理，以及 Agent 之间私聊权限的细分仍待确认。
 4. **消息调度**：steer 按 Agent 默认关闭，可在支持的 harness 上开启并随时关闭；关闭或 unsupported 时忙碌排队，开启时向固定 session 的当前 turn 追加。2026-10-02 确认取消防抖，MCP 主动收信与历史读取共用接收记录，仍立即返回，不提供阻塞等待工具或 wait 参数。验证与故障边界见 [Steer 投递验收](steer-delivery-acceptance.md)。
 5. **发送机制**：正式发言统一 MCP、原生输出只在执行详情展示已确定；后续群聊仍需明确回复关系与交互细节。
@@ -421,7 +423,7 @@ Agent 发布待审查产物或明确提交，邀请使用不同模型的 Agent �
 
 ## 12. 当前范围边界
 
-- 首版为 Web，当前只注册 Codex；适配层已完成，Agent steer 开关默认关闭，新增 harness 后续再定。Kimi 为后续候选，Claude Code / Claude Agent SDK 暂缓；DSH、Electron、IM 留待后续。
+- 首版为 Web，当前注册 Codex 与 Claude Code CLI；Agent steer 开关默认关闭，Claude 当前不声明 steer 能力。Kimi 为后续候选；DSH、Electron、IM 留待后续。
 - 首版为单用户、单机部署，Web 服务与 harness 在同一台电脑或服务器上运行；多用户和跨机器执行不纳入首版。
 - 当前阶段仅用户能创建 Agent；Agent 之间的拉群和私聊能力按 Agent 权限开放。
 - 不把固定角色扮演作为基础交互。

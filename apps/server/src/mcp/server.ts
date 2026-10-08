@@ -29,6 +29,8 @@ const messageChannel = z
   );
 
 export function registerMcp(app: FastifyInstance, runtime: Runtime) {
+  const transports = new Set<StreamableHTTPServerTransport>();
+  let closing = false;
   app.route<{ Params: { id: string } }>({
     method: ['GET', 'POST', 'DELETE'],
     url: '/mcp/:id',
@@ -225,12 +227,22 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
       // SDK 1.31's Node transport declares optional callback values differently
       // under exactOptionalPropertyTypes; its runtime implements Transport.
       await server.connect(transport as Transport);
+      if (closing) {
+        await server.close();
+        throw new HttpError(503, 'Isles 正在关闭，请稍后重试');
+      }
+      transports.add(transport);
       reply.hijack();
       reply.raw.once('close', () => {
+        transports.delete(transport);
         void transport.close();
         void server.close();
       });
       await transport.handleRequest(request.raw, reply.raw, request.body);
     },
   });
+  return async () => {
+    closing = true;
+    await Promise.all([...transports].map((transport) => transport.close()));
+  };
 }

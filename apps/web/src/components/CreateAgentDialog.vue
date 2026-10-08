@@ -4,7 +4,7 @@ import { LoaderCircle, Plus, RefreshCw } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
 import { createAgent, fetchHarnesses, fetchHarnessStatus, fetchModels } from '@/api/isles';
 import { invalidateAll } from '@/api/queries';
-import CodexPathSettings from '@/components/CodexPathSettings.vue';
+import HarnessPathSettings from '@/components/HarnessPathSettings.vue';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -188,8 +188,11 @@ function focusName(event: Event) {
         {{ problem }}
       </p>
 
-      <CodexPathSettings
-        v-if="selectedHarness?.configuration === 'codex-path'"
+      <HarnessPathSettings
+        v-if="selectedHarness?.configuration"
+        :key="form.harness"
+        :harness="selectedHarness.configuration === 'claude-path' ? 'claude' : 'codex'"
+        :name="harnessName"
         :failed="Boolean(status.data.value && !status.data.value.available)"
         :binary-path="status.data.value?.binaryPath ?? null"
       />

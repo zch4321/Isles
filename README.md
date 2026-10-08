@@ -2,7 +2,7 @@
 
 **让独立的 AI 一起工作。**
 
-面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前只接入 **Codex app-server**；已将 Codex 行为完整抽入 harness 适配层，并增加默认关闭的实时收信开关；新的 harness 留待后续接入。Kimi Code 保留为后续候选，Claude Code / Claude Agent SDK 因用户重新考虑闭源执行核心而暂缓。
+面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server** 与 **Claude Code CLI**，通过独立的 harness adapter 参与私聊和混合群聊。Codex 支持默认关闭的实时收信开关；Claude 忙碌时排队，也可在当前执行中通过 MCP 主动收信。Kimi Code 保留为后续候选。
 
 Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到 `[channel: "评审", seq: 12, from: agent:"Alice"]` 这样的文本头部，自己的私聊显示为 `private`。普通消息用名称呈现群、发送者与提及对象，重名时在引号外附加 ID 短前缀；工具仍通过目录查询完整 UUID 寻址，消息仍以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，本轮验证见 [名称消息验收](docs/name-message-acceptance.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。
 
@@ -28,6 +28,8 @@ Web 界面采用工作台布局：左侧分为“群聊”和“Agents”，有�
 
 建议使用 Node.js 24.15+ LTS，也支持 Node.js 26；具体范围见根目录 `package.json`。项目使用 pnpm 12.4.1，并保留依赖锁文件以便重现安装。
 
+Claude Code 同样支持自动发现与“新建 Agent → Claude Code 路径设置”。发现顺序为 `ISLES_CLAUDE_BIN`、界面保存的路径、PATH，以及 `~/.local/bin`、旧本地安装、Homebrew 和 npm/pnpm 的常见目录；Windows npm 启动脚本通过其 JS 入口运行。界面路径独立保存在 `[claude].binary_path`，更新只影响后续启动，原 session 绑定保留。原生模型和 effort 元数据来自 CLI 初始化响应；`default` effort 表示沿用原生设置，其他等级按 CLI 实际返回的支持列表提供。
+
 SQLite 驱动包含原生模块。项目已提供 `node-gyp`，本机还需要 Python 3 和 C/C++ 构建工具；macOS 使用 Xcode Command Line Tools。
 
 ```sh
@@ -38,6 +40,8 @@ pnpm dev
 打开 [本地 Web](http://127.0.0.1:5173)。Vite 将 `/api` 代理到 [本地服务](http://127.0.0.1:4310/api/health)。开发服务均只监听 `127.0.0.1`。
 
 本机需要已安装并完成原生认证的 Codex CLI。当前协议验证基线为 `codex-cli 0.160.0`，依据 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server) 与该版本生成的类型实现，使用 `instructionSources` 校验规则文件加载。升级 CLI 后应重新验证协议。Web 创建表单从真实 `model/list` 读取可用模型和推理等级。
+
+使用 Claude 时，本机需要已安装并完成原生认证的 Claude Code CLI。本轮已验证 `2.1.285` 的双向 `stream-json`、模型目录、规则来源、MCP、原生提问与会话恢复，直接运行本机 CLI。版本变化后重新验证原生协议；实施与真实验收见 [Claude CLI 验收](docs/claude-cli-acceptance.md)。
 
 配置默认保存在 `~/.Isles/config.toml`；`~` 表示当前用户主目录。最小配置为：
 
@@ -53,24 +57,32 @@ workspace_dir = 'workspace'
 # binary_path = 'C:/path/to/codex.exe'
 # home = '~/.codex'
 
+[claude]
+# binary_path = '/opt/homebrew/bin/claude'
+# home = '~/.claude'
+
 [dev]
 port = 5173
 ```
 
 路径支持 `~` 和绝对路径；相对路径从配置文件所在目录解析，与安装目录及启动时的工作目录无关。默认数据目录为 `~/.Isles/data`，工作区根目录为 `~/.Isles/workspace`。未填写 Codex 路径时自动发现；未填写 Codex home 时先使用 `CODEX_HOME`，否则使用 `~/.codex`。平台规则模板、数据库基线文件和 Web 静态资源仍按安装目录定位。
 
+Claude 路径留空时自动发现；Claude home 依次采用 `ISLES_CLAUDE_HOME`、`[claude].home`、`CLAUDE_CONFIG_DIR`、`~/.claude`。
+
 配置优先级为 **环境变量 > TOML > 默认值**：
 
-| 变量                | 对应配置 / 默认值                              | 说明                                                   |
-| ------------------- | ---------------------------------------------- | ------------------------------------------------------ |
-| `ISLES_CONFIG_FILE` | `~/.Isles/config.toml`                         | 指定另一份配置文件。                                   |
-| `ISLES_SERVER_PORT` | `[server].port` / `4310`                       | 后端端口，前端代理同时使用该值。                       |
-| `ISLES_WEB_PORT`    | `[dev].port` / `5173`                          | Vite 开发端口。                                        |
-| `ISLES_DATA_DIR`    | `[paths].data_dir` / `data`                    | SQLite、进程锁和 MCP token 的数据目录。                |
-| `ISLES_CODEX_BIN`   | `[codex].binary_path` / 自动发现               | 可填写完整路径或 PATH 中的命令名；显式无效项直接报错。 |
-| `ISLES_CODEX_HOME`  | `[codex].home` / `CODEX_HOME`，否则 `~/.codex` | 所有 Agent 共用的 Codex 目录；Isles 不修改其中的配置。 |
+| 变量                | 对应配置 / 默认值                                       | 说明                                                   |
+| ------------------- | ------------------------------------------------------- | ------------------------------------------------------ |
+| `ISLES_CONFIG_FILE` | `~/.Isles/config.toml`                                  | 指定另一份配置文件。                                   |
+| `ISLES_SERVER_PORT` | `[server].port` / `4310`                                | 后端端口，前端代理同时使用该值。                       |
+| `ISLES_WEB_PORT`    | `[dev].port` / `5173`                                   | Vite 开发端口。                                        |
+| `ISLES_DATA_DIR`    | `[paths].data_dir` / `data`                             | SQLite、进程锁和 MCP token 的数据目录。                |
+| `ISLES_CODEX_BIN`   | `[codex].binary_path` / 自动发现                        | 可填写完整路径或 PATH 中的命令名；显式无效项直接报错。 |
+| `ISLES_CODEX_HOME`  | `[codex].home` / `CODEX_HOME`，否则 `~/.codex`          | 所有 Agent 共用的 Codex 目录；Isles 不修改其中的配置。 |
+| `ISLES_CLAUDE_BIN`  | `[claude].binary_path` / 自动发现                       | 可填写完整路径或 PATH 中的命令名；显式无效项直接报错。 |
+| `ISLES_CLAUDE_HOME` | `[claude].home` / `CLAUDE_CONFIG_DIR`，否则 `~/.claude` | 所有 Claude Agent 共用的原生配置目录。                 |
 
-手动修改 TOML 后需重启应用；开发时同时重启开发服务。现有 Codex 路径设置界面只更新 `binary_path`：保存前重读最新 TOML 以保留其他字段值，然后重新序列化整份文件，原注释和排版不保留。本轮不增加其他设置页面。
+手动修改 TOML 后需重启应用；开发时同时重启开发服务。Codex 和 Claude 路径设置分别更新自己的 `binary_path`：保存前重读最新 TOML，串行写入以保留其他字段值，然后重新序列化整份文件，原注释和排版不保留。
 
 群消息不再使用防抖；旧的 `ISLES_GROUP_QUIET_MS` 与 `ISLES_GROUP_MAX_WAIT_MS` 环境变量不再生效。
 
@@ -78,7 +90,7 @@ port = 5173
 
 每个 Agent 默认使用 `~/.Isles/workspace/agents/<id>/workspace`，MCP token 单独保存在 `~/.Isles/data/agents/<id>/isles-mcp-token`（权限 `0600`）。共享目录为 `~/.Isles/workspace/shared`；各 Agent 的 `AGENTS.md` 写入共享目录绝对路径与使用约定，协作时将产物放入该目录并在消息中提供准确路径。共享目录不提供快照、版本管理或额外权限隔离。修改工作区根目录只影响新建 Agent；同版本已有 Agent 继续使用数据库中保存的工作区路径，共享根目录随配置更新，不搬移原有文件。
 
-所有 Agent 的原生进程直接使用你的 Codex 目录：配置、登录、MCP server、插件、skills、全局 `AGENTS.md` 与长期记忆都是你本人的那一份，只有对话上下文按 Agent 独立。Isles 不复制也不写入该目录的配置，每个 Agent 在建立或恢复 thread 时按会话设定自己的 Isles MCP 地址（token 经环境变量传入，不进入配置文件和模型上下文），并以 workspace 的 `.isles-root` 作为项目根，不加载外层 Isles 仓库的 `AGENTS.md`。Agent 的会话保存在该目录的 `sessions/`，可以在 Codex 应用或 `codex resume <thread ID>` 中查看；在其他地方继续对话前先在 Isles 停止该 Agent。修改 Codex home 后已有 Agent 无法恢复原会话，会显示错误而不创建替代会话。
+Codex Agent 的原生进程直接使用你的 Codex 目录：配置、登录、MCP server、插件、skills、全局 `AGENTS.md` 与长期记忆都是你本人的那一份，只有对话上下文按 Agent 独立。Isles 不复制也不写入该目录的配置，每个 Agent 在建立或恢复 thread 时按会话设定自己的 Isles MCP 地址（token 经环境变量传入，不进入配置文件和模型上下文），并以 workspace 的 `.isles-root` 作为项目根，不加载外层 Isles 仓库的 `AGENTS.md`。Agent 的会话保存在该目录的 `sessions/`，可以在 Codex 应用或 `codex resume <thread ID>` 中查看；在其他地方继续对话前先在 Isles 停止该 Agent。修改 Codex home 后已有 Agent 无法恢复原会话，会显示错误而不创建替代会话。
 
 每次启动原生进程前，Isles 从[唯一规则模板](apps/server/resources/AGENTS.template.md)更新 workspace 的 `AGENTS.md` 托管段，保留已有用户内容。身份、环境、消息格式和工具规则由 Codex 从文件加载，不再通过 `developerInstructions` 或历史注入保存规则。创建和恢复时检查原生返回的 `instructionSources`；没有加载该文件会明确报错。已有原生历史不改写，新输入与文件均使用当前文本协议。
 
@@ -92,7 +104,11 @@ Web 和管理 HTTP API 暂无登录鉴权，仅供本机使用，不承诺把人
 
 停止 Agent 会先保存停止状态，再中断原生执行；后续消息保存排队，显式恢复才处理，`receive_messages` 也不能绕过停止状态。暂停群讨论不中断正在进行的执行，只阻止自动投递；Agent 主动收信或读取历史时仍能读取暂停群，读到的消息算已接收，继续后只自动投递剩余未读。已接受、已通过 MCP 接收、已取消或结果不明的输入不会自动重投。若服务在活动执行中关闭或异常退出，该次执行显示“待核对”，Agent 等待显式恢复；“已完成”仅表示原生 turn 结束。
 
-同一数据目录仅允许一个 Isles 服务。独立的 `runtime-lock.sqlite` 持有进程锁，冲突在初始化/恢复前明确拒绝；正常关闭或进程退出后由 SQLite/操作系统释放。使用另一数据目录可并行运行另一份服务。
+Claude Agent 直接共用用户的 Claude home、原生认证、配置、插件、skills、用户 MCP 与记忆，每位 Agent 保持独立工作目录和固定 UUID。工作目录的 `CLAUDE.md` 通过 `@AGENTS.md` 导入唯一规则来源，托管段之外的用户内容保留；创建和恢复均通过原生 `get_context_usage` 校验加载的文件，并检查 Isles HTTP MCP 已连接。追加的 MCP 配置只用于当前进程，token 从环境变量读取。
+
+Claude 首次创建会发送中性用户消息 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，完成一次模型回合使会话落盘。初始化期间的工具调用被拦截，结果由 adapter 内部处理，成功后 Agent 就绪；初始化不会发布 Isles 聊天消息或生成 Isles run。失败保留已分配的 session 绑定并显示原因。后续使用 `--resume=<UUID>` 恢复原会话，输入确认与结束事件以输入 UUID 关联；原生最终输出保留为执行详情，正式发言继续使用 MCP。Claude 使用原生全权限模式，并将 `AskUserQuestion` 交到 Web 回答。当前 steer 能力关闭，排队与主动收信保持原平台语义。
+
+同一数据目录仅允许一个 Isles 服务。独立的 `runtime-lock.sqlite` 持有进程锁，冲突在初始化/恢复前明确拒绝；正常关闭或进程退出后由 SQLite/操作系统释放。关闭时先释放原生进程、Web SSE 和 MCP 流，再关闭 HTTP 服务与数据库。使用另一数据目录可并行运行另一份服务。
 
 ## 检查与构建
 
