@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch --clear-screen=false src/index.ts",
+    "dev": "tsx watch --clear-screen=false src/index.ts --pretty-logs",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
@@ -26,6 +26,7 @@
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "24.19.0",
     "drizzle-kit": "0.31.11",
+    "pino-pretty": "13.2.0",
     "tsx": "4.23.15",
     "typescript": "6.0.3"
   }

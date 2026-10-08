@@ -57,6 +57,7 @@ async function open() {
             await native.launch(agent),
             handlers,
             native.redactor,
+            native.log.child({ agentId: agent.id }),
           );
           connecting(client);
           const request = client.request.bind(client);

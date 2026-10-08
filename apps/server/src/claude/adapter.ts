@@ -13,6 +13,7 @@ import {
   type HarnessSteerInput,
   type HarnessTurnInput,
 } from '../harness/types.js';
+import type { Logger } from '../logging.js';
 import type { AgentRecord } from '../storage/store.js';
 import { ClaudeCatalog } from './catalog.js';
 import {
@@ -55,6 +56,7 @@ export type ClaudeClientFactory = (
   workspace: string,
   env: Record<string, string>,
   handlers: ClaudeHandlers,
+  log: Logger,
 ) => ClaudeConnection;
 
 export class ClaudeAdapter implements HarnessAdapter {
@@ -80,8 +82,8 @@ export class ClaudeAdapter implements HarnessAdapter {
   ) {
     this.factory =
       factory ??
-      ((command, args, workspace, env, handlers) =>
-        new ClaudeClient(command, args, workspace, env, handlers, environment.redactor));
+      ((command, args, workspace, env, handlers, log) =>
+        new ClaudeClient(command, args, workspace, env, handlers, environment.redactor, log));
   }
   get nativeHome() {
     return this.environment.home;
@@ -168,12 +170,19 @@ class ClaudeSession implements HarnessSession {
         },
       }),
     ];
-    this.client = this.factory(command, args, this.agent.workspace, this.env, {
-      event: (frame) => this.event(frame),
-      request: (id, request) => this.request(id, request),
-      cancel: (id) => this.questions.delete(id),
-      exit: (error) => this.exit(this.startupError ?? this.error(error)),
-    });
+    this.client = this.factory(
+      command,
+      args,
+      this.agent.workspace,
+      this.env,
+      {
+        event: (frame) => this.event(frame),
+        request: (id, request) => this.request(id, request),
+        cancel: (id) => this.questions.delete(id),
+        exit: (error) => this.exit(this.startupError ?? this.error(error)),
+      },
+      this.environment.log.child({ agentId: this.agent.id }),
+    );
     await this.native().control('initialize', {
       hooks: { PreToolUse: [{ matcher: null, hookCallbackIds: ['isles-bootstrap'] }] },
     });

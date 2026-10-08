@@ -69,6 +69,7 @@ export class CodexAdapter implements HarnessAdapter {
           env,
           handlers,
           environment.redactor,
+          environment.log.child({ agentId: agent.id }),
         );
         try {
           connecting(client);

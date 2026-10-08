@@ -38,7 +38,7 @@ async function fixture() {
   const adapter = new ClaudeAdapter(
     environment,
     undefined,
-    (command, args, cwd, env, handlers) =>
+    (command, args, cwd, env, handlers, log) =>
       new ClaudeClient(
         command,
         args,
@@ -52,6 +52,7 @@ async function fixture() {
           },
         },
         environment.redactor,
+        log,
       ),
   );
   const agent: AgentRecord = {

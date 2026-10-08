@@ -17,10 +17,11 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { HttpError } from './errors.js';
+import { HttpError, Redactor } from './errors.js';
 import { defaultAdapters } from './harness/defaults.js';
 import { HarnessRegistry } from './harness/registry.js';
 import type { HarnessAdapter } from './harness/types.js';
+import type { LogStream } from './logging.js';
 import { registerMcp } from './mcp/server.js';
 import { Runtime } from './runtime/runtime.js';
 import { AgentWorkspace } from './runtime/workspace.js';
@@ -31,7 +32,8 @@ import { Store } from './storage/store.js';
 export interface AppOptions {
   config: ConfigManager;
   webRoot?: string;
-  logger?: boolean;
+  /** Receives JSON log lines at the configured level; logging is off without it. */
+  logStream?: LogStream;
   adapterFactory?: (workspace: AgentWorkspace, config: ConfigManager) => HarnessAdapter[];
   runtimeUrl?: string;
 }
@@ -40,8 +42,16 @@ export async function buildApp(options: AppOptions) {
   const { dataDir, workspaceDir, sharedDir } = options.config.current;
   await mkdir(sharedDir, { recursive: true });
   const releaseDataLock = acquireDataLock(dataDir);
+  const redactor = new Redactor();
   const app = Fastify({
-    logger: options.logger ?? false,
+    logger: options.logStream
+      ? {
+          level: options.config.current.logLevel,
+          stream: options.logStream,
+          // Errors may carry native credentials; every logged `err` passes the shared redactor.
+          serializers: { err: (error: unknown) => redactor.error(error) },
+        }
+      : false,
     bodyLimit: 100_000,
     logController: new LogController({ disableRequestLogging: true }),
   });
@@ -52,7 +62,7 @@ export async function buildApp(options: AppOptions) {
     releaseDataLock();
     throw error;
   }
-  const workspace = new AgentWorkspace(options.config);
+  const workspace = new AgentWorkspace(options.config, app.log, redactor);
   const store = new Store(database, workspaceDir);
   let runtime: Runtime;
   try {
@@ -74,7 +84,7 @@ export async function buildApp(options: AppOptions) {
     if (address && typeof address !== 'string') runtime.start(`http://127.0.0.1:${address.port}`);
   });
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof ConfigurationError)
       return reply.code(400).send({ error: workspace.redactor.text(error.message) });
     if (error instanceof z.ZodError)
@@ -88,6 +98,11 @@ export async function buildApp(options: AppOptions) {
       error instanceof Error && 'statusCode' in error && typeof error.statusCode === 'number'
         ? error.statusCode
         : 500;
+    if (status >= 500)
+      request.log.error(
+        { err: error, method: request.method, url: request.url.split('?')[0] },
+        'Request failed',
+      );
     return reply
       .code(status)
       .send({ error: status < 500 ? '请求无效' : '服务处理失败，请检查运行状态' });

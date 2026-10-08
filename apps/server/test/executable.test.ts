@@ -7,6 +7,7 @@ import { NativeEnvironment } from '../src/codex/environment.js';
 import { AgentWorkspace } from '../src/runtime/workspace.js';
 import { findCodexExecutable, type NativeCommand } from '../src/codex/executable.js';
 import { Redactor } from '../src/errors.js';
+import { silentLogger } from '../src/logging.js';
 import { testConfig } from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -78,6 +79,7 @@ child.on('exit',code=>process.exit(code || 0));
           exit: () => {},
         },
         new Redactor(),
+        silentLogger,
       );
       cleanups.push(() => client.close());
       await client.initialize();
@@ -183,6 +185,7 @@ else require('node:readline').createInterface({input:process.stdin}).on('line', 
         exit: () => {},
       },
       new Redactor(),
+      silentLogger,
     );
     cleanups.push(() => client.close());
     await client.initialize();

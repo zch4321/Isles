@@ -93,6 +93,7 @@ async function open() {
               },
             },
             native.redactor,
+            native.log.child({ agentId: agent.id }),
           );
           clients.set(agent.id, client);
           connecting(client);

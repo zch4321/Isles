@@ -277,9 +277,12 @@ M1 采用忙碌时持久排队；2026-10-04 增加按 Agent 配置的 steer，�
       AGENTS.md
       .isles-root
     shared/
+  logs/
 ```
 
-数据根目录与工作区根目录分别由 `[paths].data_dir`、`[paths].workspace_dir` 配置。路径支持 `~`、绝对路径及相对于配置文件所在目录的路径，不相对于安装目录或启动工作目录。修改工作区根目录只影响新建 Agent；同版本已有 Agent 继续使用持久化路径，共享根目录随配置更新，不搬移文件。Codex session 与长期记忆继续位于用户 Codex home。
+数据根目录、工作区根目录与日志目录分别由 `[paths].data_dir`、`[paths].workspace_dir`、`[paths].log_dir` 配置。路径支持 `~`、绝对路径及相对于配置文件所在目录的路径，不相对于安装目录或启动工作目录。修改工作区根目录只影响新建 Agent；同版本已有 Agent 继续使用持久化路径，共享根目录随配置更新，不搬移文件。Codex session 与长期记忆继续位于用户 Codex home。
+
+2026-10-08 用户确认：服务日志写入 `~/.Isles/logs`，保留 7 天、总量不超过 100 MB，日志等级通过配置项设置。
 
 ### 7.2 代码库自主操作
 
@@ -307,7 +310,7 @@ M1 采用忙碌时持久排队；2026-10-04 增加按 Agent 配置的 steer，�
 
 本机 Codex 应自动发现，不要求用户手动配置 PATH。用户可在创建 Agent 的界面保存可执行文件路径，留空恢复自动发现；启动环境中的显式配置可覆盖界面设置。无法找到或运行 Codex 时，应显示原因与配置入口。此行为于 2026-10-01 确认。
 
-Isles 配置默认位于 `~/.Isles/config.toml`，可通过 `ISLES_CONFIG_FILE` 指定另一份文件。确定的字段为 `[server].port`（默认 `4310`）、`[paths].data_dir`（默认 `data`）、`[paths].workspace_dir`（默认 `workspace`）、可选 `[codex].binary_path` 与 `home`、`[dev].port`（默认 `5173`）。现有 `ISLES_*` 环境覆盖优先于 TOML，TOML 优先于默认值。省略 Codex home 时使用 `CODEX_HOME`，否则为 `~/.codex`；省略 executable 时自动发现，显式无效 executable 必须报错。
+Isles 配置默认位于 `~/.Isles/config.toml`，可通过 `ISLES_CONFIG_FILE` 指定另一份文件。确定的字段为 `[server].port`（默认 `4310`）、`[paths].data_dir`（默认 `data`）、`[paths].workspace_dir`（默认 `workspace`）、`[paths].log_dir`（默认 `logs`）、`[log].level`（默认 `info`）、可选 `[codex].binary_path` 与 `home`、`[dev].port`（默认 `5173`）。现有 `ISLES_*` 环境覆盖优先于 TOML，TOML 优先于默认值。省略 Codex home 时使用 `CODEX_HOME`，否则为 `~/.codex`；省略 executable 时自动发现，显式无效 executable 必须报错。
 
 手动编辑配置文件后重启应用及开发服务。保留现有 Codex 路径设置界面，不增加其他配置 UI。`GET/PUT /api/codex/config` 读写 TOML，响应包含 `configFilePath`；PUT 只修改 `binary_path`，`null` 删除该项，立即刷新检测且不打断已有原生进程。写入前重读最新 TOML，保留其他字段值后序列化整份文件，注释与排版不保留。平台资源继续按安装目录定位。
 

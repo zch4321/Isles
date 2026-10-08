@@ -14,14 +14,19 @@ const binarySchema = pathSchema.refine((value) => unquoteBinary(value).trim().le
   message: 'Binary path must not be empty or quoted whitespace',
 });
 const portSchema = z.number().int().min(1).max(65_535);
+export const logLevels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
+export type LogLevel = (typeof logLevels)[number];
+const logLevelSchema = z.enum(logLevels);
 const fileSchema = z.strictObject({
   server: z.strictObject({ port: portSchema.optional() }).optional(),
   paths: z
     .strictObject({
       data_dir: pathSchema.optional(),
       workspace_dir: pathSchema.optional(),
+      log_dir: pathSchema.optional(),
     })
     .optional(),
+  log: z.strictObject({ level: logLevelSchema.optional() }).optional(),
   codex: z
     .strictObject({ binary_path: binarySchema.optional(), home: pathSchema.optional() })
     .optional(),
@@ -34,6 +39,7 @@ const environmentSchema = z.object({
   ISLES_SERVER_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
   ISLES_WEB_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
   ISLES_DATA_DIR: pathSchema.optional(),
+  ISLES_LOG_LEVEL: logLevelSchema.optional(),
   ISLES_CODEX_BIN: binarySchema.optional(),
   ISLES_CODEX_HOME: pathSchema.optional(),
   CODEX_HOME: pathSchema.optional(),
@@ -50,6 +56,11 @@ port = 4310
 [paths]
 data_dir = "data"
 workspace_dir = "workspace"
+log_dir = "logs"
+
+[log]
+# fatal, error, warn, info, debug, trace or silent
+level = "info"
 
 [codex]
 # binary_path = "codex"
@@ -73,6 +84,8 @@ export interface AppConfig {
   readonly dataDir: string;
   readonly workspaceDir: string;
   readonly sharedDir: string;
+  readonly logDir: string;
+  readonly logLevel: LogLevel;
   readonly codexHome: string;
   readonly codexBinaryPath: string | null;
   readonly claudeHome: string;
@@ -154,6 +167,8 @@ export class ConfigManager {
       dataDir: this.resolvePath(env.ISLES_DATA_DIR ?? file.paths?.data_dir ?? 'data', base),
       workspaceDir,
       sharedDir: join(workspaceDir, 'shared'),
+      logDir: this.resolvePath(file.paths?.log_dir ?? 'logs', base),
+      logLevel: env.ISLES_LOG_LEVEL ?? file.log?.level ?? 'info',
       codexHome: this.resolvePath(
         env.ISLES_CODEX_HOME ?? file.codex?.home ?? env.CODEX_HOME ?? join(this.homeDir, '.codex'),
         base,

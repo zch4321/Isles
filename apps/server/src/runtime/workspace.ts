@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Redactor } from '../errors.js';
+import { silentLogger, type Logger } from '../logging.js';
 import type { AgentRecord } from '../storage/store.js';
 import { prepareGuidance } from './guidance.js';
 
@@ -10,12 +11,18 @@ export const MCP_TOKEN_ENV = 'ISLES_MCP_TOKEN';
 export const agentRoot = (dataDir: string, agent: Pick<AgentRecord, 'id'>) =>
   join(dataDir, 'agents', agent.id);
 
-/** Application-owned workspaces, shared files and MCP credentials, independent of a harness. */
+/**
+ * Application-owned workspaces, shared files and MCP credentials, independent of a harness.
+ * Runtime and adapters also share its redactor and logger.
+ */
 export class AgentWorkspace {
   readonly dataDir: string;
   readonly sharedDir: string;
-  readonly redactor = new Redactor();
-  constructor(config: ConfigManager) {
+  constructor(
+    config: ConfigManager,
+    readonly log: Logger = silentLogger,
+    readonly redactor = new Redactor(),
+  ) {
     this.dataDir = config.current.dataDir;
     this.sharedDir = config.current.sharedDir;
   }

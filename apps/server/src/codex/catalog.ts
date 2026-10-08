@@ -62,6 +62,7 @@ export class NativeCatalog implements HarnessCatalog {
           request: (id) => client?.reject(id, 'Catalog does not support interactive requests'),
         },
         this.environment.redactor,
+        this.environment.log.child({ scope: 'catalog' }),
       );
       await client.initialize();
       const account = z
@@ -91,6 +92,7 @@ export class NativeCatalog implements HarnessCatalog {
         models,
       };
     } catch (error) {
+      this.environment.log.warn({ err: error }, 'Codex status check failed');
       return {
         status: {
           available: false,

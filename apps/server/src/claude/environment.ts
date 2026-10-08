@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import type { Logger } from '../logging.js';
 import type { AgentRecord } from '../storage/store.js';
 import { agentRoot, MCP_TOKEN_ENV, type AgentWorkspace } from '../runtime/workspace.js';
 import { findClaudeExecutable, type ClaudeExecutable } from './executable.js';
@@ -14,6 +15,7 @@ const end = '<!-- isles:end -->';
 
 export class ClaudeEnvironment {
   readonly home: string;
+  readonly log: Logger;
   private selected: ClaudeExecutable | undefined;
   private discovery: Promise<ClaudeExecutable> | undefined;
   constructor(
@@ -21,6 +23,7 @@ export class ClaudeEnvironment {
     readonly workspace: AgentWorkspace,
   ) {
     this.home = config.current.claudeHome;
+    this.log = workspace.log.child({ harness: 'claude' });
   }
   get redactor() {
     return this.workspace.redactor;

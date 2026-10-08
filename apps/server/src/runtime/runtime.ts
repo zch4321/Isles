@@ -19,6 +19,7 @@ import {
   type HarnessSession,
 } from '../harness/types.js';
 import { HttpError } from '../errors.js';
+import type { Logger } from '../logging.js';
 import type { Actor, AgentRecord, ClaimedChannel, MessageInput, Store } from '../storage/store.js';
 import { formatMessages, MessageLabels } from './envelope.js';
 import type { AgentWorkspace } from './workspace.js';
@@ -47,11 +48,13 @@ export class Runtime {
   private deleting = new Set<string>();
   private baseUrl: string | undefined;
   private closing = false;
+  private readonly log: Logger;
   constructor(
     readonly store: Store,
     readonly harnesses: HarnessRegistry,
     readonly workspace: AgentWorkspace,
   ) {
+    this.log = workspace.log.child({ module: 'runtime' });
     store.recoverOnBoot();
   }
   private handle(id: string) {
@@ -90,6 +93,7 @@ export class Runtime {
       steerEnabled: input.steerEnabled ?? false,
       nativeHome: adapter.nativeHome,
     });
+    this.log.info({ agentId: agent.id, harness: agent.harness }, 'Agent created');
     this.kick(agent.id);
     return this.store.publicAgent(agent.id);
   }
@@ -273,14 +277,21 @@ export class Runtime {
           });
           if (response.turnId !== turnId) throw new Error('Steer 确认返回了不同的原生 turn');
           this.store.acceptSteer(batch.id, response.turnId);
+          this.log.debug(
+            { agentId: id, runId: active.run.id, batchId: batch.id },
+            'Steer accepted',
+          );
         } catch (error) {
           const reason = this.workspace.redactor.text(error);
+          const context = { err: error, agentId: id, runId: active.run.id, batchId: batch.id };
           if (error instanceof HarnessSubmissionRejected) {
+            this.log.warn(context, 'Steer rejected; messages return to the queue');
             this.store.rejectSteer(batch.id, reason);
             // A turn may have ended before its completion notification arrived. Retry only
             // through the next normal turn, not repeatedly against this native turn.
             active.steerRejected = true;
           } else {
+            this.log.error(context, 'Steer result is uncertain');
             this.store.uncertainSteer(batch.id, reason);
             if (
               !this.closing &&
@@ -324,7 +335,11 @@ export class Runtime {
         connection = value;
         handle.session = value;
         if (this.closing || this.store.getAgent(id).desiredState !== 'running')
-          void value.close().catch(() => {});
+          void value
+            .close()
+            .catch((error: unknown) =>
+              this.log.warn({ err: error, agentId: id }, 'Closing a stopped native session failed'),
+            );
       },
       event: (event) => {
         if (connection && handle.session === connection) this.event(id, handle, event);
@@ -366,6 +381,10 @@ export class Runtime {
       status: this.store.getAgent(id).desiredState === 'running' ? 'ready' : 'stopped',
       error: null,
     });
+    this.log.info(
+      { agentId: id, harness: agent.harness, sessionId },
+      agent.threadId ? 'Native session resumed' : 'Native session created',
+    );
   }
   private async pump(id: string, handle: Handle) {
     try {
@@ -394,11 +413,13 @@ export class Runtime {
         await this.turn(id, handle, handle.session, agent, claimed.run, claimed.input);
       }
     } catch (error) {
-      if (!this.closing && this.store.getAgent(id).desiredState === 'running')
+      if (!this.closing && this.store.getAgent(id).desiredState === 'running') {
+        this.log.error({ err: error, agentId: id }, 'Agent stopped with an error');
         this.store.updateAgent(id, {
           status: 'error',
           error: this.workspace.redactor.text(error),
         });
+      } else this.log.debug({ err: error, agentId: id }, 'Native session ended while stopping');
       await handle.session?.close();
       delete handle.session;
     }
@@ -431,10 +452,15 @@ export class Runtime {
         throw new Error('原生 turn 确认与已绑定的运行不一致，结果待核对');
       active.turnId = response.turnId;
       this.store.acceptRun(run.id, response.turnId);
+      this.log.info({ agentId: id, runId: run.id, turnId: response.turnId }, 'Run started');
       this.kickSteer(id, handle, active);
       await done;
     } catch (error) {
       const rejected = error instanceof HarnessSubmissionRejected && !active.turnId;
+      this.log.error(
+        { err: error, agentId: id, runId: run.id },
+        rejected ? 'Run submission rejected' : 'Run result is uncertain',
+      );
       if (!this.store.getRun(run.id).finishedAt)
         this.store.finishRun(
           run.id,
@@ -460,6 +486,10 @@ export class Runtime {
     if (!this.closing && this.runnable(id)) this.store.updateAgent(id, { status: 'ready' });
   }
   private connectionExited(id: string, handle: Handle, error: Error) {
+    this.log.error(
+      { err: error, agentId: id, runId: handle.active?.run.id },
+      'Native process exited unexpectedly',
+    );
     delete handle.session;
     if (handle.active) {
       this.store.finishRun(
@@ -500,6 +530,9 @@ export class Runtime {
         );
         if (event.status === 'failed')
           this.store.updateAgent(id, { status: 'error', error: error ?? '原生 turn 失败' });
+        const context = { agentId: id, runId: active.run.id, status: event.status, reason: error };
+        if (event.status === 'failed') this.log.warn(context, 'Run finished');
+        else this.log.info(context, 'Run finished');
         active.finish();
       }
       return;
@@ -605,6 +638,7 @@ export class Runtime {
     const handle = this.handle(id);
     handle.controlRevision = (handle.controlRevision ?? 0) + 1;
     await this.halt(id);
+    this.log.info({ agentId: id }, 'Agent stopped');
   }
   /** Deletion uses the same interruption path while it blocks other management actions. */
   private async halt(id: string) {
@@ -628,7 +662,14 @@ export class Runtime {
         this.harnesses.get(this.store.getAgent(id).harness).descriptor.capabilities.interrupt
       )
         await Promise.race([
-          client.interrupt(active.run.threadId, active.turnId).catch(() => {}),
+          client
+            .interrupt(active.run.threadId, active.turnId)
+            .catch((error: unknown) =>
+              this.log.warn(
+                { err: error, agentId: id, runId: active.run.id },
+                'Native interrupt failed',
+              ),
+            ),
           new Promise((resolve) => {
             const timer = setTimeout(resolve, 2_000);
             timer.unref();
@@ -660,6 +701,7 @@ export class Runtime {
     current();
     if (handle.session === client) delete handle.session;
     this.store.updateAgent(id, { desiredState: 'running', status: 'recovering', error: null });
+    this.log.info({ agentId: id }, 'Agent resumed');
     this.kick(id);
   }
   async deleteAgent(id: string) {
@@ -674,6 +716,7 @@ export class Runtime {
       await this.handles.get(id)?.task;
       const deleted = this.store.deleteAgent(id);
       this.handles.delete(id);
+      this.log.info({ agentId: id }, 'Agent deleted');
       return deleted;
     } finally {
       this.deleting.delete(id);
@@ -693,6 +736,10 @@ export class Runtime {
           'uncertain',
           'uncertain',
           '服务关闭时原生执行尚未结束，结果待核对；不会自动重投。',
+        );
+        this.log.warn(
+          { agentId: handle.active.run.agentId, runId: handle.active.run.id },
+          'Run left uncertain at shutdown',
         );
         if (this.store.getAgent(handle.active.run.agentId).desiredState === 'running')
           this.store.updateAgent(handle.active.run.agentId, {

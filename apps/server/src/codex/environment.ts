@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { ConfigManager } from '@isles/config';
 import { parse } from 'smol-toml';
 import { findCodexExecutable, type CodexExecutable } from './executable.js';
+import type { Logger } from '../logging.js';
 import type { AgentRecord } from '../storage/store.js';
 import { AgentWorkspace, agentRoot, MCP_TOKEN_ENV } from '../runtime/workspace.js';
 
@@ -14,11 +15,13 @@ export class NativeEnvironment {
    * plugins and long-term memories; each keeps its own thread, so context is never shared.
    */
   readonly home: string;
+  readonly log: Logger;
   constructor(
     readonly config: ConfigManager,
     readonly workspace: AgentWorkspace,
   ) {
     this.home = config.current.codexHome;
+    this.log = workspace.log.child({ harness: 'codex' });
   }
   get redactor() {
     return this.workspace.redactor;

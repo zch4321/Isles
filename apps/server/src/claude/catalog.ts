@@ -62,6 +62,7 @@ export class ClaudeCatalog implements HarnessCatalog {
           request: (id) => client?.reject(id, 'Catalog does not accept interactive requests'),
         },
         this.environment.redactor,
+        this.environment.log.child({ scope: 'catalog' }),
       );
       const catalog = catalogSchema.parse(await client.control('initialize', { hooks: null }));
       const models: Model[] = catalog.models.map((model, index) => ({
@@ -89,6 +90,7 @@ export class ClaudeCatalog implements HarnessCatalog {
         models,
       };
     } catch (error) {
+      this.environment.log.warn({ err: error }, 'Claude Code status check failed');
       return {
         status: {
           available: false,

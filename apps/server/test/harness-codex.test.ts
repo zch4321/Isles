@@ -426,6 +426,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       {},
       { notification: () => {}, request: () => {}, exit: () => {} },
       environment.redactor,
+      environment.log,
     );
     try {
       await client.initialize();

@@ -9,6 +9,7 @@ import {
   type RequestId,
 } from './protocol.js';
 import type { Redactor } from '../errors.js';
+import type { Logger } from '../logging.js';
 import type { NativeCommand } from './executable.js';
 
 export class StdioClient implements NativeClient {
@@ -27,6 +28,7 @@ export class StdioClient implements NativeClient {
     env: Record<string, string>,
     private handlers: NativeHandlers,
     private redactor: Redactor,
+    private log: Logger,
   ) {
     const command = typeof binary === 'string' ? { file: binary, args: [] } : binary;
     this.child = spawn(command.file, [...command.args, 'app-server', '--listen', 'stdio://'], {
@@ -36,9 +38,12 @@ export class StdioClient implements NativeClient {
       detached: process.platform !== 'win32',
       windowsHide: true,
     });
-    // Stderr is intentionally drained and never stored: native diagnostics can
-    // contain config/auth material and are not formal execution items.
-    this.child.stderr.resume();
+    this.log.debug({ pid: this.child.pid }, 'Codex app-server started');
+    // Stderr is not an execution item. Native diagnostics can contain config/auth
+    // material, so lines are redacted and logged only at debug level.
+    createInterface({ input: this.child.stderr }).on('line', (line) =>
+      this.log.debug({ stderr: this.redactor.text(line) }, 'Codex app-server stderr'),
+    );
     const lines = createInterface({ input: this.child.stdout });
     lines.on('line', (line) => {
       if (this.closed) return;
@@ -60,16 +65,19 @@ export class StdioClient implements NativeClient {
             );
           else pending.resolve(frame.result);
         }
-      } catch {
+      } catch (error) {
+        this.log.warn({ err: error }, 'Failed to process a Codex protocol frame');
         this.fail(new Error('Codex 原生协议消息无效，连接已关闭'));
         void this.close();
       }
     });
-    this.child.once('error', () =>
-      this.fail(new Error('无法启动 Codex app-server，请检查 CLI 路径')),
-    );
+    this.child.once('error', (error) => {
+      this.log.error({ err: error }, 'Failed to start Codex app-server');
+      this.fail(new Error('无法启动 Codex app-server，请检查 CLI 路径'));
+    });
     this.terminated = new Promise((resolve) => {
-      this.child.once('close', (code) => {
+      this.child.once('close', (code, signal) => {
+        this.log.debug({ code, signal }, 'Codex app-server exited');
         lines.close();
         this.fail(new Error(`Codex app-server 已退出（${code ?? 'signal'}）`));
         resolve();

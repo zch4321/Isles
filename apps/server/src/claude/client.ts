@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import type { Redactor } from '../errors.js';
+import type { Logger } from '../logging.js';
 import type { ClaudeCommand } from './executable.js';
 
 export type ClaudeFrame = Record<string, unknown>;
@@ -71,6 +72,7 @@ export class ClaudeClient implements ClaudeConnection {
     env: Record<string, string>,
     private handlers: ClaudeHandlers,
     private redactor: Redactor,
+    private log: Logger,
   ) {
     this.child = spawn(
       command.file,
@@ -94,21 +96,31 @@ export class ClaudeClient implements ClaudeConnection {
         windowsHide: true,
       },
     );
-    this.child.stderr.resume();
+    this.log.debug({ pid: this.child.pid }, 'Claude Code started');
+    // Stderr is not an execution item. Native diagnostics can contain config/auth
+    // material, so lines are redacted and logged only at debug level.
+    createInterface({ input: this.child.stderr }).on('line', (line) =>
+      this.log.debug({ stderr: this.redactor.text(line) }, 'Claude Code stderr'),
+    );
     const lines = createInterface({ input: this.child.stdout });
     lines.on('line', (line) => {
       if (this.closed) return;
       try {
         if (line.length > 8_000_000) throw new Error('协议帧超出大小限制');
         this.receive(frameSchema.parse(JSON.parse(line)));
-      } catch {
+      } catch (error) {
+        this.log.warn({ err: error }, 'Failed to process a Claude Code protocol frame');
         this.fail(new Error('Claude Code 原生协议消息无效，连接已关闭'));
         void this.close();
       }
     });
-    this.child.once('error', () => this.fail(new Error('无法启动 Claude Code，请检查 CLI 路径')));
+    this.child.once('error', (error) => {
+      this.log.error({ err: error }, 'Failed to start Claude Code');
+      this.fail(new Error('无法启动 Claude Code，请检查 CLI 路径'));
+    });
     this.terminated = new Promise((resolve) =>
-      this.child.once('close', (code) => {
+      this.child.once('close', (code, signal) => {
+        this.log.debug({ code, signal }, 'Claude Code exited');
         lines.close();
         this.fail(this.exitError ?? new Error(`Claude Code 已退出（${code ?? 'signal'}）`));
         resolve();

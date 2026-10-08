@@ -52,6 +52,10 @@ port = 4310
 [paths]
 data_dir = 'data'
 workspace_dir = 'workspace'
+log_dir = 'logs'
+
+[log]
+level = 'info'
 
 [codex]
 # binary_path = 'C:/path/to/codex.exe'
@@ -65,24 +69,27 @@ workspace_dir = 'workspace'
 port = 5173
 ```
 
-路径支持 `~` 和绝对路径；相对路径从配置文件所在目录解析，与安装目录及启动时的工作目录无关。默认数据目录为 `~/.Isles/data`，工作区根目录为 `~/.Isles/workspace`。未填写 Codex 路径时自动发现；未填写 Codex home 时先使用 `CODEX_HOME`，否则使用 `~/.codex`。平台规则模板、数据库基线文件和 Web 静态资源仍按安装目录定位。
+路径支持 `~` 和绝对路径；相对路径从配置文件所在目录解析，与安装目录及启动时的工作目录无关。默认数据目录为 `~/.Isles/data`，工作区根目录为 `~/.Isles/workspace`，日志目录为 `~/.Isles/logs`。未填写 Codex 路径时自动发现；未填写 Codex home 时先使用 `CODEX_HOME`，否则使用 `~/.codex`。平台规则模板、数据库基线文件和 Web 静态资源仍按安装目录定位。
 
 Claude 路径留空时自动发现；Claude home 依次采用 `ISLES_CLAUDE_HOME`、`[claude].home`、`CLAUDE_CONFIG_DIR`、`~/.claude`。
 
 配置优先级为 **环境变量 > TOML > 默认值**：
 
-| 变量                | 对应配置 / 默认值                                       | 说明                                                   |
-| ------------------- | ------------------------------------------------------- | ------------------------------------------------------ |
-| `ISLES_CONFIG_FILE` | `~/.Isles/config.toml`                                  | 指定另一份配置文件。                                   |
-| `ISLES_SERVER_PORT` | `[server].port` / `4310`                                | 后端端口，前端代理同时使用该值。                       |
-| `ISLES_WEB_PORT`    | `[dev].port` / `5173`                                   | Vite 开发端口。                                        |
-| `ISLES_DATA_DIR`    | `[paths].data_dir` / `data`                             | SQLite、进程锁和 MCP token 的数据目录。                |
-| `ISLES_CODEX_BIN`   | `[codex].binary_path` / 自动发现                        | 可填写完整路径或 PATH 中的命令名；显式无效项直接报错。 |
-| `ISLES_CODEX_HOME`  | `[codex].home` / `CODEX_HOME`，否则 `~/.codex`          | 所有 Agent 共用的 Codex 目录；Isles 不修改其中的配置。 |
-| `ISLES_CLAUDE_BIN`  | `[claude].binary_path` / 自动发现                       | 可填写完整路径或 PATH 中的命令名；显式无效项直接报错。 |
-| `ISLES_CLAUDE_HOME` | `[claude].home` / `CLAUDE_CONFIG_DIR`，否则 `~/.claude` | 所有 Claude Agent 共用的原生配置目录。                 |
+| 变量                | 对应配置 / 默认值                                       | 说明                                                             |
+| ------------------- | ------------------------------------------------------- | ---------------------------------------------------------------- |
+| `ISLES_CONFIG_FILE` | `~/.Isles/config.toml`                                  | 指定另一份配置文件。                                             |
+| `ISLES_SERVER_PORT` | `[server].port` / `4310`                                | 后端端口，前端代理同时使用该值。                                 |
+| `ISLES_WEB_PORT`    | `[dev].port` / `5173`                                   | Vite 开发端口。                                                  |
+| `ISLES_DATA_DIR`    | `[paths].data_dir` / `data`                             | SQLite、进程锁和 MCP token 的数据目录。                          |
+| `ISLES_LOG_LEVEL`   | `[log].level` / `info`                                  | 服务日志等级：fatal、error、warn、info、debug、trace 或 silent。 |
+| `ISLES_CODEX_BIN`   | `[codex].binary_path` / 自动发现                        | 可填写完整路径或 PATH 中的命令名；显式无效项直接报错。           |
+| `ISLES_CODEX_HOME`  | `[codex].home` / `CODEX_HOME`，否则 `~/.codex`          | 所有 Agent 共用的 Codex 目录；Isles 不修改其中的配置。           |
+| `ISLES_CLAUDE_BIN`  | `[claude].binary_path` / 自动发现                       | 可填写完整路径或 PATH 中的命令名；显式无效项直接报错。           |
+| `ISLES_CLAUDE_HOME` | `[claude].home` / `CLAUDE_CONFIG_DIR`，否则 `~/.claude` | 所有 Claude Agent 共用的原生配置目录。                           |
 
 手动修改 TOML 后需重启应用；开发时同时重启开发服务。Codex 和 Claude 路径设置分别更新自己的 `binary_path`：保存前重读最新 TOML，串行写入以保留其他字段值，然后重新序列化整份文件，原注释和排版不保留。
+
+服务日志同时输出到终端和 `~/.Isles/logs`。日志文件按本地日期命名为 `isles-YYYY-MM-DD.log`，每行一条 JSON；单个文件达到 10 MB 后续写 `isles-YYYY-MM-DD.1.log` 等分段。Isles 保留最近 7 天的日志，总量不超过 100 MB，超出时先删除最旧的文件。`[log].level` 设置写入等级，默认 `info`，记录 Agent 生命周期、执行结果和错误；设为 `debug` 时额外记录原生 CLI 的 stderr。错误信息和 stderr 在写入前脱敏。`pnpm dev` 在终端中以易读格式显示日志，文件始终保存 JSON。
 
 群消息不再使用防抖；旧的 `ISLES_GROUP_QUIET_MS` 与 `ISLES_GROUP_MAX_WAIT_MS` 环境变量不再生效。
 

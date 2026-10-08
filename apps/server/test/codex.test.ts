@@ -8,6 +8,7 @@ import { StdioClient } from '../src/codex/client.js';
 import { NativeEnvironment } from '../src/codex/environment.js';
 import { AgentWorkspace, agentRoot, MCP_TOKEN_ENV } from '../src/runtime/workspace.js';
 import { Redactor } from '../src/errors.js';
+import { silentLogger } from '../src/logging.js';
 import type { AgentRecord } from '../src/storage/store.js';
 import { testConfig } from './helpers.js';
 
@@ -113,6 +114,7 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
         exit: (e) => exits.push(e.message),
       },
       new Redactor(),
+      silentLogger,
     );
     cleanups.push(() => client.close());
     await client.initialize();

@@ -52,6 +52,7 @@ Isles 是一个让人类与独立 Agent 通过私聊、群聊协作的应用。�
 | 浏览器通信     | REST + SSE                | REST 接收操作和查询，SSE 推送消息及运行状态。                                                       |
 | MCP            | 官方 TypeScript SDK       | 实现协作工具；优先评估 Streamable HTTP，按各 harness 能力选择兼容传输。                             |
 | 验证           | Vitest + Playwright       | 分别验证业务规则、运行管理和浏览器关键流程。                                                        |
+| 服务日志       | Fastify 内置 pino         | 不另引入日志库；文件保存 JSON Lines，`pnpm dev` 通过 pino-pretty 在终端显示易读格式。               |
 
 SQLite 的 WAL 模式有利于读写并行，但仍存在单写者约束。业务事务应保持短小，模型调用、进程等待和网络操作必须在业务数据库事务之外进行。
 
@@ -119,6 +120,7 @@ apps/
       runtime/           # Agent 控制器、排队、恢复、停止、规则文件维护与文本编码
       harness/           # HarnessAdapter / HarnessSession 契约与注册目录
       codex/             # 唯一已接入 adapter、app-server 协议、模型目录及环境
+      logging.ts         # 服务日志输出、文件分段与保留
       storage/           # Drizzle schema、查询与事务
       artifacts/         # 目录与共享产物
       config/
@@ -491,11 +493,17 @@ Isles 配置、平台数据与 Agent 工作文件分别定位。默认布局为�
         AGENTS.md        # Isles 托管规则与用户补充
         .isles-root      # 原生项目根标记
     shared/              # Agent 主动共享的文件
+  logs/
+    isles-YYYY-MM-DD.log # 服务日志，保留 7 天、总量不超过 100 MB
 ```
 
 SQLite 保存平台业务事实，harness 自己的目录保存 session 和 memory；Codex 使用用户的 `CODEX_HOME`，不在数据根目录下。单独恢复聊天数据库不能替代恢复原生 session。
 
-默认配置文件为 `~/.Isles/config.toml`，`ISLES_CONFIG_FILE` 可以指定另一份。字段为 `[server].port`（`4310`）、`[paths].data_dir`（`data`）、`[paths].workspace_dir`（`workspace`）、可选 `[codex].binary_path` 与 `home`、`[dev].port`（`5173`）。现有环境覆盖优先于 TOML，TOML 优先于默认值；省略 Codex home 时使用 `CODEX_HOME`，否则为 `~/.codex`。路径支持 `~` 与绝对路径，相对路径从配置文件所在目录解析，不依赖启动 cwd 或安装位置。
+默认配置文件为 `~/.Isles/config.toml`，`ISLES_CONFIG_FILE` 可以指定另一份。字段为 `[server].port`（`4310`）、`[paths].data_dir`（`data`）、`[paths].workspace_dir`（`workspace`）、`[paths].log_dir`（`logs`）、`[log].level`（`info`）、可选 `[codex].binary_path` 与 `home`、`[dev].port`（`5173`）。现有环境覆盖优先于 TOML，`ISLES_LOG_LEVEL` 覆盖日志等级，TOML 优先于默认值；省略 Codex home 时使用 `CODEX_HOME`，否则为 `~/.codex`。路径支持 `~` 与绝对路径，相对路径从配置文件所在目录解析，不依赖启动 cwd 或安装位置。
+
+服务日志使用 Fastify 内置的 pino。入口打开日志输出并交给 `buildApp`，每条记录同时写到 stdout 和日志目录；Runtime、harness environment 与原生 client 通过 `AgentWorkspace.log` 取得子 logger，用 `agentId`、`runId`、`harness` 等字段关联记录。日志覆盖 Agent 创建/停止/恢复/删除、原生 session 建立与恢复、run 开始与结束、steer 结果、原生进程启动失败与异常退出、状态检测失败和 5xx 请求错误；HTTP 请求日志保持关闭，消息正文不写入日志。所有 `err` 字段经共享 Redactor 序列化，原生 stderr 脱敏后按 `debug` 级别记录。
+
+日志文件为 JSON Lines，按本地日期命名为 `isles-YYYY-MM-DD.log`；单个文件达到 10 MB 后续写 `isles-YYYY-MM-DD.1.log` 等分段。保留最近 7 天，总量不超过 100 MB：每次切换文件和每小时检查一次，删除超过 7 天的文件，并在为当前文件预留 10 MB 后从最旧的文件开始删除超额部分。文件写入采用同步方式，未捕获异常的 fatal 记录在进程退出前落盘；写入失败不影响请求与 Runtime，首次失败在 stderr 提示目录和处理方法。
 
 配置模块提供服务、开发代理、数据库命令与 Runtime 共用的解析结果。平台规则模板、schema 基线文件与 Web 静态资源继续从安装目录加载，不能随着数据或工作区根目录改变。
 
@@ -570,7 +578,7 @@ Codex 与 Claude CLI 适配层及默认关闭的 steer 开关已完成；两者�
 | 实现生命周期操作前  | 改名、模型/harness 配置修改、暂停/恢复、归档与删除语义。                                                                                                                   |
 | 实现历史和共享前    | 入群前历史、退群后访问、跨频道转述、产物版本及文件隔离强度。                                                                                                               |
 | 扩展协作约束前      | 是否增加可选的阶段和跨模型 review 门槛，以及审查产物的版本绑定。                                                                                                           |
-| 持续运行前          | 日志与事件保留、容量限制、备份恢复、原生进程异常及无法核对状态的处理。                                                                                                     |
+| 持续运行前          | 事件保留、容量限制、备份恢复、原生进程异常及无法核对状态的处理；服务日志的保留策略见第 10 节。                                                                             |
 
 未来 Electron 可以复用 Web 界面及本地服务能力，IM 可以作为新的消息入口接入应用服务。多用户和跨机器运行需要重新设计身份、执行所有权、凭据和文件访问，首版只保留清晰模块边界，不承诺可以无成本扩展。
 

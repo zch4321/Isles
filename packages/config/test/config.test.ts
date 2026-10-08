@@ -40,6 +40,8 @@ describe('ConfigManager startup configuration', () => {
       dataDir: join(homeDir, '.Isles', 'data'),
       workspaceDir: join(homeDir, '.Isles', 'workspace'),
       sharedDir: join(homeDir, '.Isles', 'workspace', 'shared'),
+      logDir: join(homeDir, '.Isles', 'logs'),
+      logLevel: 'info',
       codexHome: join(homeDir, '.codex'),
       codexBinaryPath: null,
       claudeHome: join(homeDir, '.claude'),
@@ -48,7 +50,8 @@ describe('ConfigManager startup configuration', () => {
     const contents = readFileSync(configFilePath, 'utf8');
     expect(parse(contents)).toEqual({
       server: { port: 4310 },
-      paths: { data_dir: 'data', workspace_dir: 'workspace' },
+      paths: { data_dir: 'data', workspace_dir: 'workspace', log_dir: 'logs' },
+      log: { level: 'info' },
       codex: {},
       claude: {},
       dev: { port: 5173 },
@@ -142,6 +145,17 @@ home = "~/profiles/codex"
     );
   });
 
+  it('reads the log directory and level from TOML with an environment level override', () => {
+    const { create, homeDir } = fixture(
+      '[paths]\nlog_dir = "~/isles-logs"\n[log]\nlevel = "warn"\n',
+    );
+    expect(create().current).toMatchObject({
+      logDir: join(homeDir, 'isles-logs'),
+      logLevel: 'warn',
+    });
+    expect(create({ ISLES_LOG_LEVEL: 'debug' }).current.logLevel).toBe('debug');
+  });
+
   it('uses CODEX_HOME only when no explicit Codex home exists', () => {
     const { create, homeDir } = fixture('');
     expect(create({ CODEX_HOME: 'profiles/fallback' }).current.codexHome).toBe(
@@ -172,6 +186,8 @@ home = "~/profiles/codex"
     ['[dev]\nport = 65536', 'dev.port'],
     ['[paths]\ndata_dir = " "', 'paths.data_dir'],
     ['[paths]\nworkspace_dir = 1', 'paths.workspace_dir'],
+    ['[paths]\nlog_dir = ""', 'paths.log_dir'],
+    ['[log]\nlevel = "verbose"', 'log.level'],
     ['[codex]\nbinary_path = false', 'codex.binary_path'],
     ['[codex]\nhome = ""', 'codex.home'],
     ['[server]\nhost = "0.0.0.0"', 'server'],
@@ -195,6 +211,7 @@ home = "~/profiles/codex"
     ['ISLES_DATA_DIR', ''],
     ['ISLES_CODEX_BIN', ' '],
     ['ISLES_CODEX_HOME', ''],
+    ['ISLES_LOG_LEVEL', 'verbose'],
   ])('rejects invalid environment override %s', (key, value) => {
     const { create, configFilePath } = fixture('');
     expect(() => create({ [key]: value })).toThrow(key);

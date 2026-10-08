@@ -7,6 +7,13 @@ export class HttpError extends Error {
   }
 }
 
+export interface ErrorDetails {
+  type: string;
+  message: string;
+  stack: string;
+  [key: string]: unknown;
+}
+
 // Native errors and tool activity may contain credentials. Never expose raw stderr,
 // native config or auth/account responses. Also scrub known private values.
 export class Redactor {
@@ -41,5 +48,19 @@ export class Redactor {
         '$1[redacted]',
       )
       .slice(0, 64_000);
+  }
+  /** Log form of an error, scrubbed like `text`; the server logger applies it to every `err`. */
+  error(value: unknown, depth = 0): ErrorDetails {
+    if (!(value instanceof Error))
+      return { type: typeof value, message: this.text(value), stack: '' };
+    const details: ErrorDetails = {
+      type: value.constructor.name,
+      message: this.text(value.message),
+      stack: this.text(value.stack ?? ''),
+    };
+    const code: unknown = (value as NodeJS.ErrnoException).code;
+    if (typeof code === 'string' || typeof code === 'number') details.code = code;
+    if (value.cause !== undefined && depth < 3) details.cause = this.error(value.cause, depth + 1);
+    return details;
   }
 }

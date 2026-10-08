@@ -61,7 +61,7 @@ async function open() {
     adapterFactory: (workspace, config) => {
       const native = new ClaudeEnvironment(config, workspace);
       return [
-        new ClaudeAdapter(native, undefined, (command, args, cwd, env, handlers) => {
+        new ClaudeAdapter(native, undefined, (command, args, cwd, env, handlers, log) => {
           const agentId = new URL(
             JSON.parse(args[args.indexOf('--mcp-config') + 1]!).mcpServers.isles.url,
           ).pathname
@@ -91,6 +91,7 @@ async function open() {
               },
             },
             native.redactor,
+            log,
           );
           const send = client.sendUser.bind(client);
           client.sendUser = async (sessionId, uuid, text, options) => {
