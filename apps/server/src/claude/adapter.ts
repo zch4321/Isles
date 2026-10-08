@@ -110,6 +110,9 @@ interface ActiveInput {
   bootstrap: boolean;
   interrupted: boolean;
   steers: Map<string, { accepted: boolean; ended: Promise<void>; end(): void }>;
+  /** A result for this run arrived; the run ends once no appended input awaits consumption. */
+  idle: boolean;
+  failure: Error | null;
   finish(error: Error | null): void;
 }
 interface PendingQuestion {
@@ -229,6 +232,8 @@ class ClaudeSession implements HarnessSession {
           bootstrap: true,
           interrupted: false,
           steers: new Map(),
+          idle: false,
+          failure: null,
           finish: (error) => {
             if (timer) clearTimeout(timer);
             if (error) reject(error);
@@ -276,6 +281,8 @@ class ClaudeSession implements HarnessSession {
       bootstrap: false,
       interrupted: false,
       steers: new Map(),
+      idle: false,
+      failure: null,
       finish: () => {
         for (const batch of active.steers.values()) batch.end();
       },
@@ -313,31 +320,27 @@ class ClaudeSession implements HarnessSession {
     };
     active.steers.set(input.batchId, batch);
     try {
-      const client = this.native();
+      // The CLI consumes queued input at a tool boundary of the current turn, or runs it as the
+      // next native turn once this one ends. The run stays open until then, so both count here.
       await Promise.race([
-        client
+        this.native()
           .sendUser(input.sessionId, input.batchId, input.text, { waitForConsumption: true })
           .then(() => {
             if (!batch.accepted)
               throw new Error('Claude Code 尚未确认追加输入进入目标执行，请核对原生记录。');
           }),
-        batch.ended.then(async () => {
-          if (batch.accepted) return;
-          if (this.closed) throw new Error('Claude Code 连接已关闭，追加输入结果待核对。');
-          // A streamed message can otherwise start its own native turn after this one ends.
-          // Return it to the platform queue only after the CLI proves it was withdrawn.
-          if (await client.cancelUser(input.batchId))
-            throw new HarnessSubmissionRejected('Claude Code 当前执行已结束，追加输入已撤回并排队');
-          throw new Error('Claude Code 追加输入未确认进入目标执行，撤回结果待核对。');
+        batch.ended.then(() => {
+          if (!batch.accepted) throw new Error('Claude Code 连接已关闭，追加输入结果待核对。');
         }),
       ]);
       return { turnId: active.id };
     } catch (error) {
       if (error instanceof ClaudeInputRejected || error instanceof HarnessSubmissionRejected) {
         active.steers.delete(input.batchId);
+        this.settle(active);
         throw new HarnessSubmissionRejected(this.environment.redactor.text(error));
       }
-      // Unknown queued inputs must not silently execute as another native turn.
+      // Unconfirmed input must not execute outside a tracked run; close the owning process.
       const failure = this.error(error);
       await this.close();
       this.exit(failure);
@@ -466,12 +469,28 @@ class ClaudeSession implements HarnessSession {
                 ...(Array.isArray(frame.user_message_uuids) ? frame.user_message_uuids : []),
               ]
             : [];
-    if (frame.session_id === this.sessionId && !frame.parent_tool_use_id)
+    if (frame.session_id === this.sessionId && !frame.parent_tool_use_id) {
       for (const id of consumed)
         if (typeof id === 'string') {
           const batch = active.steers.get(id);
-          if (batch) batch.accepted = true;
+          if (batch && !batch.accepted) {
+            batch.accepted = true;
+            // Input queued behind a finished turn starts the next native turn of this run.
+            active.idle = false;
+          }
         }
+      // Withdrawn input (stop cancels the native queue) no longer holds the run open.
+      if (
+        frame.type === 'command_lifecycle' &&
+        frame.state === 'cancelled' &&
+        typeof frame.command_uuid === 'string' &&
+        active.steers.get(frame.command_uuid)?.accepted === false
+      ) {
+        active.steers.delete(frame.command_uuid);
+        this.settle(active);
+        if (this.active !== active) return;
+      }
+    }
     const matches = (id: unknown) =>
       id === active.id || (typeof id === 'string' && active.steers.get(id)?.accepted === true);
     const associated =
@@ -483,17 +502,9 @@ class ClaudeSession implements HarnessSession {
         frame.is_error === true || frame.subtype !== 'success' ? this.resultError(frame) : null;
       if (active.bootstrap) active.finish(failure);
       else {
-        this.active = undefined;
-        active.finish(failure);
-        this.questions.clear();
-        this.toolRuns.clear();
-        this.output.event({
-          type: 'turn_completed',
-          sessionId: this.sessionId!,
-          turnId: active.id,
-          status: active.interrupted ? 'interrupted' : failure ? 'failed' : 'completed',
-          error: failure?.message ?? null,
-        });
+        active.failure ??= failure;
+        active.idle = true;
+        this.settle(active);
       }
       return;
     }
@@ -564,6 +575,26 @@ class ClaudeSession implements HarnessSession {
         text: frame.status,
       });
     }
+  }
+  /** Complete the run once the CLI is idle and every appended input was consumed or withdrawn. */
+  private settle(active: ActiveInput) {
+    if (
+      this.active !== active ||
+      !active.idle ||
+      [...active.steers.values()].some((batch) => !batch.accepted)
+    )
+      return;
+    this.active = undefined;
+    active.finish(active.failure);
+    this.questions.clear();
+    this.toolRuns.clear();
+    this.output.event({
+      type: 'turn_completed',
+      sessionId: this.sessionId!,
+      turnId: active.id,
+      status: active.interrupted ? 'interrupted' : active.failure ? 'failed' : 'completed',
+      error: active.failure?.message ?? null,
+    });
   }
   private item(item: RunItem) {
     if (!this.active || this.active.bootstrap) return;

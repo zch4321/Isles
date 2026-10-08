@@ -7,7 +7,7 @@
 | 模块                                   | 职责                                                                                                                    |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `apps/server/src/claude/executable.ts` | 显式路径、PATH、原生本地安装与 Homebrew/npm/pnpm 发现；版本验证；Windows JS launcher 通过 Node 执行。                   |
-| `claude/client.ts`                     | 常驻双向 stream-json、控制响应、主线程输入确认与撤回、问题回交与所属进程关闭；stderr 排空，不保存。                     |
+| `claude/client.ts`                     | 常驻双向 stream-json、控制响应、主线程输入确认与停止时的队列取消、问题回交与所属进程关闭；stderr 脱敏后按 debug 记录。  |
 | `claude/adapter.ts`                    | UUID 创建/恢复、中性初始化、实际规则来源与 MCP 连接校验、执行事件和 AskUserQuestion 转换；同执行 steer 与结束竞态处理。 |
 | `claude/environment.ts`、`catalog.ts`  | 共享原生 home/认证/配置；维护 CLAUDE.md 导入；原生模型与 effort 目录；缓存刷新和脱敏。                                  |
 | `packages/config`、HTTP API、Web       | 独立 Claude TOML/环境覆盖和路径设置，创建页面切换真实已注册 harness，模型与能力按目录显示。                             |
@@ -29,7 +29,7 @@ Isles session initialized. Reply only READY. Do not use tools or send messages.
 
 普通输入将平台 run UUID 传为原生用户消息 UUID，用 replay/started 确认和 result.user_message_uuid 关联原生执行。旧输入的结果不能结束当前 run；超时、断连和结果不明保留平台语义。AskUserQuestion 关联对应工具和当前输入 UUID，转换为 Web 问题，答案回交原控制请求；过期请求拒绝。正式消息只经 Isles MCP，原生文本与工具输出展示为执行详情。
 
-Claude 声明 steer，按 Agent 默认关闭；关闭时忙碌排队，开启时向同一执行追加批次 UUID。主线程 replay/started 或 result 的消费 UUID 列表确认接受；原生 queued 表示排队，平台继续显示投递中；收到 queued 回执后等待执行边界，长工具运行不触发输入传输确认超时。当前执行先结束时使用 cancel_async_message 撤回尚未消费的输入，明确撤回后排到下一轮；撤回失败、超时或断连时关闭所属进程并向 Runtime 报告待核对。停止使用 interrupt(cancel_queued: true) 清理原生队列。MCP 主动 receive_messages/read_messages 保持原语义。原生执行采用全权限模式，原生问题可在 Web 回答。数据库结构、固定绑定键 `(harness, nativeHome, threadId)` 和公共 threadId 字段保持既有语义。
+Claude 声明 steer，按 Agent 默认关闭；关闭时忙碌排队，开启时向同一执行追加批次 UUID。主线程 replay/started 或 result 的消费 UUID 列表确认接受；原生 queued 表示排队，平台继续显示投递中；收到 queued 回执后等待执行边界，长工具运行不触发输入传输确认超时。当前回合先结束时，CLI 接着把尚未消费的输入作为下一个原生回合执行，adapter 将其计入同一 run；确认超时或断连时关闭所属进程并向 Runtime 报告待核对。停止使用 interrupt(cancel_queued: true) 清理原生队列。MCP 主动 receive_messages/read_messages 保持原语义。原生执行采用全权限模式，原生问题可在 Web 回答。数据库结构、固定绑定键 `(harness, nativeHome, threadId)` 和公共 threadId 字段保持既有语义。
 
 ## 3. 首次 CLI 接入的自动化与浏览器验收
 
@@ -80,7 +80,7 @@ pnpm --filter @isles/server exec tsx test/verify-native-claude.ts
 2026-10-08 用户授权接入 Claude steer。创建、编辑和详情中的开关现可用于 Claude，默认仍关闭；切换只修改偏好，固定 session、原生进程与聊天业务保持既有语义。使用双向 stream-json 的批次 UUID 追加输入，在工具结束后的继续执行中消费；原生正在运行的工具可以正常完成。
 
 - adapter 校验 session、原 run 与批次身份；只接受主线程 replay/started 和 result 消费列表的确认。追加后的工具、AskUserQuestion 和结束事件归属原 run。
-- 原执行先结束时撤回尚未消费的输入，原生明确撤回或未消费的 cancelled 事件允许退回平台队列；结果不明时关闭所属进程并报告待核对，释放 Runtime 的执行等待。
+- 原执行先结束时撤回尚未消费的输入，原生明确撤回或未消费的 cancelled 事件允许退回平台队列；结果不明时关闭所属进程并报告待核对，释放 Runtime 的执行等待。（已由第 8 节替代。）
 - 停止同时取消原生队列，平台已取消的消息保持取消；恢复继续使用原 UUID。
 - 沿用 Runtime、steer_batches 和 Web 能力开关，数据库结构保持当前基线。
 
@@ -106,3 +106,20 @@ pnpm --filter @isles/server exec tsx test/verify-native-claude-steer.ts
 - 两次服务重启分别保留开启、关闭偏好，均恢复原 UUID；偏好-only 修改没有启动新原生进程。
 
 另对同版本 CLI 独立探测 cancel_async_message：运行工具期间撤回 queued 输入，原生发布 cancelled 并返回 cancelled=true，原任务正常完成。原执行结束与追加交错、撤回失败及确认超时通过协议模拟验证；Windows 实机、上下文压缩、原生子代理和长时间运行沿用第 5 节的验证范围。
+
+## 8. Steer 回合结束竞态修复
+
+2026-10-08 08:15:09，sonnet-1 的 steer 批次 `8fd743da` 在上一个批次确认 4 ms 后发出，进入原生队列。原 run `dc34340a` 于 08:15:12.393 结束，adapter 随即清除活动执行并发送 cancel_async_message。CLI 在撤回生效前把该输入作为下一个原生回合执行（08:15:12.827 收到消费确认），adapter 因活动执行已清除而未关联批次，判为“尚未确认追加输入进入目标执行”，关闭进程，Agent 进入错误状态。消息实际已在执行，待核对判断不成立。
+
+用户确认改为接着执行：
+
+- 原生回合结束时仍有未消费的批次，run 保持打开；CLI 开始执行该批次时计入同一 run，后续工具、提问和结果继续使用原 run 身份，收到关联结果且没有待消费批次时才发布 turn 完成。
+- adapter 不再调用 cancel_async_message，client 移除撤回接口。停止时 interrupt(cancel_queued: true) 取消原生队列，cancelled 事件使对应批次返回确定拒绝，已空闲的 run 以 interrupted 结束。
+- 确认超时、断连和进程退出仍关闭所属进程并报告待核对。
+
+| 验证              | 结果                                                                                                                                                    |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude 协议模拟   | fixture 在 result 后约 20 ms 执行排队输入，复现原竞态。新增回合结束后续跑同 run、续跑前停止、排队超过传输超时后续跑三项；修复前三项均失败，修复后通过。 |
+| `pnpm test`       | 21 个测试文件、208 项通过，2 项条件跳过。                                                                                                               |
+| Chrome/Playwright | `ISLES_TEST_BROWSER_CHANNEL=chrome pnpm test:e2e`：18 项通过；浏览器 wire 模拟同样在原回合结束后把排队输入作为下一回合执行。                            |
+| 真实 Claude CLI   | 本次未重跑 `verify-native-claude-steer.ts`。                                                                                                            |

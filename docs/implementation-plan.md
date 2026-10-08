@@ -188,7 +188,7 @@
 - 创建先保存 UUID，发送中性消息并等待内部模型回合成功；工具调用在该阶段被拒绝，结果不生成 Isles 消息或 run。
 - CLAUDE.md 原生导入唯一 AGENTS.md，通过 get_context_usage 校验加载文件，并检查 Isles MCP 连接。
 - 将 replay/started、result、工具和 AskUserQuestion 转为既有平台事件与问答；只恢复原 UUID，失效问题拒绝，未知结果不重投。
-- Claude 支持默认关闭的 steer，以原生批次 UUID 确认同执行消费；执行结束时撤回尚未消费的输入，未知结果关闭进程并报告待核对；停止取消原生队列。保留忙碌排队、主动 receive_messages 和原生子代理能力。
+- Claude 支持默认关闭的 steer，以原生批次 UUID 确认同执行消费；回合结束时尚未消费的输入由 CLI 接着执行并计入同一 run（2026-10-08 修复撤回竞态后确认）；停止取消原生队列。保留忙碌排队、主动 receive_messages 和原生子代理能力。
 - preClose 释放原生进程与 MCP 流，随后关闭 HTTP 与数据库，覆盖持久 SSE 连接阻塞退出的回归。
 
 macOS 原生私聊、问答、停止/恢复、改名、Codex/Claude 混合群聊、同 session 服务重启和保留历史删除均已通过；Claude steer 的三来源同执行追加、在途停止与偏好重启持久化也已通过。自动化、浏览器与真实验证分层记录在 [Claude CLI 验收](claude-cli-acceptance.md)。

@@ -330,7 +330,7 @@ adapter 必须具备固定 session 恢复（`sessionResume`）、MCP（`mcp`）�
 
 “能连接 MCP”不代表“能自动唤醒已结束的执行轮次”。Isles 的运行管理需要负责新消息触发、排队、恢复和停止。
 
-2026-10-08 Claude CLI 接入确认：每位 Agent 固定一个 UUID，创建时发送中性用户消息并等待模型回合成功，初始化由 adapter 内部处理，不产生 Isles 正式消息或 run。初始化工具调用被拦截，规则继续由工作目录文件原生加载；CLAUDE.md 导入唯一 AGENTS.md，并通过原生上下文目录验证。恢复使用原 UUID，失败显式报告。Claude 路径保存到 `[claude].binary_path`，home 采用 `ISLES_CLAUDE_HOME`、TOML、`CLAUDE_CONFIG_DIR`、`~/.claude` 的优先级；原生用户配置、认证、插件、MCP 与记忆共用。当前支持原生提问、停止与默认关闭的 steer，主动 MCP 收信可用。Claude 追加输入在原生执行边界进入当前任务，批次的主线程 replay/started 或 result 消费列表确认接受；当前任务先结束时撤回尚未消费的输入，明确撤回后排队，结果不明时关闭所属进程并保留待核对状态。停止取消原生队列中的追加输入。
+2026-10-08 Claude CLI 接入确认：每位 Agent 固定一个 UUID，创建时发送中性用户消息并等待模型回合成功，初始化由 adapter 内部处理，不产生 Isles 正式消息或 run。初始化工具调用被拦截，规则继续由工作目录文件原生加载；CLAUDE.md 导入唯一 AGENTS.md，并通过原生上下文目录验证。恢复使用原 UUID，失败显式报告。Claude 路径保存到 `[claude].binary_path`，home 采用 `ISLES_CLAUDE_HOME`、TOML、`CLAUDE_CONFIG_DIR`、`~/.claude` 的优先级；原生用户配置、认证、插件、MCP 与记忆共用。当前支持原生提问、停止与默认关闭的 steer，主动 MCP 收信可用。Claude 追加输入在原生执行边界进入当前任务，批次的主线程 replay/started 或 result 消费列表确认接受；当前回合先结束时，原生 CLI 接着执行尚未消费的追加输入，计入同一 run，全部处理完后 run 结束（2026-10-08 用户确认，替代撤回后排队）。停止取消原生队列中的追加输入。
 
 ### 8.2 协作工具
 

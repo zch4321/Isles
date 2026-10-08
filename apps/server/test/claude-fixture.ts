@@ -54,6 +54,14 @@ const finish = (message, error = false) => {
   send({ type: 'assistant', uuid: crypto.randomUUID(), session_id: sid, parent_tool_use_id: null, user_message_uuid: representative, message: { id: 'msg-' + current.uuid, content: [{ type: 'text', text: message }] } });
   send({ type: 'result', subtype: 'success', is_error: error, result: message, session_id: sid, uuid: crypto.randomUUID(), user_message_uuid: representative, user_message_uuids: consumed, queued_turn_count: queued.size });
   folded = [];
+  // Like the CLI, run queued input as the next turn shortly after the result.
+  if (queued.size && !settings().holdQueued) setTimeout(next, 20);
+};
+const next = () => {
+  if (active || !queued.size) return;
+  const [uuid, frame] = queued.entries().next().value;
+  queued.delete(uuid);
+  begin(frame);
 };
 setInterval(() => {
   if (active && !active.message.content.startsWith('Isles session initialized.') && settings().releaseHeld) finish('Released');
@@ -76,10 +84,6 @@ lines.on('line', (line) => {
       response = { memoryFiles: ['CLAUDE.md', ...(config.missingGuidance ? [] : ['AGENTS.md'])].map((name) => ({ path: path.join(process.cwd(), name), type: 'Project', tokens: 10 })) };
     } else if (request.subtype === 'mcp_status') {
       response = { mcpServers: [{ name: 'isles', status: config.failedMcp ? 'failed' : config.pendingMcp && !mcpReads++ ? 'pending' : 'connected' }] };
-    } else if (request.subtype === 'cancel_async_message') {
-      const cancelled = !config.cancelFails && queued.delete(request.message_uuid);
-      response = { cancelled };
-      if (cancelled) send({ type: 'command_lifecycle', state: 'cancelled', command_uuid: request.message_uuid, session_id: sid });
     } else if (request.subtype === 'interrupt') {
       const cancelled = request.cancel_queued ? [...queued.keys()] : [];
       for (const id of cancelled) {
@@ -108,9 +112,8 @@ lines.on('line', (line) => {
     queued.set(frame.uuid, frame);
     if (!config.dropSteerReceipt) send({ type: 'command_lifecycle', state: 'queued', command_uuid: frame.uuid, session_id: sid });
     if (config.subagentSteerAck) send({ type: 'user', uuid: frame.uuid, isReplay: true, session_id: sid, parent_tool_use_id: 'subagent-tool', message: frame.message });
-    if (config.finishBeforeSteer || config.lateSteer) {
+    if (config.finishBeforeSteer) {
       finish('Original completed');
-      if (config.lateSteer) { queued.delete(frame.uuid); acknowledge(frame); }
       return;
     }
     if (config.holdSteer || config.subagentSteerAck) return;
@@ -126,9 +129,13 @@ lines.on('line', (line) => {
     } else if (!config.keepSteeredTurn) finish('Steered: ' + frame.message.content);
     return;
   }
+  send({ type: 'command_lifecycle', state: 'queued', command_uuid: frame.uuid, session_id: sid });
+  begin(frame);
+});
+function begin(frame) {
+  const config = settings();
   active = frame;
   fs.writeFileSync(path.join(sessions, sid + '.json'), JSON.stringify({ sid, input: frame.message.content }));
-  send({ type: 'command_lifecycle', state: 'queued', command_uuid: frame.uuid, session_id: sid });
   acknowledge(frame);
   if (frame.message.content.startsWith('Isles session initialized.')) {
     if (config.blockBootstrap) return;
@@ -147,7 +154,7 @@ lines.on('line', (line) => {
   if (frame.message.content === 'wrong-session') { send({ type: 'assistant', session_id: crypto.randomUUID(), message: { content: [] } }); return; }
   if (config.staleResult) send({ type: 'result', subtype: 'success', session_id: sid, user_message_uuid: crypto.randomUUID(), is_error: false });
   finish('Reply: ' + frame.message.content);
-});
+}
 `,
   );
   return {

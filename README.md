@@ -113,7 +113,7 @@ Web 和管理 HTTP API 暂无登录鉴权，仅供本机使用，不承诺把人
 
 Claude Agent 直接共用用户的 Claude home、原生认证、配置、插件、skills、用户 MCP 与记忆，每位 Agent 保持独立工作目录和固定 UUID。工作目录的 `CLAUDE.md` 通过 `@AGENTS.md` 导入唯一规则来源，托管段之外的用户内容保留；创建和恢复均通过原生 `get_context_usage` 校验加载的文件，并检查 Isles HTTP MCP 已连接。追加的 MCP 配置只用于当前进程，token 从环境变量读取。
 
-Claude 首次创建会发送中性用户消息 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，完成一次模型回合使会话落盘。初始化期间的工具调用被拦截，结果由 adapter 内部处理，成功后 Agent 就绪；初始化不会发布 Isles 聊天消息或生成 Isles run。失败保留已分配的 session 绑定并显示原因。后续使用 `--resume=<UUID>` 恢复原会话，输入确认与结束事件以输入 UUID 关联；原生最终输出保留为执行详情，正式发言继续使用 MCP。Claude 使用原生全权限模式，并将 `AskUserQuestion` 交到 Web 回答。Claude 支持按 Agent 开启 steer，默认关闭。开启时使用批次 UUID 发送追加输入，在原生执行边界进入当前任务，保持原 session 与 run；主线程 replay/started 或 result 的消费 UUID 列表确认接受。当前执行先结束时尝试撤回尚未消费的输入，明确撤回后排到下一轮；结果不明时关闭所属进程并显示待核对。停止同时取消原生队列中的输入。
+Claude 首次创建会发送中性用户消息 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，完成一次模型回合使会话落盘。初始化期间的工具调用被拦截，结果由 adapter 内部处理，成功后 Agent 就绪；初始化不会发布 Isles 聊天消息或生成 Isles run。失败保留已分配的 session 绑定并显示原因。后续使用 `--resume=<UUID>` 恢复原会话，输入确认与结束事件以输入 UUID 关联；原生最终输出保留为执行详情，正式发言继续使用 MCP。Claude 使用原生全权限模式，并将 `AskUserQuestion` 交到 Web 回答。Claude 支持按 Agent 开启 steer，默认关闭。开启时使用批次 UUID 发送追加输入，在原生执行边界进入当前任务，保持原 session 与 run；主线程 replay/started 或 result 的消费 UUID 列表确认接受。当前回合先结束时，Claude Code 接着把尚未消费的追加输入作为下一个原生回合执行，Isles 将其计入同一执行，全部处理完后执行结束。停止同时取消原生队列中的输入。
 
 同一数据目录仅允许一个 Isles 服务。独立的 `runtime-lock.sqlite` 持有进程锁，冲突在初始化/恢复前明确拒绝；正常关闭或进程退出后由 SQLite/操作系统释放。关闭时先释放原生进程、Web SSE 和 MCP 流，再关闭 HTTP 服务与数据库。使用另一数据目录可并行运行另一份服务。
 

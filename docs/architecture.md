@@ -435,7 +435,7 @@ Claude adapter 封装 executable 发现、共享原生 home、认证和模型/ef
 
 创建时先保存 UUID，再发送 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，等待内部初始化回合成功；PreToolUse 回调在该阶段拒绝工具调用，结果不进入 Isles 消息或 run。普通输入将平台 run UUID 作为原生输入 UUID，按原生 replay/started 确认及 result 的 `user_message_uuid` 关联执行；旧输入的结果不结束当前 run。`AskUserQuestion` 通过原生控制请求关联工具、输入 UUID 与问题 ID，Web 答案回交该请求；失效请求拒绝。恢复只使用原 UUID，原生会话不存在时报告错误。
 
-Claude steer 校验固定 session 与目标 run UUID，再将批次 UUID 写入同一 stream-json 连接。原生 queued 记录排队状态，并解除等待传输回执的计时器，继续等待活动任务的消费边界；主线程 replay/started 和 result 的消费 UUID 列表将批次关联原 run，追加后的工具、提问和结果继续使用原 run 身份。当前执行结束而批次尚未确认时，adapter 调用 cancel_async_message；明确撤回后返回确定拒绝，让 Runtime 排到下一轮，其他结果关闭所属进程并通知 Runtime 结算待核对。interrupt(cancel_queued: true) 同时取消原生队列，退出通知只发布一次。
+Claude steer 校验固定 session 与目标 run UUID，再将批次 UUID 写入同一 stream-json 连接。原生 queued 记录排队状态，并解除等待传输回执的计时器，继续等待活动任务的消费边界；主线程 replay/started 和 result 的消费 UUID 列表将批次关联原 run，追加后的工具、提问和结果继续使用原 run 身份。原生回合结束时仍未消费的批次会由 CLI 作为下一个原生回合执行，adapter 因此保持 run 打开：批次被消费后计入同一 run，收到关联结果且没有待消费批次时才发布 turn 完成，一个 run 可以对应多个原生回合。这样回合结束与追加输入之间没有撤回竞态。interrupt(cancel_queued: true) 取消原生队列，被取消的批次返回确定拒绝；连接关闭或确认超时仍按待核对结算，退出通知只发布一次。
 
 应用关闭通过 `preClose` 同时释放 Runtime 原生进程和活动 MCP transport，随后关闭 HTTP 服务、数据库和数据目录锁；MCP 流不阻塞应用退出。新增 transport 在关闭阶段被拒绝。
 

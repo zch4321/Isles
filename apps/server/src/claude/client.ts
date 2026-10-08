@@ -25,7 +25,6 @@ export interface ClaudeConnection {
     text: string,
     options?: ClaudeUserOptions,
   ): Promise<void>;
-  cancelUser(messageId: string): Promise<boolean>;
   respond(id: string, response: ClaudeFrame): void;
   reject(id: string, reason: string): void;
   close(): Promise<void>;
@@ -167,8 +166,8 @@ export class ClaudeClient implements ClaudeConnection {
         frame.session_id === pending.sessionId &&
         !frame.parent_tool_use_id
       )
-        // The transport receipt is known; consumption waits for the running tool/turn.
-        // Completion, cancellation or connection close still settles this input.
+        // The transport receipt is known; consumption waits for a tool boundary or the
+        // next native turn. Cancellation or connection close still settles this input.
         clearTimeout(pending.timer);
     }
     const id =
@@ -274,20 +273,6 @@ export class ClaudeClient implements ClaudeConnection {
         reject(error);
       }
     });
-  }
-  async cancelUser(messageId: string): Promise<boolean> {
-    const response = z
-      .object({ cancelled: z.boolean() })
-      .parse(await this.control('cancel_async_message', { message_uuid: messageId }));
-    if (response.cancelled) {
-      const pending = this.inputs.get(messageId);
-      if (pending) {
-        this.inputs.delete(messageId);
-        clearTimeout(pending.timer);
-        pending.reject(new ClaudeInputRejected('Claude Code 已撤回尚未消费的输入'));
-      }
-    }
-    return response.cancelled;
   }
   respond(id: string, response: ClaudeFrame) {
     this.send({

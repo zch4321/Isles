@@ -303,7 +303,7 @@ describe('Claude CLI adapter', () => {
       ).rejects.toBeInstanceOf(HarnessSubmissionRejected);
     },
   );
-  it('withdraws unconsumed input when the original turn ends before its acknowledgement', async () => {
+  it('keeps the run open while input queued behind a finished turn runs as the next native turn', async () => {
     const f = await fixture();
     const session = await f.connect();
     const id = await session.createSession(() => {});
@@ -311,44 +311,77 @@ describe('Claude CLI adapter', () => {
     await session.submit(input);
     await f.cli.set({ finishBeforeSteer: true });
     const batchId = randomUUID();
-    await expect(
-      session.steer!({ sessionId: id, expectedTurnId: input.runId, batchId, text: 'too late' }),
-    ).rejects.toBeInstanceOf(HarnessSubmissionRejected);
-    expect(await f.cli.records()).toContainEqual(
-      expect.objectContaining({
-        type: 'control_request',
-        request: { subtype: 'cancel_async_message', message_uuid: batchId },
-      }),
-    );
+    expect(
+      await session.steer!({ sessionId: id, expectedTurnId: input.runId, batchId, text: 'late' }),
+    ).toEqual({ turnId: input.runId });
+    await vi.waitFor(() => expect(f.events.at(-1)).toMatchObject({ type: 'turn_completed' }));
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
+      {
+        type: 'turn_completed',
+        sessionId: id,
+        turnId: input.runId,
+        status: 'completed',
+        error: null,
+      },
+    ]);
+    expect(
+      f.events.flatMap((event) =>
+        event.type === 'item' ? [{ turnId: event.turnId, text: event.item.text }] : [],
+      ),
+    ).toEqual([
+      { turnId: input.runId, text: 'Original completed' },
+      { turnId: input.runId, text: 'Reply: late' },
+    ]);
     expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+    expect(f.output.exit).not.toHaveBeenCalled();
     await session.submit(f.input('next normal turn', id));
   });
-  it.each([
-    { finishBeforeSteer: true, cancelFails: true },
-    { lateSteer: true, cancelFails: true },
-    { exitOnSteer: true },
-  ])(
-    'closes ambiguous steer outcomes without treating them as a definite refusal %j',
-    async (scenario) => {
-      const f = await fixture();
-      const session = await f.connect();
-      const id = await session.createSession(() => {});
-      const input = f.input('hold', id);
-      await session.submit(input);
-      await f.cli.set(scenario);
-      await expect(
-        session.steer!({
-          sessionId: id,
-          expectedTurnId: input.runId,
-          batchId: randomUUID(),
-          text: 'unknown',
-        }),
-      ).rejects.not.toBeInstanceOf(HarnessSubmissionRejected);
-      await expect(session.submit(f.input('after failure', id))).rejects.toBeInstanceOf(
-        HarnessSubmissionRejected,
-      );
-    },
-  );
+  it('withdraws input still queued behind a finished turn when stopped', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    await f.cli.set({ finishBeforeSteer: true, holdQueued: true });
+    const pending = session.steer!({
+      sessionId: id,
+      expectedTurnId: input.runId,
+      batchId: randomUUID(),
+      text: 'queued',
+    });
+    void pending.catch(() => {});
+    await vi.waitFor(() =>
+      expect(f.received).toContainEqual(
+        expect.objectContaining({ type: 'result', user_message_uuid: input.runId }),
+      ),
+    );
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(0);
+    await session.interrupt(id, input.runId);
+    await expect(pending).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
+      expect.objectContaining({ turnId: input.runId, status: 'interrupted' }),
+    ]);
+    expect(f.output.exit).not.toHaveBeenCalled();
+  });
+  it('closes the connection when the CLI exits before confirming steer input', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    await f.cli.set({ exitOnSteer: true });
+    await expect(
+      session.steer!({
+        sessionId: id,
+        expectedTurnId: input.runId,
+        batchId: randomUUID(),
+        text: 'unknown',
+      }),
+    ).rejects.not.toBeInstanceOf(HarnessSubmissionRejected);
+    await expect(session.submit(f.input('after failure', id))).rejects.toBeInstanceOf(
+      HarnessSubmissionRejected,
+    );
+  });
   it('associates a native question emitted after steer with the original platform run', async () => {
     const f = await fixture();
     const session = await f.connect();
@@ -438,7 +471,12 @@ describe('Claude CLI adapter', () => {
     expect(f.output.exit).not.toHaveBeenCalled();
     vi.useRealTimers();
     await f.cli.set({ releaseHeld: true });
-    await expect(pending).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    await expect(pending).resolves.toEqual({ turnId: input.runId });
+    await vi.waitFor(() =>
+      expect(f.events).toContainEqual(
+        expect.objectContaining({ type: 'turn_completed', status: 'completed' }),
+      ),
+    );
     expect(f.output.exit).not.toHaveBeenCalled();
   });
   it('maps AskUserQuestion and sends the answer only to the pending native request', async () => {

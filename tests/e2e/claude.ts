@@ -31,7 +31,7 @@ export function claudeBrowserAdapter(
     let timer: NodeJS.Timeout | undefined;
     let envelopes: ReturnType<typeof parseMessageText>[] = [];
     let consumed: string[] = [];
-    const queued = new Map<string, { cancelled: boolean }>();
+    const queued = new Set<string>();
     const finish = (messageId: string, interrupted = false) => {
       if (closed || activeId !== messageId) return;
       activeId = undefined;
@@ -65,6 +65,16 @@ export function claudeBrowserAdapter(
           };
         if (subtype === 'mcp_status')
           return { mcpServers: [{ name: 'isles', status: 'connected' }] };
+        if (subtype === 'interrupt') {
+          for (const id of queued)
+            handlers.event({
+              type: 'command_lifecycle',
+              state: 'cancelled',
+              command_uuid: id,
+              session_id: sessionId,
+            });
+          queued.clear();
+        }
         if (subtype === 'interrupt' && activeId) {
           if (timer) clearTimeout(timer);
           finish(activeId, true);
@@ -80,8 +90,7 @@ export function claudeBrowserAdapter(
             channels: database.listChannels(),
           });
         if (activeId) {
-          const pending = { cancelled: false };
-          queued.set(messageId, pending);
+          queued.add(messageId);
           handlers.event({
             type: 'command_lifecycle',
             state: 'queued',
@@ -90,17 +99,20 @@ export function claudeBrowserAdapter(
           });
           await new Promise((resolve) => setTimeout(resolve, 450));
           if (closed) throw new Error('Browser Claude connection closed');
-          if (pending.cancelled) throw new ClaudeInputRejected('Browser Claude input withdrawn');
-          queued.delete(messageId);
-          envelopes.push(parse());
-          consumed.push(messageId);
-          handlers.event({
-            type: 'command_lifecycle',
-            state: 'started',
-            command_uuid: messageId,
-            session_id: sessionId,
-          });
-          return;
+          if (!queued.delete(messageId))
+            throw new ClaudeInputRejected('Browser Claude input withdrawn');
+          if (activeId) {
+            envelopes.push(parse());
+            consumed.push(messageId);
+            handlers.event({
+              type: 'command_lifecycle',
+              state: 'started',
+              command_uuid: messageId,
+              session_id: sessionId,
+            });
+            return;
+          }
+          // The previous turn already ended; like the CLI, run the queued input as the next turn.
         }
         activeId = messageId;
         consumed = [messageId];
@@ -174,13 +186,6 @@ export function claudeBrowserAdapter(
           },
           text.includes('保持执行以验证 Claude steer') ? 2_000 : 250,
         );
-      },
-      cancelUser: async (messageId) => {
-        const pending = queued.get(messageId);
-        if (!pending) return false;
-        pending.cancelled = true;
-        queued.delete(messageId);
-        return true;
       },
       respond: () => {},
       reject: () => {},
