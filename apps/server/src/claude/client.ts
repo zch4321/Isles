@@ -1,9 +1,9 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import type { Redactor } from '../errors.js';
+import { stopProcessTree } from '../harness/process.js';
 import type { Logger } from '../logging.js';
 import type { ClaudeCommand } from './executable.js';
 
@@ -290,33 +290,6 @@ export class ClaudeClient implements ClaudeConnection {
     if (this.closing) return this.terminated;
     this.closing = true;
     this.fail(new Error('Claude Code 连接已关闭'));
-    const signal = (name: NodeJS.Signals) => {
-      if (!this.child.pid) return;
-      try {
-        if (process.platform === 'win32') this.child.kill(name);
-        else process.kill(-this.child.pid, name);
-      } catch {
-        /* The owned process already exited. */
-      }
-    };
-    this.child.stdin.end();
-    if (
-      process.platform === 'win32' &&
-      this.child.pid &&
-      this.child.exitCode === null &&
-      this.child.signalCode === null
-    ) {
-      execFile(
-        join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
-        ['/PID', String(this.child.pid), '/T', '/F'],
-        { windowsHide: true },
-        (error) => {
-          if (error) signal('SIGTERM');
-        },
-      );
-    } else signal('SIGTERM');
-    const timer = setTimeout(() => signal('SIGKILL'), 2_000);
-    await this.terminated;
-    clearTimeout(timer);
+    await stopProcessTree(this.child, this.terminated);
   }
 }

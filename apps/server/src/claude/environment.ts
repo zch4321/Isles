@@ -22,7 +22,7 @@ export class ClaudeEnvironment {
     readonly config: ConfigManager,
     readonly workspace: AgentWorkspace,
   ) {
-    this.home = config.current.claudeHome;
+    this.home = config.current.cli.claude.home;
     this.log = workspace.log.child({ harness: 'claude' });
   }
   get redactor() {
@@ -40,7 +40,7 @@ export class ClaudeEnvironment {
   }
   async executable(refresh = false) {
     if (refresh) this.invalidate();
-    this.discovery ??= findClaudeExecutable({ binary: this.config.current.claudeBinaryPath });
+    this.discovery ??= findClaudeExecutable({ binary: this.config.current.cli.claude.binaryPath });
     const discovery = this.discovery;
     try {
       const executable = await discovery;

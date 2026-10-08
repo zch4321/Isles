@@ -38,7 +38,7 @@ export class CodexAdapter implements HarnessAdapter {
   readonly descriptor: HarnessDescriptor = {
     id: 'codex',
     displayName: 'Codex',
-    configuration: 'codex-path',
+    configuration: 'cli-path',
     capabilities: {
       sessionResume: true,
       interrupt: true,

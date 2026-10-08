@@ -157,7 +157,7 @@
 - Codex adapter 封装 app-server、原生模型目录/环境、中性初始化、原生 AGENTS.md 加载验证，保留先保存原生 ID 再初始化的行为。
 - `AgentWorkspace` 接管平台 data/shared 目录、MCP token、规则文件与 redactor；原生 executable/home/config 仍归对应 adapter。
 - 注册强制要求 `sessionResume`、`mcp`、`workspaceInstructions`，其他能力逐项声明；停止始终关闭所属进程，即使 harness 没有原生 interrupt。
-- Web 动态读取 `/api/harnesses` 及所选 harness 的状态/模型目录；只注册和展示 Codex。创建必传 harness，编辑不能替换；保留 `/api/codex/config`，移除旧状态/模型路由，不增加兼容别名。
+- Web 动态读取 `/api/harnesses` 及所选 harness 的状态/模型目录；只注册和展示 Codex。创建必传 harness，编辑不能替换；Codex 路径设置当时保留在 `/api/codex/config`，2026-10-08 起统一为 `/api/harnesses/:id/config`；移除旧状态/模型路由，不增加兼容别名。
 - 保留存储/API 的 `threadId` 命名，其含义为不透明原生 session ID；当前数据库基线以 `(harness, nativeHome, threadId)` 约束绑定，不限定仅 Codex。按首发前政策不增加迁移、旧 schema 检测或兼容代码，不清理或自动搬移现有 Codex 数据。
 
 验收需要三类独立证据：语义 fake adapter 验证平台协议无关的派发、相同 session ID 跨 harness、注册约束、生命周期与确定拒绝/结果不明；Codex 原生协议模拟验证 adapter 转换；完整检查、浏览器流程及真实 Codex 回归验证现有使用链路。创建/恢复期间停止、固定绑定、失效问题、子代理问题关联和关闭清理也须覆盖。适配层阶段的 128 项测试、13 项浏览器测试及两套真实 Codex 回归均通过，结果和边界见 [独立验收](harness-adapter-acceptance.md)；这些历史证据不代替第 6.1 节新增 steer 的验收。

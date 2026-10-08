@@ -1,7 +1,7 @@
-import type { HarnessStatus, Model } from '@isles/contracts';
+import type { Model } from '@isles/contracts';
 import { z } from 'zod';
 import { mkdir } from 'node:fs/promises';
-import type { HarnessCatalog } from '../harness/types.js';
+import { CachedCatalog, type CatalogSnapshot } from '../harness/catalog-cache.js';
 import { ClaudeClient } from './client.js';
 import type { ClaudeEnvironment } from './environment.js';
 
@@ -17,31 +17,11 @@ const catalogSchema = z.object({
   ),
 });
 
-export class ClaudeCatalog implements HarnessCatalog {
-  private cache: { status: HarnessStatus; models: Model[]; time: number } | undefined;
-  private fetching: Promise<{ status: HarnessStatus; models: Model[] }> | undefined;
-  private revision = 0;
-  constructor(private environment: ClaudeEnvironment) {}
-  invalidate() {
-    this.cache = undefined;
-    this.fetching = undefined;
-    this.revision++;
+export class ClaudeCatalog extends CachedCatalog {
+  constructor(private environment: ClaudeEnvironment) {
+    super();
   }
-  private async read() {
-    if (this.cache && Date.now() - this.cache.time < 30_000) return this.cache;
-    if (this.fetching) return this.fetching;
-    const revision = this.revision;
-    const fetching = this.fetch();
-    this.fetching = fetching;
-    try {
-      const value = await fetching;
-      if (revision === this.revision) this.cache = { ...value, time: Date.now() };
-      return value;
-    } finally {
-      if (this.fetching === fetching) this.fetching = undefined;
-    }
-  }
-  private async fetch() {
+  protected async fetch(): Promise<CatalogSnapshot> {
     let version: string | null = null;
     let client: ClaudeClient | undefined;
     try {
@@ -104,11 +84,5 @@ export class ClaudeCatalog implements HarnessCatalog {
     } finally {
       await client?.close();
     }
-  }
-  async status() {
-    return (await this.read()).status;
-  }
-  async models() {
-    return (await this.read()).models;
   }
 }

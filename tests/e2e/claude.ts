@@ -203,7 +203,7 @@ export function claudeBrowserAdapter(
         available: true,
         authenticated: true,
         version: 'mock-claude',
-        binaryPath: config.current.claudeBinaryPath,
+        binaryPath: config.current.cli.claude.binaryPath,
         error: null,
       }),
       models: async () => [

@@ -31,7 +31,7 @@ const config = new ConfigManager({
 });
 const { dataDir } = config.current;
 const claude = await claudeFixture(root);
-await config.configureClaudeBinary(claude.binary);
+await config.configureCliBinary('claude', claude.binary);
 const harness = new MockHarness();
 const tokens = new Map<string, string>();
 const factory = harness.factory;

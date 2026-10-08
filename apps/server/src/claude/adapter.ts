@@ -63,7 +63,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   readonly descriptor: HarnessDescriptor = {
     id: 'claude',
     displayName: 'Claude Code',
-    configuration: 'claude-path',
+    configuration: 'cli-path',
     capabilities: {
       sessionResume: true,
       interrupt: true,

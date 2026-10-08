@@ -53,7 +53,7 @@ describe('application bootstrap', () => {
     const firstPath = join(directory, 'missing-first.exe');
     const secondPath = join(directory, 'missing-second.exe');
     const save = (binaryPath: string | null) =>
-      app.inject({ method: 'PUT', url: '/api/codex/config', payload: { binaryPath } });
+      app.inject({ method: 'PUT', url: '/api/harnesses/codex/config', payload: { binaryPath } });
     expect((await save(firstPath)).json()).toMatchObject({
       binaryPath: firstPath,
       configFilePath: config.current.configFilePath,
@@ -66,19 +66,21 @@ describe('application bootstrap', () => {
     expect((await app.inject('/api/harnesses/codex/status')).json().error).toContain(secondPath);
     const invalid = await app.inject({
       method: 'PUT',
-      url: '/api/codex/config',
+      url: '/api/harnesses/codex/config',
       payload: { binaryPath: '' },
     });
     expect(invalid.statusCode).toBe(400);
     await app.close();
     const restored = await buildApp({ config: testConfig(directory) });
     cleanups.push(() => restored.close());
-    expect((await restored.inject('/api/codex/config')).json().binaryPath).toBe(secondPath);
+    expect((await restored.inject('/api/harnesses/codex/config')).json().binaryPath).toBe(
+      secondPath,
+    );
     expect(
       (
         await restored.inject({
           method: 'PUT',
-          url: '/api/codex/config',
+          url: '/api/harnesses/codex/config',
           payload: { binaryPath: null },
         })
       ).json().binaryPath,
@@ -95,7 +97,7 @@ describe('application bootstrap', () => {
     );
     const response = await app.inject({
       method: 'PUT',
-      url: '/api/codex/config',
+      url: '/api/harnesses/codex/config',
       payload: { binaryPath: 'codex' },
     });
     expect(response.statusCode).toBe(200);
@@ -104,7 +106,10 @@ describe('application bootstrap', () => {
       paths: { data_dir: 'next-data', workspace_dir: 'next-work' },
       codex: { binary_path: 'codex' },
     });
-    expect(config.current).toEqual({ ...snapshot, codexBinaryPath: 'codex' });
+    expect(config.current).toEqual({
+      ...snapshot,
+      cli: { ...snapshot.cli, codex: { ...snapshot.cli.codex, binaryPath: 'codex' } },
+    });
     const reloaded = new ConfigManager({
       configFilePath: config.current.configFilePath,
       homeDir: directory,
@@ -120,7 +125,7 @@ describe('application bootstrap', () => {
     await writeFile(config.current.configFilePath, invalid);
     const response = await app.inject({
       method: 'PUT',
-      url: '/api/codex/config',
+      url: '/api/harnesses/codex/config',
       payload: { binaryPath: 'codex' },
     });
     expect(response.statusCode).toBe(400);

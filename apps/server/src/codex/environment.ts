@@ -20,7 +20,7 @@ export class NativeEnvironment {
     readonly config: ConfigManager,
     readonly workspace: AgentWorkspace,
   ) {
-    this.home = config.current.codexHome;
+    this.home = config.current.cli.codex.home;
     this.log = workspace.log.child({ harness: 'codex' });
   }
   get redactor() {
@@ -37,10 +37,10 @@ export class NativeEnvironment {
     return this.selected?.path ?? null;
   }
   configuration() {
-    return this.config.codexConfiguration();
+    return this.config.cliConfiguration('codex');
   }
   async configure(binaryPath: string | null) {
-    const configuration = await this.config.configureCodexBinary(binaryPath);
+    const configuration = await this.config.configureCliBinary('codex', binaryPath);
     this.invalidate();
     return configuration;
   }
@@ -50,7 +50,7 @@ export class NativeEnvironment {
       this.selected = undefined;
     }
     if (!this.discovery) {
-      this.discovery = findCodexExecutable({ binary: this.config.current.codexBinaryPath });
+      this.discovery = findCodexExecutable({ binary: this.config.current.cli.codex.binaryPath });
     }
     const discovery = this.discovery;
     try {

@@ -413,7 +413,7 @@ Codex 的子代理设置沿用用户自己的 Codex 配置。子代理运行在�
 
 adapter 将原生 turn 与条目事件转换为 `HarnessEvent`，将用户问题转换为 `HarnessQuestion`，携带准确的 session、turn 与请求关联。确定原生拒绝用 `HarnessSubmissionRejected` 表达；超时、断连和其他提交错误保留结果不明语义，Runtime 不猜测是否执行，也不盲目重试。过期问题通过 adapter 拒绝，回答只交回仍有效的原请求。
 
-`GET /api/harnesses` 公开 descriptor；`GET /api/harnesses/:id/status` 与 `/models` 调用对应 catalog。Web 动态读取目录、模型和能力，只显示已注册项。旧 Codex 状态/模型路径删除，不加兼容别名；`GET/PUT /api/codex/config` 保留 Codex 可执行路径设置，并通过 adapter 失效发现/模型缓存。
+`GET /api/harnesses` 公开 descriptor；`GET /api/harnesses/:id/status` 与 `/models` 调用对应 catalog。Web 动态读取目录、模型和能力，只显示已注册项。旧 Codex 状态/模型路径删除，不加兼容别名。descriptor 声明 `configuration: 'cli-path'` 的 harness 通过 `GET/PUT /api/harnesses/:id/config` 读写可执行路径，保存后通过 adapter 失效发现/模型缓存；其他 harness 返回 404。
 
 审批或提问需要保存 Agent、原生 session、turn 和请求 ID。用户答复前检查请求是否仍有效，过期或已取消的请求不得被转交给后续执行。
 
@@ -507,7 +507,7 @@ SQLite 保存平台业务事实，harness 自己的目录保存 session 和 memo
 
 配置模块提供服务、开发代理、数据库命令与 Runtime 共用的解析结果。平台规则模板、schema 基线文件与 Web 静态资源继续从安装目录加载，不能随着数据或工作区根目录改变。
 
-手动修改 TOML 后重启应用及开发服务。保留既有 Codex 路径 UI；`GET/PUT /api/codex/config` 改为读写 TOML，响应提供 `configFilePath`。PUT 只更新 `binary_path`，`null` 删除该项；写入前重读最新 TOML 保留其他字段值，再序列化整份文件，注释和排版不保留。保存后立即刷新发现与模型缓存，不中断已运行的原生进程，不热应用文件中的其他字段。
+手动修改 TOML 后重启应用及开发服务。保留既有路径 UI；`GET/PUT /api/harnesses/:id/config` 读写 TOML 中对应 `[codex]`、`[claude]` 或 `[kimi]` 段，响应提供 `configFilePath`。PUT 只更新 `binary_path`，`null` 删除该项；写入前重读最新 TOML 保留其他字段值，再序列化整份文件，注释和排版不保留。保存后立即刷新发现与模型缓存，不中断已运行的原生进程，不热应用文件中的其他字段。
 
 工作区路径在创建 Agent 时持久化，修改配置的工作区根目录仅用于新 Agent；同版本已有 Agent 继续使用已保存路径。共享根目录随当前配置更新，不自动搬移旧共享文件。共享目录绝对路径与使用/引用规则写入每个 Agent 的 `AGENTS.md`。本轮不增加设置 UI、文件迁移或权限/沙箱层，仍使用 full access 与 never。
 

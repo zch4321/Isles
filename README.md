@@ -166,24 +166,24 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 
 ## 本机接口
 
-| 入口                                                                          | 用途                                                                                              |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `GET /api/harnesses`                                                          | 已注册的 harness 目录与能力声明；当前只返回 Codex。                                               |
-| `GET /api/harnesses/:id/status`、`GET /api/harnesses/:id/models`              | 所选 harness 的版本、认证可用性与实际模型配置。                                                   |
-| `GET/PUT /api/codex/config`                                                   | 读取/保存 TOML 中的 Codex 可执行路径；响应包含 `configFilePath`，传入 `null` 删除 `binary_path`。 |
-| `GET/POST /api/agents`、`GET/PATCH/DELETE /api/agents/:id`                    | 列表、创建、详情、修改名称/模型/推理等级/拉群权限/实时收信，以及保留历史的删除。                  |
-| `POST /api/agents/:id/stop`、`POST /api/agents/:id/resume`                    | 持久停止及原 thread 恢复。                                                                        |
-| `POST /api/agents/:id/questions/:questionId/answer`                           | 仅向仍有效的原生请求回答。                                                                        |
-| `GET/POST /api/channels`、`GET/PATCH /api/channels/:id`                       | 频道列表（含成员与最后一条消息）、建群、频道快照、群改名与暂停/继续。                             |
-| `DELETE /api/channels/:id`                                                    | 删除群聊，保留历史和文件；不停止成员 Agent。                                                      |
-| `POST /api/channels/:id/members`、`DELETE /api/channels/:id/members/:agentId` | 添加、移出群成员。                                                                                |
-| `GET/POST /api/channels/:id/messages`                                         | 有界历史与幂等发送；读取支持 `after`/`before`、`limit`，发送可带 `mentions`、`replyTo`。          |
-| `GET /api/events`                                                             | SSE 持久游标补读；`Last-Event-ID` 或 `after`，非 SSE 响应为有界事件页。                           |
-| `/mcp/:id`                                                                    | Agent 身份绑定的 Streamable HTTP MCP，仅供原生 Agent 连接。                                       |
+| 入口                                                                          | 用途                                                                                             |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `GET /api/harnesses`                                                          | 已注册的 harness 目录与能力声明。                                                                |
+| `GET /api/harnesses/:id/status`、`GET /api/harnesses/:id/models`              | 所选 harness 的版本、认证可用性与实际模型配置。                                                  |
+| `GET/PUT /api/harnesses/:id/config`                                           | 读取/保存 TOML 中该 harness 的可执行路径；响应包含 `configFilePath`，`null` 删除 `binary_path`。 |
+| `GET/POST /api/agents`、`GET/PATCH/DELETE /api/agents/:id`                    | 列表、创建、详情、修改名称/模型/推理等级/拉群权限/实时收信，以及保留历史的删除。                 |
+| `POST /api/agents/:id/stop`、`POST /api/agents/:id/resume`                    | 持久停止及原 thread 恢复。                                                                       |
+| `POST /api/agents/:id/questions/:questionId/answer`                           | 仅向仍有效的原生请求回答。                                                                       |
+| `GET/POST /api/channels`、`GET/PATCH /api/channels/:id`                       | 频道列表（含成员与最后一条消息）、建群、频道快照、群改名与暂停/继续。                            |
+| `DELETE /api/channels/:id`                                                    | 删除群聊，保留历史和文件；不停止成员 Agent。                                                     |
+| `POST /api/channels/:id/members`、`DELETE /api/channels/:id/members/:agentId` | 添加、移出群成员。                                                                               |
+| `GET/POST /api/channels/:id/messages`                                         | 有界历史与幂等发送；读取支持 `after`/`before`、`limit`，发送可带 `mentions`、`replyTo`。         |
+| `GET /api/events`                                                             | SSE 持久游标补读；`Last-Event-ID` 或 `after`，非 SSE 响应为有界事件页。                          |
+| `/mcp/:id`                                                                    | Agent 身份绑定的 Streamable HTTP MCP，仅供原生 Agent 连接。                                      |
 
 普通事件页的 `cursor` 是本页最后返回 ID，`latestCursor` 是当前库的最大 ID；续读使用 `cursor`。SSE 断线自动重连，Web 同时补读权威快照以恢复聊天与状态。原生文本不会自动进入正式聊天。
 
-创建 Agent 必须传入已注册的 `harness`；`steerEnabled` 可省略，默认 `false`，PATCH 可单独更新该字段。Web 从目录动态读取选项，仅展示实际接入项。模型和推理等级来自所选 adapter 的原生目录，不预设其他 harness。原 Codex 状态/模型路由已移除，不提供兼容别名；Codex 路径设置继续使用 `/api/codex/config`。
+创建 Agent 必须传入已注册的 `harness`；`steerEnabled` 可省略，默认 `false`，PATCH 可单独更新该字段。Web 从目录动态读取选项，仅展示实际接入项。模型和推理等级来自所选 adapter 的原生目录，不预设其他 harness。原 Codex 状态/模型路由已移除，不提供兼容别名；各 harness 的路径设置使用 `/api/harnesses/:id/config`。
 
 `GET /api/agents` 默认排除已删除 Agent；`?includeDeleted=true` 用于历史发送者目录。Agent PATCH 仅更新提供的字段，空请求或不支持的模型/等级返回 `400`；不接受修改 harness、ID、工作区或 thread。DELETE 成功返回已删除 Agent，重复删除保持相同状态。已删除 Agent 的详情仍可读取，编辑/停止/恢复返回 `410`，私聊写入返回 `409`，MCP 请求返回 `401`。
 

@@ -1,5 +1,4 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { join } from 'node:path';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import {
   NativeRpcError,
@@ -9,6 +8,7 @@ import {
   type RequestId,
 } from './protocol.js';
 import type { Redactor } from '../errors.js';
+import { stopProcessTree } from '../harness/process.js';
 import type { Logger } from '../logging.js';
 import type { NativeCommand } from './executable.js';
 
@@ -134,36 +134,6 @@ export class StdioClient implements NativeClient {
     if (this.closing) return this.terminated;
     this.closing = true;
     this.fail(new Error('Codex 连接已关闭'));
-    const signal = (name: NodeJS.Signals) => {
-      if (!this.child.pid) return;
-      try {
-        if (process.platform !== 'win32') process.kill(-this.child.pid, name);
-        else this.child.kill(name);
-      } catch {
-        /* Already exited. */
-      }
-    };
-    this.child.stdin.end();
-    if (
-      process.platform === 'win32' &&
-      this.child.pid &&
-      this.child.exitCode === null &&
-      this.child.signalCode === null
-    ) {
-      // npm launchers can own a native Codex child. Stop only this client's tree,
-      // so closing the launcher cannot leave the app-server holding its stdio open.
-      const taskkill = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
-      execFile(
-        taskkill,
-        ['/PID', String(this.child.pid), '/T', '/F'],
-        { windowsHide: true },
-        (error) => {
-          if (error) signal('SIGTERM');
-        },
-      );
-    } else signal('SIGTERM');
-    const timer = setTimeout(() => signal('SIGKILL'), 2_000);
-    await this.terminated;
-    clearTimeout(timer);
+    await stopProcessTree(this.child, this.terminated);
   }
 }

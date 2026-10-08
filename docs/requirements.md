@@ -312,7 +312,7 @@ M1 采用忙碌时持久排队；2026-10-04 增加按 Agent 配置的 steer，�
 
 Isles 配置默认位于 `~/.Isles/config.toml`，可通过 `ISLES_CONFIG_FILE` 指定另一份文件。确定的字段为 `[server].port`（默认 `4310`）、`[paths].data_dir`（默认 `data`）、`[paths].workspace_dir`（默认 `workspace`）、`[paths].log_dir`（默认 `logs`）、`[log].level`（默认 `info`）、可选 `[codex].binary_path` 与 `home`、`[dev].port`（默认 `5173`）。现有 `ISLES_*` 环境覆盖优先于 TOML，TOML 优先于默认值。省略 Codex home 时使用 `CODEX_HOME`，否则为 `~/.codex`；省略 executable 时自动发现，显式无效 executable 必须报错。
 
-手动编辑配置文件后重启应用及开发服务。保留现有 Codex 路径设置界面，不增加其他配置 UI。`GET/PUT /api/codex/config` 读写 TOML，响应包含 `configFilePath`；PUT 只修改 `binary_path`，`null` 删除该项，立即刷新检测且不打断已有原生进程。写入前重读最新 TOML，保留其他字段值后序列化整份文件，注释与排版不保留。平台资源继续按安装目录定位。
+手动编辑配置文件后重启应用及开发服务。各 CLI harness 共用路径设置界面，不增加其他配置 UI。`GET/PUT /api/harnesses/:id/config` 读写 TOML 中对应段，响应包含 `configFilePath`；PUT 只修改 `binary_path`，`null` 删除该项，立即刷新检测且不打断已有原生进程。写入前重读最新 TOML，保留其他字段值后序列化整份文件，注释与排版不保留。平台资源继续按安装目录定位。
 
 优先接入能够持续运行、双向交互的原生接口，例如 app-server、ACP、REST + WebSocket 或 HTTP + SSE，而不是以一次性 exec 作为主要执行模型。
 

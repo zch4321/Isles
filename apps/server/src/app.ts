@@ -1,5 +1,5 @@
 import fastifyStatic from '@fastify/static';
-import { ConfigurationError, type ConfigManager } from '@isles/config';
+import { ConfigurationError, isCliHarness, type ConfigManager } from '@isles/config';
 import {
   addMembersSchema,
   answerQuestionSchema,
@@ -149,19 +149,19 @@ export async function buildApp(options: AppOptions) {
   app.get<{ Params: { id: string } }>('/api/harnesses/:id/models', async (request) => ({
     models: await runtime.harnesses.get(request.params.id).catalog.models(),
   }));
-  app.get('/api/codex/config', () => options.config.codexConfiguration());
-  app.put('/api/codex/config', async (request) => {
-    const adapter = runtime.harnesses.get('codex');
+  const cliHarness = (id: string) => {
+    const adapter = runtime.harnesses.get(id);
+    if (adapter.descriptor.configuration !== 'cli-path' || !isCliHarness(id))
+      throw new HttpError(404, `${id} 没有可执行路径设置`);
+    return { adapter, id };
+  };
+  app.get<{ Params: { id: string } }>('/api/harnesses/:id/config', (request) =>
+    options.config.cliConfiguration(cliHarness(request.params.id).id),
+  );
+  app.put<{ Params: { id: string } }>('/api/harnesses/:id/config', async (request) => {
+    const { adapter, id } = cliHarness(request.params.id);
     const { binaryPath } = cliConfigurationUpdateSchema.parse(request.body);
-    const configuration = await options.config.configureCodexBinary(binaryPath);
-    adapter.invalidate();
-    return configuration;
-  });
-  app.get('/api/claude/config', () => options.config.claudeConfiguration());
-  app.put('/api/claude/config', async (request) => {
-    const adapter = runtime.harnesses.get('claude');
-    const { binaryPath } = cliConfigurationUpdateSchema.parse(request.body);
-    const configuration = await options.config.configureClaudeBinary(binaryPath);
+    const configuration = await options.config.configureCliBinary(id, binaryPath);
     adapter.invalidate();
     return configuration;
   });

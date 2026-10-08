@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
 const props = defineProps<{
-  harness: 'codex' | 'claude';
+  harness: string;
   name: string;
   failed: boolean;
   binaryPath: string | null;

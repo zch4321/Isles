@@ -191,7 +191,7 @@ function focusName(event: Event) {
       <HarnessPathSettings
         v-if="selectedHarness?.configuration"
         :key="form.harness"
-        :harness="selectedHarness.configuration === 'claude-path' ? 'claude' : 'codex'"
+        :harness="selectedHarness.id"
         :name="harnessName"
         :failed="Boolean(status.data.value && !status.data.value.available)"
         :binary-path="status.data.value?.binaryPath ?? null"

@@ -42,10 +42,11 @@ describe('ConfigManager startup configuration', () => {
       sharedDir: join(homeDir, '.Isles', 'workspace', 'shared'),
       logDir: join(homeDir, '.Isles', 'logs'),
       logLevel: 'info',
-      codexHome: join(homeDir, '.codex'),
-      codexBinaryPath: null,
-      claudeHome: join(homeDir, '.claude'),
-      claudeBinaryPath: null,
+      cli: {
+        codex: { home: join(homeDir, '.codex'), binaryPath: null },
+        claude: { home: join(homeDir, '.claude'), binaryPath: null },
+        kimi: { home: join(homeDir, '.kimi-code'), binaryPath: null },
+      },
     });
     const contents = readFileSync(configFilePath, 'utf8');
     expect(parse(contents)).toEqual({
@@ -54,6 +55,7 @@ describe('ConfigManager startup configuration', () => {
       log: { level: 'info' },
       codex: {},
       claude: {},
+      kimi: {},
       dev: { port: 5173 },
     });
     create();
@@ -82,8 +84,9 @@ port = 5500
       dataDir: join(homeDir, '.Isles', 'db'),
       workspaceDir: join(homeDir, '.Isles', 'work'),
       sharedDir: join(homeDir, '.Isles', 'work', 'shared'),
-      codexHome: join(homeDir, '.Isles', 'codex-profile'),
-      codexBinaryPath: 'codex-custom',
+      cli: {
+        codex: { home: join(homeDir, '.Isles', 'codex-profile'), binaryPath: 'codex-custom' },
+      },
     });
     expect(readFileSync(configFilePath, 'utf8')).toBe(contents);
   });
@@ -112,10 +115,14 @@ port = 5500
       port: 4500,
       webPort: 5600,
       dataDir: join(homeDir, '.Isles', 'env-db'),
-      codexHome: join(homeDir, '.Isles', 'env-home'),
-      codexBinaryPath: join(homeDir, '.Isles', 'env-codex'),
+      cli: {
+        codex: {
+          home: join(homeDir, '.Isles', 'env-home'),
+          binaryPath: join(homeDir, '.Isles', 'env-codex'),
+        },
+      },
     });
-    expect(manager.codexConfiguration()).toMatchObject({
+    expect(manager.cliConfiguration('codex')).toMatchObject({
       binaryPath: 'file-codex',
       environmentBinaryPath: join(homeDir, '.Isles', 'env-codex'),
     });
@@ -133,14 +140,18 @@ home = "~/profiles/codex"
     expect(create().current).toMatchObject({
       dataDir: join(homeDir, 'database'),
       workspaceDir: join(homeDir, 'work'),
-      codexBinaryPath: join(homeDir, 'bin', 'codex'),
-      codexHome: join(homeDir, 'profiles', 'codex'),
+      cli: {
+        codex: {
+          binaryPath: join(homeDir, 'bin', 'codex'),
+          home: join(homeDir, 'profiles', 'codex'),
+        },
+      },
     });
     expect(create({ ISLES_DATA_DIR: '~\\env-data', ISLES_CODEX_HOME: '~' }).current).toMatchObject({
       dataDir: join(homeDir, 'env-data'),
-      codexHome: homeDir,
+      cli: { codex: { home: homeDir } },
     });
-    expect(create({ ISLES_CODEX_BIN: 'tools/codex' }).current.codexBinaryPath).toBe(
+    expect(create({ ISLES_CODEX_BIN: 'tools/codex' }).current.cli.codex.binaryPath).toBe(
       join(homeDir, '.Isles', 'tools', 'codex'),
     );
   });
@@ -158,10 +169,12 @@ home = "~/profiles/codex"
 
   it('uses CODEX_HOME only when no explicit Codex home exists', () => {
     const { create, homeDir } = fixture('');
-    expect(create({ CODEX_HOME: 'profiles/fallback' }).current.codexHome).toBe(
+    expect(create({ CODEX_HOME: 'profiles/fallback' }).current.cli.codex.home).toBe(
       join(homeDir, '.Isles', 'profiles', 'fallback'),
     );
-    expect(create({ CODEX_HOME: '~/fallback' }).current.codexHome).toBe(join(homeDir, 'fallback'));
+    expect(create({ CODEX_HOME: '~/fallback' }).current.cli.codex.home).toBe(
+      join(homeDir, 'fallback'),
+    );
   });
 
   it('accepts explicit and environment-selected config files', () => {
@@ -254,16 +267,16 @@ describe('ConfigManager binary configuration writes', () => {
       const { homeDir } = fixture();
       const configFilePath = join(homeDir, 'custom-isles-settings.toml');
       const manager = new ConfigManager({ homeDir, configFilePath, environment: {} });
-      await manager.configureCodexBinary('codex-valid');
+      await manager.configureCliBinary('codex', 'codex-valid');
       const before = readFileSync(configFilePath, 'utf8');
       const snapshot = manager.current;
-      const failure = manager.configureCodexBinary(value);
+      const failure = manager.configureCliBinary('codex', value);
       await expect(failure).rejects.toBeInstanceOf(ConfigurationError);
       await expect(failure).rejects.toThrow('codex.binary_path');
       await expect(failure).rejects.toThrow(configFilePath);
       expect(readFileSync(configFilePath, 'utf8')).toBe(before);
       expect(manager.current).toBe(snapshot);
-      expect(manager.codexConfiguration().binaryPath).toBe('codex-valid');
+      expect(manager.cliConfiguration('codex').binaryPath).toBe('codex-valid');
     },
   );
 
@@ -289,12 +302,14 @@ describe('ConfigManager binary configuration writes', () => {
       const { value, expected } = binaries[kind];
       const manager = create();
       const quoted = `"${value}"`;
-      expect(await manager.configureCodexBinary(quoted)).toMatchObject({ binaryPath: expected });
-      expect(manager.current.codexBinaryPath).toBe(expected);
+      expect(await manager.configureCliBinary('codex', quoted)).toMatchObject({
+        binaryPath: expected,
+      });
+      expect(manager.current.cli.codex.binaryPath).toBe(expected);
       expect(parse(readFileSync(configFilePath, 'utf8'))).toMatchObject({
         codex: { binary_path: quoted },
       });
-      expect(create().current.codexBinaryPath).toBe(expected);
+      expect(create().current.cli.codex.binaryPath).toBe(expected);
     },
   );
 
@@ -302,12 +317,12 @@ describe('ConfigManager binary configuration writes', () => {
     const { create, homeDir } = fixture();
     const environmentBinaryPath = join(homeDir, 'Program Files', 'Codex', 'codex.exe');
     const manager = create({ ISLES_CODEX_BIN: `"${environmentBinaryPath}"` });
-    expect(manager.codexConfiguration().environmentBinaryPath).toBe(environmentBinaryPath);
-    expect(await manager.configureCodexBinary('"codex-custom"')).toMatchObject({
+    expect(manager.cliConfiguration('codex').environmentBinaryPath).toBe(environmentBinaryPath);
+    expect(await manager.configureCliBinary('codex', '"codex-custom"')).toMatchObject({
       binaryPath: 'codex-custom',
       environmentBinaryPath,
     });
-    expect(manager.current.codexBinaryPath).toBe(environmentBinaryPath);
+    expect(manager.current.cli.codex.binaryPath).toBe(environmentBinaryPath);
   });
 
   it('rereads current disk values and changes only the binary selection live', async () => {
@@ -327,7 +342,7 @@ home = "edited-home"
 port = 5600
 `,
     );
-    const result = await manager.configureCodexBinary('./tools/codex');
+    const result = await manager.configureCliBinary('codex', './tools/codex');
     expect(result).toEqual({
       binaryPath: join(homeDir, '.Isles', 'tools', 'codex'),
       environmentBinaryPath: null,
@@ -339,13 +354,16 @@ port = 5600
       codex: { home: 'edited-home', binary_path: './tools/codex' },
       dev: { port: 5600 },
     });
-    expect(manager.current).toEqual({ ...snapshot, codexBinaryPath: result.binaryPath });
+    expect(manager.current).toEqual({
+      ...snapshot,
+      cli: { ...snapshot.cli, codex: { ...snapshot.cli.codex, binaryPath: result.binaryPath } },
+    });
     expect(create().current).toMatchObject({
       port: 4500,
       webPort: 5600,
       dataDir: join(homeDir, '.Isles', 'edited-data'),
       workspaceDir: join(homeDir, '.Isles', 'edited-workspace'),
-      codexHome: join(homeDir, '.Isles', 'edited-home'),
+      cli: { codex: { home: join(homeDir, '.Isles', 'edited-home') } },
     });
     expect(readdirSync(dirname(configFilePath))).toEqual(['config.toml']);
   });
@@ -353,17 +371,17 @@ port = 5600
   it('clears the stored binary while preserving environment priority and Codex home', async () => {
     const { create, configFilePath } = fixture('[codex]\nbinary_path = "old"\nhome = "~/profile"');
     const manager = create({ ISLES_CODEX_BIN: 'env-codex' });
-    expect(await manager.configureCodexBinary('new')).toMatchObject({
+    expect(await manager.configureCliBinary('codex', 'new')).toMatchObject({
       binaryPath: 'new',
       environmentBinaryPath: 'env-codex',
     });
-    expect(manager.current.codexBinaryPath).toBe('env-codex');
-    expect(await manager.configureCodexBinary(null)).toMatchObject({
+    expect(manager.current.cli.codex.binaryPath).toBe('env-codex');
+    expect(await manager.configureCliBinary('codex', null)).toMatchObject({
       binaryPath: null,
       environmentBinaryPath: 'env-codex',
     });
     expect(parse(readFileSync(configFilePath, 'utf8'))).toEqual({ codex: { home: '~/profile' } });
-    expect(create().current.codexBinaryPath).toBeNull();
+    expect(create().current.cli.codex.binaryPath).toBeNull();
   });
 
   it('serializes concurrent writes across managers sharing a file', async () => {
@@ -371,10 +389,10 @@ port = 5600
     const first = create();
     const second = create();
     const responses = await Promise.all([
-      first.configureCodexBinary('first'),
-      second.configureCodexBinary('second'),
-      first.configureCodexBinary(null),
-      second.configureCodexBinary('last'),
+      first.configureCliBinary('codex', 'first'),
+      second.configureCliBinary('codex', 'second'),
+      first.configureCliBinary('codex', null),
+      second.configureCliBinary('codex', 'last'),
     ]);
     expect(responses.map((response) => response.binaryPath)).toEqual([
       'first',
@@ -394,11 +412,11 @@ port = 5600
     const manager = create();
     const invalid = '[server]\nport = "invalid"';
     writeFileSync(configFilePath, invalid);
-    await expect(manager.configureCodexBinary('codex')).rejects.toThrow('server.port');
+    await expect(manager.configureCliBinary('codex', 'codex')).rejects.toThrow('server.port');
     expect(readFileSync(configFilePath, 'utf8')).toBe(invalid);
-    expect(manager.current.codexBinaryPath).toBeNull();
+    expect(manager.current.cli.codex.binaryPath).toBeNull();
     writeFileSync(configFilePath, '[server]\nport = 4400');
-    await expect(manager.configureCodexBinary('codex')).resolves.toMatchObject({
+    await expect(manager.configureCliBinary('codex', 'codex')).resolves.toMatchObject({
       binaryPath: 'codex',
     });
     expect(manager.current.port).toBe(4310);
@@ -408,9 +426,11 @@ port = 5600
     const { create, homeDir, configFilePath } = fixture();
     const manager = create();
     const before = readFileSync(configFilePath, 'utf8');
-    await expect(manager.configureCodexBinary(' ')).rejects.toThrow('codex.binary_path');
+    await expect(manager.configureCliBinary('codex', ' ')).rejects.toThrow('codex.binary_path');
     expect(readFileSync(configFilePath, 'utf8')).toBe(before);
     const binaryPath = resolve(homeDir, 'bin', 'codex');
-    await expect(manager.configureCodexBinary(binaryPath)).resolves.toMatchObject({ binaryPath });
+    await expect(manager.configureCliBinary('codex', binaryPath)).resolves.toMatchObject({
+      binaryPath,
+    });
   });
 });

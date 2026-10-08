@@ -72,7 +72,8 @@ test('saves the Codex executable path in the creation dialog and restores automa
   const [response] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/codex/config') && response.request().method() === 'PUT',
+        response.url().endsWith('/api/harnesses/codex/config') &&
+        response.request().method() === 'PUT',
     ),
     page.getByRole('button', { name: '保存并检测', exact: true }).click(),
   ]);
@@ -1008,9 +1009,10 @@ test('creates Claude with independent path/model settings and joins a Codex/Clau
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
-  const originalPath = (await (await page.request.get('/api/claude/config')).json())
+  const originalPath = (await (await page.request.get('/api/harnesses/claude/config')).json())
     .binaryPath as string;
-  const codexPath = (await (await page.request.get('/api/codex/config')).json()).binaryPath;
+  const codexPath = (await (await page.request.get('/api/harnesses/codex/config')).json())
+    .binaryPath;
   await page.getByRole('button', { name: '新建 Agent' }).first().click();
   const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
   await dialog.getByLabel('Harness').selectOption('claude');
@@ -1023,7 +1025,9 @@ test('creates Claude with independent path/model settings and joins a Codex/Clau
   await expect(dialog.getByLabel('Claude Code 可执行文件路径')).toHaveValue(originalPath);
   await dialog.getByRole('button', { name: '保存并检测', exact: true }).click();
   await expect(dialog.getByRole('status')).toHaveText('路径设置已保存');
-  expect((await (await page.request.get('/api/codex/config')).json()).binaryPath).toBe(codexPath);
+  expect((await (await page.request.get('/api/harnesses/codex/config')).json()).binaryPath).toBe(
+    codexPath,
+  );
   await dialog.getByLabel('Harness').selectOption('codex');
   await expect(dialog.getByLabel('模型', { exact: true })).toHaveValue('test-model');
   await expect(dialog.getByRole('button', { name: 'Codex 路径设置', exact: true })).toBeVisible();

@@ -58,7 +58,7 @@ export const harnessCapabilitiesSchema = z.object({
 export const harnessDescriptorSchema = z.object({
   id: harnessIdSchema,
   displayName: z.string(),
-  configuration: z.enum(['codex-path', 'claude-path']).nullable(),
+  configuration: z.enum(['cli-path']).nullable(),
   capabilities: harnessCapabilitiesSchema,
 });
 export const createAgentSchema = z

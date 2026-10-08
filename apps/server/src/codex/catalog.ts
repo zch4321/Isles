@@ -1,5 +1,5 @@
-import type { HarnessStatus, Model } from '@isles/contracts';
-import type { HarnessCatalog } from '../harness/types.js';
+import type { Model } from '@isles/contracts';
+import { CachedCatalog, type CatalogSnapshot } from '../harness/catalog-cache.js';
 import { z } from 'zod';
 import { StdioClient } from './client.js';
 import type { NativeEnvironment } from './environment.js';
@@ -18,34 +18,14 @@ const modelsSchema = z.object({
   ),
   nextCursor: z.string().nullable(),
 });
-export class NativeCatalog implements HarnessCatalog {
-  private cache: { status: HarnessStatus; models: Model[]; time: number } | undefined;
-  private fetching: Promise<{ status: HarnessStatus; models: Model[] }> | undefined;
-  private revision = 0;
+export class NativeCatalog extends CachedCatalog {
   constructor(
     private environment: NativeEnvironment,
     private dataDir: string,
-  ) {}
-  invalidate() {
-    this.cache = undefined;
-    this.fetching = undefined;
-    this.revision++;
+  ) {
+    super();
   }
-  private async read() {
-    if (this.cache && Date.now() - this.cache.time < 30_000) return this.cache;
-    if (this.fetching) return this.fetching;
-    const revision = this.revision;
-    const fetching = this.fetch();
-    this.fetching = fetching;
-    try {
-      const result = await fetching;
-      if (this.revision === revision) this.cache = { ...result, time: Date.now() };
-      return result;
-    } finally {
-      if (this.fetching === fetching) this.fetching = undefined;
-    }
-  }
-  private async fetch() {
+  protected async fetch(): Promise<CatalogSnapshot> {
     let version: string | null = null;
     let client: StdioClient | undefined;
     try {
@@ -106,11 +86,5 @@ export class NativeCatalog implements HarnessCatalog {
     } finally {
       await client?.close();
     }
-  }
-  async status() {
-    return (await this.read()).status;
-  }
-  async models() {
-    return (await this.read()).models;
   }
 }

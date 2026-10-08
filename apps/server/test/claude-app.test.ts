@@ -23,7 +23,7 @@ async function fixture() {
     homeDir: root,
     environment: { ISLES_CLAUDE_HOME: cli.home },
   });
-  await config.configureClaudeBinary(cli.binary);
+  await config.configureCliBinary('claude', cli.binary);
   const app = await buildApp({ config, runtimeUrl: 'http://127.0.0.1:4310' });
   cleanups.push(() => app.close());
   return { root, cli, config, app };
@@ -40,13 +40,13 @@ describe('Claude application integration', () => {
     });
     await app.inject({
       method: 'PUT',
-      url: '/api/codex/config',
+      url: '/api/harnesses/codex/config',
       payload: { binaryPath: 'codex-independent' },
     });
     const missing = join(root, 'missing-claude');
     const saved = await app.inject({
       method: 'PUT',
-      url: '/api/claude/config',
+      url: '/api/harnesses/claude/config',
       payload: { binaryPath: missing },
     });
     expect(saved.json()).toMatchObject({
@@ -70,25 +70,26 @@ describe('Claude application integration', () => {
       }),
     });
     cleanups.push(() => restored.close());
-    expect((await restored.inject('/api/claude/config')).json().binaryPath).toBe(missing);
+    expect((await restored.inject('/api/harnesses/claude/config')).json().binaryPath).toBe(missing);
     expect(
       (
         await restored.inject({
           method: 'PUT',
-          url: '/api/claude/config',
+          url: '/api/harnesses/claude/config',
           payload: { binaryPath: '' },
         })
       ).statusCode,
     ).toBe(400);
     await restored.inject({
       method: 'PUT',
-      url: '/api/claude/config',
+      url: '/api/harnesses/claude/config',
       payload: { binaryPath: null },
     });
-    expect((await restored.inject('/api/claude/config')).json().binaryPath).toBeNull();
-    expect((await restored.inject('/api/codex/config')).json().binaryPath).toBe(
+    expect((await restored.inject('/api/harnesses/claude/config')).json().binaryPath).toBeNull();
+    expect((await restored.inject('/api/harnesses/codex/config')).json().binaryPath).toBe(
       'codex-independent',
     );
+    expect((await restored.inject('/api/harnesses/missing/config')).statusCode).toBe(404);
   });
   it('creates a ready Claude Agent without publishing bootstrap input or an Isles run and resumes the same binding', async () => {
     const { app } = await fixture();

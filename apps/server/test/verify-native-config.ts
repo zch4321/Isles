@@ -206,7 +206,7 @@ try {
   assert.ok(status.binaryPath);
   const saved = await app.inject({
     method: 'PUT',
-    url: '/api/codex/config',
+    url: '/api/harnesses/codex/config',
     payload: { binaryPath: status.binaryPath },
   });
   assert.equal(saved.statusCode, 200);
