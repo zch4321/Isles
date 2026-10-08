@@ -1018,7 +1018,7 @@ test('creates Claude with independent path/model settings and joins a Codex/Clau
   await expect(dialog.getByLabel('推理等级')).toHaveValue('default');
   await expect(
     dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
   await dialog.getByRole('button', { name: 'Claude Code 路径设置', exact: true }).click();
   await expect(dialog.getByLabel('Claude Code 可执行文件路径')).toHaveValue(originalPath);
   await dialog.getByRole('button', { name: '保存并检测', exact: true }).click();
@@ -1097,4 +1097,64 @@ test('creates Claude with independent path/model settings and joins a Codex/Clau
     'MCP 回复：混合群浏览器消息',
   );
   expect(errors).toEqual([]);
+});
+
+test('steers Claude busy input through the Web in the original run and persists the preference', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '新建 Agent' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
+  await dialog.getByLabel('Harness').selectOption('claude');
+  await dialog.getByLabel('名称').fill('Claude steer 浏览器验证');
+  const switchControl = dialog.getByRole('switch', {
+    name: '忙碌时实时接收（steer）',
+    exact: true,
+  });
+  await expect(switchControl).toBeEnabled();
+  await expect(switchControl).toHaveAttribute('aria-checked', 'false');
+  await switchControl.click();
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  const agent = (await created.json()) as Agent;
+  expect(agent.steerEnabled).toBe(true);
+  await expect(page.getByTestId('agent-status')).toHaveText('可用');
+  await send(page, '保持执行以验证 Claude steer');
+  await expect(page.getByTestId('agent-status')).toHaveText('执行中');
+  await send(page, 'Claude 当前执行中的补充指令');
+  await expect(
+    page
+      .getByRole('article', { name: '你的消息', exact: true })
+      .filter({ hasText: 'Claude 当前执行中的补充指令' }),
+  ).toContainText('投递中');
+  await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+    'Claude MCP 回复：Claude 当前执行中的补充指令',
+  );
+  await expect(page.getByTestId('agent-status')).toHaveText('可用');
+  const detail = await (await page.request.get(`/api/agents/${agent.id}`)).json();
+  expect(detail.runs).toHaveLength(1);
+  expect(detail.runs[0].inputs).toEqual([{ channelId: agent.channelId, messageSeqs: [1, 2] }]);
+  const binding = detail.agent.threadId;
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  const steering = page
+    .getByTestId('inspector')
+    .getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
+  await expect(steering).toHaveAttribute('aria-checked', 'true');
+  await steering.click();
+  await expect(steering).toHaveAttribute('aria-checked', 'false');
+  await page.reload();
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  await expect(
+    page
+      .getByTestId('inspector')
+      .getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
+  ).toHaveAttribute('aria-checked', 'false');
+  expect((await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.threadId).toBe(
+    binding,
+  );
 });

@@ -7,6 +7,9 @@ import type { Redactor } from '../errors.js';
 import type { ClaudeCommand } from './executable.js';
 
 export type ClaudeFrame = Record<string, unknown>;
+export interface ClaudeUserOptions {
+  waitForConsumption?: boolean;
+}
 export interface ClaudeHandlers {
   event(frame: ClaudeFrame): void;
   request(id: string, request: ClaudeFrame): void;
@@ -15,7 +18,13 @@ export interface ClaudeHandlers {
 }
 export interface ClaudeConnection {
   control(subtype: string, params?: ClaudeFrame): Promise<unknown>;
-  sendUser(sessionId: string, messageId: string, text: string): Promise<void>;
+  sendUser(
+    sessionId: string,
+    messageId: string,
+    text: string,
+    options?: ClaudeUserOptions,
+  ): Promise<void>;
+  cancelUser(messageId: string): Promise<boolean>;
   respond(id: string, response: ClaudeFrame): void;
   reject(id: string, reason: string): void;
   close(): Promise<void>;
@@ -44,7 +53,13 @@ export class ClaudeClient implements ClaudeConnection {
   >();
   private readonly inputs = new Map<
     string,
-    { resolve(): void; reject(error: Error): void; timer: NodeJS.Timeout }
+    {
+      sessionId: string;
+      waitForConsumption: boolean;
+      resolve(): void;
+      reject(error: Error): void;
+      timer: NodeJS.Timeout;
+    }
   >();
   private closed = false;
   private closing = false;
@@ -132,6 +147,18 @@ export class ClaudeClient implements ClaudeConnection {
       if (typeof frame.request_id === 'string') this.handlers.cancel(frame.request_id);
       return;
     }
+    if (frame.type === 'command_lifecycle' && frame.state === 'queued') {
+      const id = frame.command_uuid;
+      const pending = typeof id === 'string' ? this.inputs.get(id) : undefined;
+      if (
+        pending?.waitForConsumption &&
+        frame.session_id === pending.sessionId &&
+        !frame.parent_tool_use_id
+      )
+        // The transport receipt is known; consumption waits for the running tool/turn.
+        // Completion, cancellation or connection close still settles this input.
+        clearTimeout(pending.timer);
+    }
     const id =
       frame.type === 'user' && frame.isReplay === true
         ? frame.uuid
@@ -140,12 +167,28 @@ export class ClaudeClient implements ClaudeConnection {
           : frame.type === 'result'
             ? frame.user_message_uuid
             : undefined;
-    if (typeof id === 'string') {
+    const ids = new Set([
+      id,
+      ...(frame.type === 'result' && Array.isArray(frame.user_message_uuids)
+        ? frame.user_message_uuids
+        : []),
+    ]);
+    for (const id of ids) {
+      if (typeof id !== 'string' || frame.parent_tool_use_id) continue;
       const pending = this.inputs.get(id);
-      if (pending) {
+      if (pending && frame.session_id === pending.sessionId) {
         this.inputs.delete(id);
         clearTimeout(pending.timer);
         pending.resolve();
+      }
+    }
+    if (frame.type === 'command_lifecycle' && frame.state === 'cancelled') {
+      const id = frame.command_uuid;
+      const pending = typeof id === 'string' ? this.inputs.get(id) : undefined;
+      if (pending && frame.session_id === pending.sessionId && !frame.parent_tool_use_id) {
+        this.inputs.delete(id as string);
+        clearTimeout(pending.timer);
+        pending.reject(new ClaudeInputRejected('Claude Code 已撤回尚未消费的输入'));
       }
     }
     this.handlers.event(frame);
@@ -185,13 +228,26 @@ export class ClaudeClient implements ClaudeConnection {
       }
     });
   }
-  sendUser(sessionId: string, messageId: string, text: string): Promise<void> {
+  sendUser(
+    sessionId: string,
+    messageId: string,
+    text: string,
+    options: ClaudeUserOptions = {},
+  ): Promise<void> {
+    if (this.inputs.has(messageId))
+      return Promise.reject(new ClaudeInputRejected('Claude Code 输入 UUID 已在投递中'));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.inputs.delete(messageId);
         reject(new Error('Claude Code 输入确认超时，结果待核对'));
       }, 60_000);
-      this.inputs.set(messageId, { resolve, reject, timer });
+      this.inputs.set(messageId, {
+        sessionId,
+        waitForConsumption: options.waitForConsumption === true,
+        resolve,
+        reject,
+        timer,
+      });
       try {
         this.send({
           type: 'user',
@@ -206,6 +262,20 @@ export class ClaudeClient implements ClaudeConnection {
         reject(error);
       }
     });
+  }
+  async cancelUser(messageId: string): Promise<boolean> {
+    const response = z
+      .object({ cancelled: z.boolean() })
+      .parse(await this.control('cancel_async_message', { message_uuid: messageId }));
+    if (response.cancelled) {
+      const pending = this.inputs.get(messageId);
+      if (pending) {
+        this.inputs.delete(messageId);
+        clearTimeout(pending.timer);
+        pending.reject(new ClaudeInputRejected('Claude Code 已撤回尚未消费的输入'));
+      }
+    }
+    return response.cancelled;
   }
   respond(id: string, response: ClaudeFrame) {
     this.send({

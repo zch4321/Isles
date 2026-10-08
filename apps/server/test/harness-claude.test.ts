@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ClaudeAdapter, CLAUDE_INITIALIZATION_MESSAGE } from '../src/claude/adapter.js';
 import { ClaudeEnvironment } from '../src/claude/environment.js';
+import { ClaudeClient, type ClaudeFrame } from '../src/claude/client.js';
 import {
   HarnessSubmissionRejected,
   type HarnessEvent,
@@ -18,6 +19,7 @@ import { claudeFixture } from './claude-fixture.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   for (const cleanup of cleanups.reverse()) await cleanup();
   cleanups.length = 0;
 });
@@ -32,7 +34,26 @@ async function fixture() {
   });
   const workspace = new AgentWorkspace(config);
   const environment = new ClaudeEnvironment(config, workspace);
-  const adapter = new ClaudeAdapter(environment);
+  const received: ClaudeFrame[] = [];
+  const adapter = new ClaudeAdapter(
+    environment,
+    undefined,
+    (command, args, cwd, env, handlers) =>
+      new ClaudeClient(
+        command,
+        args,
+        cwd,
+        env,
+        {
+          ...handlers,
+          event: (frame) => {
+            received.push(frame);
+            handlers.event(frame);
+          },
+        },
+        environment.redactor,
+      ),
+  );
   const agent: AgentRecord = {
     id: randomUUID(),
     channelId: randomUUID(),
@@ -73,7 +94,7 @@ async function fixture() {
     reasoningEffort: agent.reasoningEffort,
     workspace: agent.workspace,
   });
-  return { root, cli, config, adapter, agent, events, questions, output, connect, input };
+  return { root, cli, config, adapter, agent, events, received, questions, output, connect, input };
 }
 
 describe('Claude CLI adapter', () => {
@@ -179,6 +200,245 @@ describe('Claude CLI adapter', () => {
     await expect(session.submit({ ...f.input('bad', id), model: 'other' })).rejects.toBeInstanceOf(
       HarnessSubmissionRejected,
     );
+  });
+  it.each([{}, { resultOnlySteer: true }, { resultUsesSteerUuid: true }])(
+    'absorbs busy input into the original turn using consumption confirmations %j',
+    async (scenario) => {
+      const f = await fixture();
+      const session = await f.connect();
+      const id = await session.createSession(() => {});
+      const input = f.input('hold', id);
+      await session.submit(input);
+      await f.cli.set(scenario);
+      const batchId = randomUUID();
+      expect(
+        await session.steer!({
+          sessionId: id,
+          expectedTurnId: input.runId,
+          batchId,
+          text: 'update',
+        }),
+      ).toEqual({ turnId: input.runId });
+      await vi.waitFor(() =>
+        expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
+          {
+            type: 'turn_completed',
+            sessionId: id,
+            turnId: input.runId,
+            status: 'completed',
+            error: null,
+          },
+        ]),
+      );
+      expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+      expect((await f.cli.records()).filter((frame) => frame.type === 'user')).toMatchObject([
+        { message: { content: CLAUDE_INITIALIZATION_MESSAGE } },
+        { uuid: input.runId },
+        { uuid: batchId, session_id: id, message: { content: 'update' } },
+      ]);
+    },
+  );
+  it('rejects a different session, turn, or repeated batch before writing native input', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    const steer = {
+      sessionId: id,
+      expectedTurnId: input.runId,
+      batchId: randomUUID(),
+      text: 'more',
+    };
+    for (const invalid of [
+      { ...steer, sessionId: randomUUID() },
+      { ...steer, expectedTurnId: randomUUID() },
+      { ...steer, batchId: input.runId },
+    ])
+      await expect(session.steer!(invalid)).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    await f.cli.set({ keepSteeredTurn: true });
+    await session.steer!(steer);
+    await expect(session.steer!(steer)).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    expect((await f.cli.records()).filter((frame) => frame.type === 'user')).toHaveLength(3);
+  });
+  it.each([{ holdSteer: true }, { subagentSteerAck: true }])(
+    'waits for main-turn consumption and cancels queued inputs when stopped %j',
+    async (scenario) => {
+      const f = await fixture();
+      const session = await f.connect();
+      const id = await session.createSession(() => {});
+      const input = f.input('hold', id);
+      await session.submit(input);
+      await f.cli.set(scenario);
+      let settled = false;
+      const pending = session.steer!({
+        sessionId: id,
+        expectedTurnId: input.runId,
+        batchId: randomUUID(),
+        text: 'pending',
+      });
+      void pending.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.waitFor(async () =>
+        expect((await f.cli.records()).filter((frame) => frame.type === 'user')).toHaveLength(3),
+      );
+      expect(settled).toBe(false);
+      await session.interrupt(id, input.runId);
+      await expect(pending).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+      expect(
+        (await f.cli.records()).filter((frame) => frame.type === 'control_request'),
+      ).toContainEqual(
+        expect.objectContaining({ request: { subtype: 'interrupt', cancel_queued: true } }),
+      );
+      await expect(
+        session.steer!({
+          sessionId: id,
+          expectedTurnId: input.runId,
+          batchId: randomUUID(),
+          text: 'late',
+        }),
+      ).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    },
+  );
+  it('withdraws unconsumed input when the original turn ends before its acknowledgement', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    await f.cli.set({ finishBeforeSteer: true });
+    const batchId = randomUUID();
+    await expect(
+      session.steer!({ sessionId: id, expectedTurnId: input.runId, batchId, text: 'too late' }),
+    ).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    expect(await f.cli.records()).toContainEqual(
+      expect.objectContaining({
+        type: 'control_request',
+        request: { subtype: 'cancel_async_message', message_uuid: batchId },
+      }),
+    );
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+    await session.submit(f.input('next normal turn', id));
+  });
+  it.each([
+    { finishBeforeSteer: true, cancelFails: true },
+    { lateSteer: true, cancelFails: true },
+    { exitOnSteer: true },
+  ])(
+    'closes ambiguous steer outcomes without treating them as a definite refusal %j',
+    async (scenario) => {
+      const f = await fixture();
+      const session = await f.connect();
+      const id = await session.createSession(() => {});
+      const input = f.input('hold', id);
+      await session.submit(input);
+      await f.cli.set(scenario);
+      await expect(
+        session.steer!({
+          sessionId: id,
+          expectedTurnId: input.runId,
+          batchId: randomUUID(),
+          text: 'unknown',
+        }),
+      ).rejects.not.toBeInstanceOf(HarnessSubmissionRejected);
+      await expect(session.submit(f.input('after failure', id))).rejects.toBeInstanceOf(
+        HarnessSubmissionRejected,
+      );
+    },
+  );
+  it('associates a native question emitted after steer with the original platform run', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    await f.cli.set({ steerQuestion: true, resultUsesSteerUuid: true });
+    await session.steer!({
+      sessionId: id,
+      expectedTurnId: input.runId,
+      batchId: randomUUID(),
+      text: 'ask now',
+    });
+    await vi.waitFor(() => expect(f.questions).toHaveLength(1));
+    const question = f.questions[0]!;
+    expect(question.turnId).toBe(input.runId);
+    session.answer(question.requestId, { answers: { 'question-0': { answers: ['Two'] } } });
+    await vi.waitFor(() =>
+      expect(f.events).toContainEqual(
+        expect.objectContaining({
+          type: 'turn_completed',
+          turnId: input.runId,
+          status: 'completed',
+        }),
+      ),
+    );
+  });
+  it('releases the active connection and reports one exit when a steer confirmation times out', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    await f.cli.set({ holdSteer: true, dropSteerReceipt: true });
+    vi.useFakeTimers();
+    const pending = session.steer!({
+      sessionId: id,
+      expectedTurnId: input.runId,
+      batchId: randomUUID(),
+      text: 'unconfirmed',
+    });
+    void pending.catch(() => {});
+    await vi.waitFor(async () =>
+      expect((await f.cli.records()).filter((frame) => frame.type === 'user')).toHaveLength(3),
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    vi.useRealTimers();
+    await expect(pending).rejects.toThrow('输入确认超时');
+    expect(f.output.exit).toHaveBeenCalledTimes(1);
+    await expect(session.submit(f.input('after timeout', id))).rejects.toBeInstanceOf(
+      HarnessSubmissionRejected,
+    );
+    const restored = await f.connect();
+    expect(await restored.resumeSession(id)).toBe(id);
+  });
+  it('waits beyond the transport timeout when the CLI has queued steer behind a running tool', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    await f.cli.set({ holdSteer: true });
+    vi.useFakeTimers();
+    const batchId = randomUUID();
+    let settled = false;
+    const pending = session.steer!({
+      sessionId: id,
+      expectedTurnId: input.runId,
+      batchId,
+      text: 'long tool',
+    });
+    void pending.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await vi.waitFor(() =>
+      expect(f.received).toContainEqual(
+        expect.objectContaining({
+          type: 'command_lifecycle',
+          command_uuid: batchId,
+          state: 'queued',
+        }),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(settled).toBe(false);
+    expect(f.output.exit).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    await f.cli.set({ releaseHeld: true });
+    await expect(pending).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    expect(f.output.exit).not.toHaveBeenCalled();
   });
   it('maps AskUserQuestion and sends the answer only to the pending native request', async () => {
     const f = await fixture();

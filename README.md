@@ -2,7 +2,7 @@
 
 **让独立的 AI 一起工作。**
 
-面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server** 与 **Claude Code CLI**，通过独立的 harness adapter 参与私聊和混合群聊。Codex 支持默认关闭的实时收信开关；Claude 忙碌时排队，也可在当前执行中通过 MCP 主动收信。Kimi Code 保留为后续候选。
+面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server** 与 **Claude Code CLI**，通过独立的 harness adapter 参与私聊和混合群聊。Codex 与 Claude 均支持默认关闭的实时收信开关：开启时追加到当前执行，关闭时忙碌排队；Agent 也可通过 MCP 主动收信。Kimi Code 保留为后续候选。
 
 Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到 `[channel: "评审", seq: 12, from: agent:"Alice"]` 这样的文本头部，自己的私聊显示为 `private`。普通消息用名称呈现群、发送者与提及对象，重名时在引号外附加 ID 短前缀；工具仍通过目录查询完整 UUID 寻址，消息仍以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，本轮验证见 [名称消息验收](docs/name-message-acceptance.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。
 
@@ -41,7 +41,7 @@ pnpm dev
 
 本机需要已安装并完成原生认证的 Codex CLI。当前协议验证基线为 `codex-cli 0.160.0`，依据 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server) 与该版本生成的类型实现，使用 `instructionSources` 校验规则文件加载。升级 CLI 后应重新验证协议。Web 创建表单从真实 `model/list` 读取可用模型和推理等级。
 
-使用 Claude 时，本机需要已安装并完成原生认证的 Claude Code CLI。本轮已验证 `2.1.285` 的双向 `stream-json`、模型目录、规则来源、MCP、原生提问与会话恢复，直接运行本机 CLI。版本变化后重新验证原生协议；实施与真实验收见 [Claude CLI 验收](docs/claude-cli-acceptance.md)。
+使用 Claude 时，本机需要已安装并完成原生认证的 Claude Code CLI。本轮已验证 `2.1.285` 的双向 `stream-json`、模型目录、规则来源、MCP、原生提问、steer 与会话恢复，直接运行本机 CLI。版本变化后重新验证原生协议；实施与真实验收见 [Claude CLI 验收](docs/claude-cli-acceptance.md)。
 
 配置默认保存在 `~/.Isles/config.toml`；`~` 表示当前用户主目录。最小配置为：
 
@@ -106,7 +106,7 @@ Web 和管理 HTTP API 暂无登录鉴权，仅供本机使用，不承诺把人
 
 Claude Agent 直接共用用户的 Claude home、原生认证、配置、插件、skills、用户 MCP 与记忆，每位 Agent 保持独立工作目录和固定 UUID。工作目录的 `CLAUDE.md` 通过 `@AGENTS.md` 导入唯一规则来源，托管段之外的用户内容保留；创建和恢复均通过原生 `get_context_usage` 校验加载的文件，并检查 Isles HTTP MCP 已连接。追加的 MCP 配置只用于当前进程，token 从环境变量读取。
 
-Claude 首次创建会发送中性用户消息 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，完成一次模型回合使会话落盘。初始化期间的工具调用被拦截，结果由 adapter 内部处理，成功后 Agent 就绪；初始化不会发布 Isles 聊天消息或生成 Isles run。失败保留已分配的 session 绑定并显示原因。后续使用 `--resume=<UUID>` 恢复原会话，输入确认与结束事件以输入 UUID 关联；原生最终输出保留为执行详情，正式发言继续使用 MCP。Claude 使用原生全权限模式，并将 `AskUserQuestion` 交到 Web 回答。当前 steer 能力关闭，排队与主动收信保持原平台语义。
+Claude 首次创建会发送中性用户消息 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，完成一次模型回合使会话落盘。初始化期间的工具调用被拦截，结果由 adapter 内部处理，成功后 Agent 就绪；初始化不会发布 Isles 聊天消息或生成 Isles run。失败保留已分配的 session 绑定并显示原因。后续使用 `--resume=<UUID>` 恢复原会话，输入确认与结束事件以输入 UUID 关联；原生最终输出保留为执行详情，正式发言继续使用 MCP。Claude 使用原生全权限模式，并将 `AskUserQuestion` 交到 Web 回答。Claude 支持按 Agent 开启 steer，默认关闭。开启时使用批次 UUID 发送追加输入，在原生执行边界进入当前任务，保持原 session 与 run；主线程 replay/started 或 result 的消费 UUID 列表确认接受。当前执行先结束时尝试撤回尚未消费的输入，明确撤回后排到下一轮；结果不明时关闭所属进程并显示待核对。停止同时取消原生队列中的输入。
 
 同一数据目录仅允许一个 Isles 服务。独立的 `runtime-lock.sqlite` 持有进程锁，冲突在初始化/恢复前明确拒绝；正常关闭或进程退出后由 SQLite/操作系统释放。关闭时先释放原生进程、Web SSE 和 MCP 流，再关闭 HTTP 服务与数据库。使用另一数据目录可并行运行另一份服务。
 

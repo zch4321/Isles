@@ -1,5 +1,6 @@
 import { ConfigManager } from '@isles/config';
 import type { Agent } from '@isles/contracts';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -108,21 +109,100 @@ describe('Claude application integration', () => {
     await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
     expect(app.isles.store.publicAgent(agent.id).threadId).toBe(binding);
   });
-  it('rejects unsupported Claude steer before creating an Agent or native conversation', async () => {
+  it('enables Claude steer and completes busy input in the same platform run and native session', async () => {
     const { app, cli } = await fixture();
     const result = await app.inject({
       method: 'POST',
       url: '/api/agents',
       payload: {
         harness: 'claude',
-        name: 'Unsupported steer',
+        name: 'Claude steer',
         model: 'default',
         reasoningEffort: 'high',
         steerEnabled: true,
       },
     });
-    expect(result.statusCode).toBe(400);
-    expect(app.isles.store.listAgents()).toEqual([]);
-    expect((await cli.records()).filter((record) => record.type === 'user')).toEqual([]);
+    expect(result.statusCode).toBe(201);
+    const agent = result.json() as Agent;
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
+    const binding = app.isles.store.publicAgent(agent.id).threadId;
+    await cli.set({ holdTurn: true });
+    await app.inject({
+      method: 'POST',
+      url: `/api/channels/${agent.channelId}/messages`,
+      payload: { body: 'initial', clientId: randomUUID() },
+    });
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('running'));
+    const runId = app.isles.store.agentDetail(agent.id).runs[0]!.id;
+    await app.inject({
+      method: 'POST',
+      url: `/api/channels/${agent.channelId}/messages`,
+      payload: { body: 'appended', clientId: randomUUID() },
+    });
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
+    expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([
+      {
+        id: runId,
+        threadId: binding,
+        turnId: runId,
+        status: 'completed',
+        inputs: [{ messageSeqs: [1, 2] }],
+      },
+    ]);
+    expect(app.isles.store.agentDetail(agent.id).runs).toHaveLength(1);
+    expect(
+      app.isles.store.listMessages(agent.channelId).map((message) => message.deliveries[0]!.status),
+    ).toEqual(['completed', 'completed']);
+    const frames = await cli.records();
+    const batchId = frames.filter((frame) => frame.type === 'user').at(-1)!.uuid as string;
+    expect(app.isles.store.getSteer(batchId)).toMatchObject({
+      runId,
+      turnId: runId,
+      status: 'accepted',
+    });
+    const launches = frames.filter((frame) => frame.type === 'launch').length;
+    const edited = await app.inject({
+      method: 'PATCH',
+      url: `/api/agents/${agent.id}`,
+      payload: { steerEnabled: false },
+    });
+    expect(edited.json()).toMatchObject({ steerEnabled: false, threadId: binding });
+    expect((await cli.records()).filter((frame) => frame.type === 'launch')).toHaveLength(launches);
+  });
+  it('keeps Claude busy input queued when steer is off', async () => {
+    const { app, cli } = await fixture();
+    const agent = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/agents',
+        payload: { harness: 'claude', name: 'Queue', model: 'default', reasoningEffort: 'high' },
+      })
+    ).json() as Agent;
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
+    await cli.set({ holdTurn: true });
+    await app.inject({
+      method: 'POST',
+      url: `/api/channels/${agent.channelId}/messages`,
+      payload: { body: 'initial', clientId: randomUUID() },
+    });
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('running'));
+    await app.inject({
+      method: 'POST',
+      url: `/api/channels/${agent.channelId}/messages`,
+      payload: { body: 'queued', clientId: randomUUID() },
+    });
+    expect(app.isles.store.listMessages(agent.channelId).at(-1)!.deliveries[0]!.status).toBe(
+      'queued',
+    );
+    expect((await cli.records()).filter((frame) => frame.type === 'user')).toHaveLength(2);
+    await cli.set({ releaseHeld: true });
+    await vi.waitFor(() =>
+      expect(
+        app.isles.store.agentDetail(agent.id).runs.filter((run) => run.status === 'completed'),
+      ).toHaveLength(2),
+    );
+    expect(
+      new Set(app.isles.store.agentDetail(agent.id).runs.map((run) => run.threadId)).size,
+    ).toBe(1);
   });
 });

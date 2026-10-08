@@ -1,6 +1,6 @@
 # Isles 实现计划
 
-> 版本：0.18 · 日期：2026-10-08 · 状态：Claude CLI 已接入并通过真实混合群聊验收；Codex steer 保持原行为
+> 版本：0.19 · 日期：2026-10-08 · 状态：Claude CLI 与 steer 已接入并通过真实验收；Codex steer 保持原行为
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
@@ -41,7 +41,7 @@
 
 消息持久化、权限检查、停止和恢复从相应功能的第一阶段就实现；M5 扩展故障覆盖和体验，不用于推迟基础正确性。
 
-统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex 与 Claude CLI；Codex 支持默认关闭的 steer，Claude 使用排队与主动收信。Kimi 仍是候选。
+统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex 与 Claude CLI；Codex 与 Claude 均支持默认关闭的 steer、忙碌排队和主动收信。Kimi 仍是候选。
 
 配置与目录拆分的验收覆盖优先级、路径解析、数据库/token 位置、Codex 发现及错误、UI 保存与实时检测、工作区稳定性、共享目录和原生规则加载。当前结果为 89 项测试、7 项浏览器测试与两个真实 Codex Agent 的读写/重启验证通过。旧目录清理仍有进程占用及工具审批限制，具体边界见 [验收记录](config-workspace-acceptance.md#4-旧目录清理遗留项)。
 
@@ -187,10 +187,10 @@
 - 创建先保存 UUID，发送中性消息并等待内部模型回合成功；工具调用在该阶段被拒绝，结果不生成 Isles 消息或 run。
 - CLAUDE.md 原生导入唯一 AGENTS.md，通过 get_context_usage 校验加载文件，并检查 Isles MCP 连接。
 - 将 replay/started、result、工具和 AskUserQuestion 转为既有平台事件与问答；只恢复原 UUID，失效问题拒绝，未知结果不重投。
-- Claude steer 关闭，忙碌输入排队；保留主动 receive_messages 和原生子代理能力。
+- Claude 支持默认关闭的 steer，以原生批次 UUID 确认同执行消费；执行结束时撤回尚未消费的输入，未知结果关闭进程并报告待核对；停止取消原生队列。保留忙碌排队、主动 receive_messages 和原生子代理能力。
 - preClose 释放原生进程与 MCP 流，随后关闭 HTTP 与数据库，覆盖持久 SSE 连接阻塞退出的回归。
 
-macOS 原生私聊、问答、停止/恢复、改名、Codex/Claude 混合群聊、同 session 服务重启和保留历史删除均已通过。自动化、浏览器与真实验证分层记录在 [Claude CLI 验收](claude-cli-acceptance.md)。
+macOS 原生私聊、问答、停止/恢复、改名、Codex/Claude 混合群聊、同 session 服务重启和保留历史删除均已通过；Claude steer 的三来源同执行追加、在途停止与偏好重启持久化也已通过。自动化、浏览器与真实验证分层记录在 [Claude CLI 验收](claude-cli-acceptance.md)。
 
 ## 8. M5：完整体验与长期运行
 

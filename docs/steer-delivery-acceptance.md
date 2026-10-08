@@ -4,6 +4,8 @@
 >
 > 本文区分实现规则、模拟验证和真实原生验证。此前的 Harness 适配层验收不构成本次 steer 的原生证明，下面记录本轮取得的独立证据。
 
+2026-10-08 Claude CLI 同执行 steer 已接入，补充实现、模拟与真实证据见 [Claude steer 验收](claude-cli-acceptance.md#7-claude-steer-接入与补充验收)。本文以下保留 2026-10-04 Codex steer 的验收事实。
+
 ## 1. 已确定的产品行为
 
 每个 Agent 持久保存 `steerEnabled`，创建时默认 `false`。用户可在创建、编辑或详情中控制“忙碌时实时接收（steer）”；支持 steer 的 harness 也允许关闭。`capabilities.steer` 是原生能力，开关是用户偏好，两者同时成立才自动追加。unsupported 禁止开启，Web 禁用且服务端独立拒绝；已有开启值仍允许关闭。只改变这一偏好不查询模型目录、不重启原生进程、不改 session，停止的 Agent 不会因修改而自动恢复。

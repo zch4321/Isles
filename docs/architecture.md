@@ -1,6 +1,6 @@
 # Isles（群岛）架构设计
 
-> 版本：0.17 · 日期：2026-10-08 · 状态：Codex 与 Claude CLI adapter 已完成；按能力配置 steer，新增验收见 [Claude CLI 验收](claude-cli-acceptance.md)
+> 版本：0.18 · 日期：2026-10-08 · 状态：Codex 与 Claude CLI adapter 已完成；按能力配置 steer，新增验收见 [Claude CLI 验收](claude-cli-acceptance.md)
 >
 > 产品语义以 [需求文档](requirements.md) 为准。本文整理技术选型、模块边界和关键运行流程；已实现范围与阶段验收见 [实现计划](implementation-plan.md)。
 >
@@ -29,13 +29,13 @@ Isles 是一个让人类与独立 Agent 通过私聊、群聊协作的应用。�
 
 ### 2.1 已确认的选择
 
-| 部分         | 选择                              | 责任                                                                                |
-| ------------ | --------------------------------- | ----------------------------------------------------------------------------------- |
-| 前端框架     | Vue 3                             | 聊天、Agent 管理和运行状态界面。                                                    |
-| 组件         | shadcn-vue                        | 基础组件源码纳入项目，按产品交互调整。                                              |
-| 样式         | Tailwind CSS                      | 布局、主题和组件样式。                                                              |
-| 数据访问     | Drizzle ORM                       | TypeScript 表结构、查询与事务；配套 Drizzle Kit 管理 schema 基线。                  |
-| 当前 harness | Codex app-server、Claude Code CLI | 通过独立 adapter 保持固定 session 与 MCP 协作；Claude steer 关闭，Kimi 为后续候选。 |
+| 部分         | 选择                              | 责任                                                                                                     |
+| ------------ | --------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| 前端框架     | Vue 3                             | 聊天、Agent 管理和运行状态界面。                                                                         |
+| 组件         | shadcn-vue                        | 基础组件源码纳入项目，按产品交互调整。                                                                   |
+| 样式         | Tailwind CSS                      | 布局、主题和组件样式。                                                                                   |
+| 数据访问     | Drizzle ORM                       | TypeScript 表结构、查询与事务；配套 Drizzle Kit 管理 schema 基线。                                       |
+| 当前 harness | Codex app-server、Claude Code CLI | 通过独立 adapter 保持固定 session 与 MCP 协作；Codex 与 Claude 均支持默认关闭的 steer，Kimi 为后续候选。 |
 
 ### 2.2 已确认的实施基线
 
@@ -421,7 +421,7 @@ M1 已确定 Codex 使用 `danger-full-access` 和 `approvalPolicy: never`，不
 
 Codex 的可执行文件发现与平台协议分开处理：先按显式配置、PATH 和已知安装目录查找并验证 CLI 版本，再将统一的命令与参数交给版本检测和 app-server 启动。Windows npm/pnpm 启动脚本解析为 Node 与 Codex JS 入口，保持 stdio 直连。Isles 自己的 `config.toml` 的 `[codex].binary_path` 保存界面路径设置，不写入用户的 Codex 配置目录；更新或手动重新检测会失效模型目录缓存，正在运行的 Agent 仍使用原进程和 session。显式无效路径报错，不静默退回自动发现。
 
-当前注册 Codex 与 Claude Code CLI，通过独立 adapter 复用 Runtime、存储、权限和聊天业务。Claude 采用本机 CLI 的常驻双向 stream-json，保持原生配置与同一 UUID；Codex 支持按 Agent 默认关闭的 steer，Claude 暂不声明 steer。Kimi 保留为后续候选。
+当前注册 Codex 与 Claude Code CLI，通过独立 adapter 复用 Runtime、存储、权限和聊天业务。Claude 采用本机 CLI 的常驻双向 stream-json，保持原生配置与同一 UUID；Codex 与 Claude 均支持按 Agent 默认关闭的 steer。Kimi 保留为后续候选。
 
 | Harness     | 接入接口                                | 已查明的接口边界                                                                     |
 | ----------- | --------------------------------------- | ------------------------------------------------------------------------------------ |
@@ -432,6 +432,8 @@ Codex 的可执行文件发现与平台协议分开处理：先按显式配置�
 Claude adapter 封装 executable 发现、共享原生 home、认证和模型/effort 目录、CLI 控制消息以及执行事件。`CLAUDE.md` 的托管段仅导入 `@AGENTS.md`，用户内容保留；`get_context_usage.memoryFiles` 通过规范化真实路径确认两个文件已加载，`mcp_status` 确认 Isles 已连接。仅以启动参数追加带环境变量 token 的 HTTP MCP，用户配置文件保持原生所有权。
 
 创建时先保存 UUID，再发送 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，等待内部初始化回合成功；PreToolUse 回调在该阶段拒绝工具调用，结果不进入 Isles 消息或 run。普通输入将平台 run UUID 作为原生输入 UUID，按原生 replay/started 确认及 result 的 `user_message_uuid` 关联执行；旧输入的结果不结束当前 run。`AskUserQuestion` 通过原生控制请求关联工具、输入 UUID 与问题 ID，Web 答案回交该请求；失效请求拒绝。恢复只使用原 UUID，原生会话不存在时报告错误。
+
+Claude steer 校验固定 session 与目标 run UUID，再将批次 UUID 写入同一 stream-json 连接。原生 queued 记录排队状态，并解除等待传输回执的计时器，继续等待活动任务的消费边界；主线程 replay/started 和 result 的消费 UUID 列表将批次关联原 run，追加后的工具、提问和结果继续使用原 run 身份。当前执行结束而批次尚未确认时，adapter 调用 cancel_async_message；明确撤回后返回确定拒绝，让 Runtime 排到下一轮，其他结果关闭所属进程并通知 Runtime 结算待核对。interrupt(cancel_queued: true) 同时取消原生队列，退出通知只发布一次。
 
 应用关闭通过 `preClose` 同时释放 Runtime 原生进程和活动 MCP transport，随后关闭 HTTP 服务、数据库和数据目录锁；MCP 流不阻塞应用退出。新增 transport 在关闭阶段被拒绝。
 
@@ -527,7 +529,7 @@ UI 同样要说明：不同编号 Agent 具有独立上下文；同一 Agent 的
 
 ## 12. 验证与搭建顺序
 
-Codex 适配层与默认关闭的 steer 开关已完成；Claude CLI 已通过同一契约接入。Kimi 是后续候选。更具体的阶段见 [实现计划](implementation-plan.md)：
+Codex 与 Claude CLI 适配层及默认关闭的 steer 开关已完成；两者通过同一契约接入。Kimi 是后续候选。更具体的阶段见 [实现计划](implementation-plan.md)：
 
 1. 搭建工程、Web 外壳、服务启动、配置和数据库基线入口。
 2. 依据 Codex 官方文档和版本对应的协议类型直接接入，完成单 Agent 私聊、固定 session、停止和恢复闭环；必要联调随功能开展，不单列前置协议验证阶段。

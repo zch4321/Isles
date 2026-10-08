@@ -38,14 +38,26 @@ if (resume && !fs.existsSync(path.join(sessions, sid + '.json'))) {
 }
 let active;
 let question;
+let folded = [];
+const queued = new Map();
 let mcpReads = 0;
+const acknowledge = (frame) => {
+  send({ type: 'command_lifecycle', state: 'started', command_uuid: frame.uuid, session_id: sid });
+  send({ type: 'user', uuid: frame.uuid, isReplay: true, session_id: sid, parent_tool_use_id: null, message: frame.message });
+};
 const finish = (message, error = false) => {
   if (!active) return;
   const current = active;
   active = undefined;
-  send({ type: 'assistant', uuid: crypto.randomUUID(), session_id: sid, parent_tool_use_id: null, user_message_uuid: current.uuid, message: { id: 'msg-' + current.uuid, content: [{ type: 'text', text: message }] } });
-  send({ type: 'result', subtype: 'success', is_error: error, result: message, session_id: sid, uuid: crypto.randomUUID(), user_message_uuid: current.uuid, user_message_uuids: [current.uuid], queued_turn_count: 0 });
+  const consumed = [current.uuid, ...folded];
+  const representative = settings().resultUsesSteerUuid && folded.length ? folded.at(-1) : current.uuid;
+  send({ type: 'assistant', uuid: crypto.randomUUID(), session_id: sid, parent_tool_use_id: null, user_message_uuid: representative, message: { id: 'msg-' + current.uuid, content: [{ type: 'text', text: message }] } });
+  send({ type: 'result', subtype: 'success', is_error: error, result: message, session_id: sid, uuid: crypto.randomUUID(), user_message_uuid: representative, user_message_uuids: consumed, queued_turn_count: queued.size });
+  folded = [];
 };
+setInterval(() => {
+  if (active && !active.message.content.startsWith('Isles session initialized.') && settings().releaseHeld) finish('Released');
+}, 10).unref();
 const lines = readline.createInterface({ input: process.stdin });
 lines.on('line', (line) => {
   const frame = JSON.parse(line);
@@ -64,7 +76,19 @@ lines.on('line', (line) => {
       response = { memoryFiles: ['CLAUDE.md', ...(config.missingGuidance ? [] : ['AGENTS.md'])].map((name) => ({ path: path.join(process.cwd(), name), type: 'Project', tokens: 10 })) };
     } else if (request.subtype === 'mcp_status') {
       response = { mcpServers: [{ name: 'isles', status: config.failedMcp ? 'failed' : config.pendingMcp && !mcpReads++ ? 'pending' : 'connected' }] };
-    } else if (request.subtype === 'interrupt') { response = { still_queued: [] }; finish('Interrupted', true); }
+    } else if (request.subtype === 'cancel_async_message') {
+      const cancelled = !config.cancelFails && queued.delete(request.message_uuid);
+      response = { cancelled };
+      if (cancelled) send({ type: 'command_lifecycle', state: 'cancelled', command_uuid: request.message_uuid, session_id: sid });
+    } else if (request.subtype === 'interrupt') {
+      const cancelled = request.cancel_queued ? [...queued.keys()] : [];
+      for (const id of cancelled) {
+        queued.delete(id);
+        send({ type: 'command_lifecycle', state: 'cancelled', command_uuid: id, session_id: sid });
+      }
+      response = { still_queued: [...queued.keys()], cancelled };
+      finish('Interrupted', true);
+    }
     send({ type: 'control_response', response: { subtype: 'success', request_id: frame.request_id, response } });
     return;
   }
@@ -79,17 +103,39 @@ lines.on('line', (line) => {
   }
   if (frame.type !== 'user') return;
   if (config.exitOnInput) { process.exit(1); }
+  if (active) {
+    if (config.exitOnSteer) { process.exit(1); }
+    queued.set(frame.uuid, frame);
+    if (!config.dropSteerReceipt) send({ type: 'command_lifecycle', state: 'queued', command_uuid: frame.uuid, session_id: sid });
+    if (config.subagentSteerAck) send({ type: 'user', uuid: frame.uuid, isReplay: true, session_id: sid, parent_tool_use_id: 'subagent-tool', message: frame.message });
+    if (config.finishBeforeSteer || config.lateSteer) {
+      finish('Original completed');
+      if (config.lateSteer) { queued.delete(frame.uuid); acknowledge(frame); }
+      return;
+    }
+    if (config.holdSteer || config.subagentSteerAck) return;
+    queued.delete(frame.uuid);
+    folded.push(frame.uuid);
+    if (!config.resultOnlySteer) acknowledge(frame);
+    if (config.steerQuestion) {
+      const toolId = 'tool-' + frame.uuid;
+      question = { toolId, requestId: 'question-' + frame.uuid };
+      const input = { questions: [{ question: 'Which result?', header: 'Result', options: [{ label: 'One', description: 'First result' }, { label: 'Two', description: 'Second result' }] }] };
+      send({ type: 'assistant', session_id: sid, parent_tool_use_id: null, user_message_uuid: frame.uuid, message: { content: [{ type: 'tool_use', id: toolId, name: 'AskUserQuestion', input }] } });
+      send({ type: 'control_request', request_id: question.requestId, request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', tool_use_id: toolId, input } });
+    } else if (!config.keepSteeredTurn) finish('Steered: ' + frame.message.content);
+    return;
+  }
   active = frame;
   fs.writeFileSync(path.join(sessions, sid + '.json'), JSON.stringify({ sid, input: frame.message.content }));
   send({ type: 'command_lifecycle', state: 'queued', command_uuid: frame.uuid, session_id: sid });
-  send({ type: 'command_lifecycle', state: 'started', command_uuid: frame.uuid, session_id: sid });
-  send({ type: 'user', uuid: frame.uuid, isReplay: true, session_id: sid, parent_tool_use_id: null, message: frame.message });
+  acknowledge(frame);
   if (frame.message.content.startsWith('Isles session initialized.')) {
     if (config.blockBootstrap) return;
     send({ type: 'control_request', request_id: 'bootstrap-hook', request: { subtype: 'hook_callback', callback_id: 'isles-bootstrap', input: { hook_event_name: 'PreToolUse', tool_name: 'Bash' } } });
     return;
   }
-  if (frame.message.content === 'hold') return;
+  if (frame.message.content === 'hold' || config.holdTurn) return;
   if (frame.message.content === 'ask') {
     const toolId = 'tool-' + frame.uuid;
     question = { toolId, requestId: 'question-' + frame.uuid };

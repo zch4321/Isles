@@ -1,6 +1,6 @@
 # Isles（群岛）需求文档
 
-> 版本：0.20 · 日期：2026-10-08 · 状态：Codex 与 Claude CLI 接入已完成；保持固定 session、MCP 协作和按能力配置 steer
+> 版本：0.21 · 日期：2026-10-08 · 状态：Codex 与 Claude CLI 接入已完成；保持固定 session、MCP 协作和按能力配置 steer
 >
 > 本文整理当前讨论中已明确的产品方向、首批接入范围与技术选型。标记为“待确认”的事项不视为已决定的实现方案；未确认的技术栈与排期不作预设。
 >
@@ -22,7 +22,7 @@ Isles 是面向人类与多个 Agent 的聊天协作产品。用户像使用聊�
 - **前端采用 Vue 3、Vite 和 TypeScript**，组件采用 shadcn-vue，样式采用 Tailwind CSS，服务端状态使用 TanStack Vue Query。
 - **后端采用 Node.js 与 Fastify**，通过 pnpm workspace 管理前端、后端及共享协议；浏览器接口采用 REST + SSE。
 - **数据库采用 SQLite，启用 WAL；数据访问采用 Drizzle ORM**，使用配套 Drizzle Kit 管理当前 schema 基线。
-- **当前接入 Codex 与 Claude Code CLI，通用 harness 适配层已完成**；保持私聊、混合群聊与固定 session。Codex 支持默认关闭的 Agent steer 偏好，Claude 当前采用忙碌排队与 MCP 主动收信。Kimi 留待后续。
+- **当前接入 Codex 与 Claude Code CLI，通用 harness 适配层已完成**；保持私聊、混合群聊与固定 session。Codex 与 Claude 均支持默认关闭的 Agent steer 偏好；关闭时忙碌排队，MCP 主动收信可用。Kimi 留待后续。
 - **以原生接口为主**。Codex 使用 app-server，Claude Code 使用本机 CLI 的双向 stream-json；2026-10-08 用户恢复并授权 Claude CLI 接入，创建时发送一条中性用户消息使 session 落盘。Kimi Code 保留为后续候选。DeepSeek Harness（DSH）不纳入当前范围。
 - Electron 桌面端和 IM 接入留待后续考虑，不纳入首版交付范围。
 - **首版采用单用户、单机部署**：Web 服务与所有 harness 在同一台电脑或服务器上运行，不要求跨机器调度执行。
@@ -327,7 +327,7 @@ adapter 必须具备固定 session 恢复（`sessionResume`）、MCP（`mcp`）�
 
 “能连接 MCP”不代表“能自动唤醒已结束的执行轮次”。Isles 的运行管理需要负责新消息触发、排队、恢复和停止。
 
-2026-10-08 Claude CLI 接入确认：每位 Agent 固定一个 UUID，创建时发送中性用户消息并等待模型回合成功，初始化由 adapter 内部处理，不产生 Isles 正式消息或 run。初始化工具调用被拦截，规则继续由工作目录文件原生加载；CLAUDE.md 导入唯一 AGENTS.md，并通过原生上下文目录验证。恢复使用原 UUID，失败显式报告。Claude 路径保存到 `[claude].binary_path`，home 采用 `ISLES_CLAUDE_HOME`、TOML、`CLAUDE_CONFIG_DIR`、`~/.claude` 的优先级；原生用户配置、认证、插件、MCP 与记忆共用。当前支持原生提问与停止，steer 关闭，忙碌消息排队，主动 MCP 收信可用。
+2026-10-08 Claude CLI 接入确认：每位 Agent 固定一个 UUID，创建时发送中性用户消息并等待模型回合成功，初始化由 adapter 内部处理，不产生 Isles 正式消息或 run。初始化工具调用被拦截，规则继续由工作目录文件原生加载；CLAUDE.md 导入唯一 AGENTS.md，并通过原生上下文目录验证。恢复使用原 UUID，失败显式报告。Claude 路径保存到 `[claude].binary_path`，home 采用 `ISLES_CLAUDE_HOME`、TOML、`CLAUDE_CONFIG_DIR`、`~/.claude` 的优先级；原生用户配置、认证、插件、MCP 与记忆共用。当前支持原生提问、停止与默认关闭的 steer，主动 MCP 收信可用。Claude 追加输入在原生执行边界进入当前任务，批次的主线程 replay/started 或 result 消费列表确认接受；当前任务先结束时撤回尚未消费的输入，明确撤回后排队，结果不明时关闭所属进程并保留待核对状态。停止取消原生队列中的追加输入。
 
 ### 8.2 协作工具
 
@@ -423,7 +423,7 @@ Agent 发布待审查产物或明确提交，邀请使用不同模型的 Agent �
 
 ## 12. 当前范围边界
 
-- 首版为 Web，当前注册 Codex 与 Claude Code CLI；Agent steer 开关默认关闭，Claude 当前不声明 steer 能力。Kimi 为后续候选；DSH、Electron、IM 留待后续。
+- 首版为 Web，当前注册 Codex 与 Claude Code CLI；Codex 与 Claude 的 Agent steer 开关默认关闭，开启时向原 session 的当前执行追加输入。Kimi 为后续候选；DSH、Electron、IM 留待后续。
 - 首版为单用户、单机部署，Web 服务与 harness 在同一台电脑或服务器上运行；多用户和跨机器执行不纳入首版。
 - 当前阶段仅用户能创建 Agent；Agent 之间的拉群和私聊能力按 Agent 权限开放。
 - 不把固定角色扮演作为基础交互。

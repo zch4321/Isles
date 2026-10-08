@@ -10,6 +10,7 @@ import {
   type HarnessHandlers,
   type HarnessRequestId,
   type HarnessSession,
+  type HarnessSteerInput,
   type HarnessTurnInput,
 } from '../harness/types.js';
 import type { AgentRecord } from '../storage/store.js';
@@ -64,7 +65,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     capabilities: {
       sessionResume: true,
       interrupt: true,
-      steer: false,
+      steer: true,
       userQuestions: true,
       nativeSubagents: true,
       mcp: true,
@@ -106,6 +107,7 @@ interface ActiveInput {
   id: string;
   bootstrap: boolean;
   interrupted: boolean;
+  steers: Map<string, { accepted: boolean; ended: Promise<void>; end(): void }>;
   finish(error: Error | null): void;
 }
 interface PendingQuestion {
@@ -121,6 +123,7 @@ class ClaudeSession implements HarnessSession {
   private closing: Promise<void> | undefined;
   private active: ActiveInput | undefined;
   private startupError: Error | undefined;
+  private exitReported = false;
   private questions = new Map<string, PendingQuestion>();
   private toolRuns = new Map<string, string>();
   constructor(
@@ -169,11 +172,7 @@ class ClaudeSession implements HarnessSession {
       event: (frame) => this.event(frame),
       request: (id, request) => this.request(id, request),
       cancel: (id) => this.questions.delete(id),
-      exit: (error) => {
-        const failure = this.startupError ?? this.error(error);
-        this.active?.finish(failure);
-        this.output.exit(failure);
-      },
+      exit: (error) => this.exit(this.startupError ?? this.error(error)),
     });
     await this.native().control('initialize', {
       hooks: { PreToolUse: [{ matcher: null, hookCallbackIds: ['isles-bootstrap'] }] },
@@ -220,6 +219,7 @@ class ClaudeSession implements HarnessSession {
           id: messageId,
           bootstrap: true,
           interrupted: false,
+          steers: new Map(),
           finish: (error) => {
             if (timer) clearTimeout(timer);
             if (error) reject(error);
@@ -239,7 +239,7 @@ class ClaudeSession implements HarnessSession {
       return id;
     } catch (error) {
       await this.close();
-      this.output.exit(this.error(error));
+      this.exit(this.error(error));
       throw error;
     }
   }
@@ -249,7 +249,7 @@ class ClaudeSession implements HarnessSession {
       return await this.start(sessionId, true);
     } catch (error) {
       await this.close();
-      this.output.exit(this.error(error));
+      this.exit(this.error(error));
       throw error;
     }
   }
@@ -262,7 +262,16 @@ class ClaudeSession implements HarnessSession {
       this.active
     )
       throw new HarnessSubmissionRejected('Claude Code 输入与当前会话配置不一致');
-    this.active = { id: input.runId, bootstrap: false, interrupted: false, finish: () => {} };
+    const active: ActiveInput = {
+      id: input.runId,
+      bootstrap: false,
+      interrupted: false,
+      steers: new Map(),
+      finish: () => {
+        for (const batch of active.steers.values()) batch.end();
+      },
+    };
+    this.active = active;
     try {
       await this.native().sendUser(input.sessionId, input.runId, input.text);
       return { turnId: input.runId };
@@ -274,10 +283,62 @@ class ClaudeSession implements HarnessSession {
       throw error;
     }
   }
+  async steer(input: HarnessSteerInput) {
+    const active = this.active;
+    if (
+      this.closed ||
+      input.sessionId !== this.sessionId ||
+      !active ||
+      active.bootstrap ||
+      active.interrupted ||
+      input.expectedTurnId !== active.id ||
+      input.batchId === active.id ||
+      active.steers.has(input.batchId)
+    )
+      throw new HarnessSubmissionRejected('Claude Code 追加输入与当前执行不一致');
+    let end!: () => void;
+    const batch = {
+      accepted: false,
+      ended: new Promise<void>((resolve) => (end = resolve)),
+      end: () => end(),
+    };
+    active.steers.set(input.batchId, batch);
+    try {
+      const client = this.native();
+      await Promise.race([
+        client
+          .sendUser(input.sessionId, input.batchId, input.text, { waitForConsumption: true })
+          .then(() => {
+            if (!batch.accepted)
+              throw new Error('Claude Code 尚未确认追加输入进入目标执行，请核对原生记录。');
+          }),
+        batch.ended.then(async () => {
+          if (batch.accepted) return;
+          if (this.closed) throw new Error('Claude Code 连接已关闭，追加输入结果待核对。');
+          // A streamed message can otherwise start its own native turn after this one ends.
+          // Return it to the platform queue only after the CLI proves it was withdrawn.
+          if (await client.cancelUser(input.batchId))
+            throw new HarnessSubmissionRejected('Claude Code 当前执行已结束，追加输入已撤回并排队');
+          throw new Error('Claude Code 追加输入未确认进入目标执行，撤回结果待核对。');
+        }),
+      ]);
+      return { turnId: active.id };
+    } catch (error) {
+      if (error instanceof ClaudeInputRejected || error instanceof HarnessSubmissionRejected) {
+        active.steers.delete(input.batchId);
+        throw new HarnessSubmissionRejected(this.environment.redactor.text(error));
+      }
+      // Unknown queued inputs must not silently execute as another native turn.
+      const failure = this.error(error);
+      await this.close();
+      this.exit(failure);
+      throw failure;
+    }
+  }
   async interrupt(sessionId: string, turnId: string) {
     if (sessionId !== this.sessionId || this.active?.id !== turnId) return;
     this.active.interrupted = true;
-    await this.native().control('interrupt');
+    await this.native().control('interrupt', { cancel_queued: true });
   }
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
     const key = String(requestId);
@@ -303,6 +364,12 @@ class ClaudeSession implements HarnessSession {
     this.questions.clear();
     this.closing = this.client?.close() ?? Promise.resolve();
     return this.closing;
+  }
+  private exit(error: Error) {
+    if (this.exitReported) return;
+    this.exitReported = true;
+    this.active?.finish(error);
+    this.output.exit(error);
   }
   private request(id: string, request: ClaudeFrame) {
     if (request.subtype === 'hook_callback' && request.callback_id === 'isles-bootstrap') {
@@ -379,9 +446,28 @@ class ClaudeSession implements HarnessSession {
         this.startupError = this.resultError(frame);
       return;
     }
+    const consumed =
+      frame.type === 'user' && frame.isReplay === true
+        ? [frame.uuid]
+        : frame.type === 'command_lifecycle' && frame.state === 'started'
+          ? [frame.command_uuid]
+          : frame.type === 'result'
+            ? [
+                frame.user_message_uuid,
+                ...(Array.isArray(frame.user_message_uuids) ? frame.user_message_uuids : []),
+              ]
+            : [];
+    if (frame.session_id === this.sessionId && !frame.parent_tool_use_id)
+      for (const id of consumed)
+        if (typeof id === 'string') {
+          const batch = active.steers.get(id);
+          if (batch) batch.accepted = true;
+        }
+    const matches = (id: unknown) =>
+      id === active.id || (typeof id === 'string' && active.steers.get(id)?.accepted === true);
     const associated =
-      frame.user_message_uuid === active.id ||
-      (Array.isArray(frame.user_message_uuids) && frame.user_message_uuids.includes(active.id));
+      matches(frame.user_message_uuid) ||
+      (Array.isArray(frame.user_message_uuids) && frame.user_message_uuids.some(matches));
     if (frame.type === 'result') {
       if (!associated || frame.parent_tool_use_id) return;
       const failure =
@@ -389,6 +475,7 @@ class ClaudeSession implements HarnessSession {
       if (active.bootstrap) active.finish(failure);
       else {
         this.active = undefined;
+        active.finish(failure);
         this.questions.clear();
         this.toolRuns.clear();
         this.output.event({
