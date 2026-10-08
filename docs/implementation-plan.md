@@ -1,16 +1,16 @@
 # Isles 实现计划
 
-> 版本：0.19 · 日期：2026-10-08 · 状态：Claude CLI 与 steer 已接入并通过真实验收；Codex steer 保持原行为
+> 版本：0.20 · 日期：2026-10-08 · 状态：Kimi Code 经通用 ACP adapter 接入并通过真实验收；Claude CLI 与 steer 已通过真实验收
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
 ## 1. 已确定的方向
 
 - 采用已讨论的 Vue 3、Vite、TypeScript、shadcn-vue、Tailwind CSS、Fastify、SQLite/Drizzle 和 pnpm workspace。
-- 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex 与 Claude CLI，按能力配置 steer。
+- 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex、Claude CLI 与 Kimi Code（ACP），按能力配置 steer。
 - Codex 是主要接入，首先用它跑通 Agent、固定 session、私聊和多 Agent 协作。
-- Kimi Code 保留为后续候选，本轮不接入；新增 harness 复用业务层与 Runtime，通过 adapter 表达能力差异。
-- 2026-10-03 用户曾暂缓 Claude，2026-10-08 已恢复并授权本机 CLI 接入；新增 ClaudeAdapter，创建时发送中性用户消息使 session 落盘。DSH 与第三方 Claude ACP 留待后续。
+- 2026-10-08 新增通用 ACP adapter，Kimi Code 为首个 ACP harness；新增 harness 复用业务层与 Runtime，通过 adapter 表达能力差异。
+- 2026-10-03 用户曾暂缓 Claude，2026-10-08 已恢复并授权本机 CLI 接入；新增 ClaudeAdapter，创建时发送中性用户消息使 session 落盘。DSH 与第三方 Claude ACP 留待后续，可复用 ACP adapter。
 - M0 已完成。M1 链路验收及 AGENTS.md 原生加载、真实压缩和恢复的补充验收已通过，最新证据见 [基础修复计划](foundation-repair-plan.md)。原 [实施计划](m1-implementation-plan.md)和[验收记录](m1-acceptance.md)保留为历史事实。
 - M2 规则于 2026-09-30 确认，2026-10-02 调整为即时唤醒与 MCP 主动收信；任务与验收标准见 [M2 实施计划](m2-implementation-plan.md)。
 - 产品中的 AI 参与者统一称为 **Agent**（M1 文档中的“对象”）；M1 实施计划和验收记录作为历史记录保留原用词。
@@ -36,13 +36,13 @@
 | 群聊基础管理           | 创建/查询/改名/成员管理及保留历史的删除，成员继续使用同一 session。        | 本轮检查与真实 Codex 验证见 [群聊管理验收](group-management-acceptance.md)。                                    |
 | Harness 适配层         | 通用契约、注册目录、规范化生命周期与事件；完整抽出既有 Codex 行为。        | 128 项测试、13 项浏览器测试与两套真实 Codex 回归通过，见 [独立验收](harness-adapter-acceptance.md)。            |
 | Agent 实时收信开关     | 默认关闭的 steer 偏好、同 turn 追加、批次结算与 Web 创建/编辑入口。        | 实现完成；完整检查、浏览器与真实原生证据待汇总，见 [Steer 投递验收](steer-delivery-acceptance.md)。             |
-| M3 新 harness 接入     | 通过 adapter 加入既有协作；Kimi Code 保留为后续候选。                      | 适配层验收后另行确定范围，本轮不实施。                                                                          |
+| M3 Kimi Code（ACP）    | 通用 ACP adapter，Kimi Code 加入既有私聊、群聊与固定 session 协作。        | 自动化、浏览器与真实 Kimi 2.1.1 验收通过，见 [记录](kimi-acp-acceptance.md)。                                   |
 | M4 Claude CLI 接入     | 独立 adapter、固定 session、MCP、原生问答与 Codex 混合协作。               | 已接入；自动化和真实原生验收见 [记录](claude-cli-acceptance.md)。                                               |
 | M5 完整体验与长期运行  | 完善文件共享、生命周期、历史检索、备份和长时间运行体验。                   | 细分范围待讨论。                                                                                                |
 
 消息持久化、权限检查、停止和恢复从相应功能的第一阶段就实现；M5 扩展故障覆盖和体验，不用于推迟基础正确性。
 
-统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex 与 Claude CLI；Codex 与 Claude 均支持默认关闭的 steer、忙碌排队和主动收信。Kimi 仍是候选。
+统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex、Claude CLI 与 Kimi Code；Codex 与 Claude 支持默认关闭的 steer，三者均支持忙碌排队和主动收信。
 
 配置与目录拆分的验收覆盖优先级、路径解析、数据库/token 位置、Codex 发现及错误、UI 保存与实时检测、工作区稳定性、共享目录和原生规则加载。当前结果为 89 项测试、7 项浏览器测试与两个真实 Codex Agent 的读写/重启验证通过。旧目录清理仍有进程占用及工具审批限制，具体边界见 [验收记录](config-workspace-acceptance.md#4-旧目录清理遗留项)。
 
@@ -173,11 +173,16 @@
 
 2026-10-04 验收通过：`pnpm check` 的 166 项测试、完整构建、16 项 Chrome 浏览器测试，以及真实 `codex-cli 0.160.0` / `gpt-6.1-sol` 的三来源 steer 验证。私聊、用户群消息与 Agent 群消息均进入原 thread/turn；reader 只有一次 turn/start，无收件箱或历史读取；重启保留开关和原 thread。数据库脚本使用独立配置，确认 10 表新基线无差异并成功初始化。完整证据与边界见 [独立验收](steer-delivery-acceptance.md)。
 
-### 6.2 M3：新增 harness（后续）
+### 6.2 M3：Kimi Code 与通用 ACP adapter
 
-适配层验收后确定新接入的具体范围。Kimi Code 保留为候选；接入前核对安装版本的原生协议、认证/配置与规则加载入口。模型目录、固定 session 创建/恢复、事件、停止、用户交互、MCP 与进程关闭都须独立验证。不为它建立新的聊天业务模型。
+2026-10-08 用户确认接入 Kimi Code，并先实现通用 ACP adapter，后续 ACP agent（如 DSH）只需新增 harness 配置。
 
-新增 harness 的真实验收应包含与 Codex 同群完成小任务和交换明确版本产物进行 review；不增加全局强制 review 流水线，也不能用本轮 fake adapter 测试代替真实混合协作。
+- 准备性重构：CLI 路径配置按 harness ID 组织（`[codex]`、`[claude]`、`[kimi]`），路径接口统一为 `/api/harnesses/:id/config`；抽出共享的进程树关闭、目录缓存与 npm CLI 发现。
+- `acp/` 实现手写的 ACP v1 客户端、adapter 与模型目录；`kimi/` 提供发现、`KIMI_CODE_HOME`、`yolo` 模式、登录检测与凭据脱敏。
+- Kimi 不支持 steer，忙碌排队；不在运行时校验规则加载；MCP token 以请求头写入会话参数。
+- 验收：真实 stdio fake 覆盖目录、创建/恢复、事件合并、忙碌重试、确定拒绝与结果不明、问答、权限、中断与退出；应用集成和浏览器流程覆盖注册、路径、私聊、排队与停止恢复；`verify-native-kimi.ts` 对本机 Kimi 2.1.1 验证真实行为。
+
+新增 harness 的真实验收应包含与 Codex 同群完成小任务；不能用 fake adapter 测试代替真实混合协作。结果见 [Kimi Code ACP 验收](kimi-acp-acceptance.md)。
 
 ## 7. M4：Claude Code CLI（已接入）
 

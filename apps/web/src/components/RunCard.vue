@@ -46,6 +46,8 @@ const itemKinds: Record<string, { label: string; icon: Component }> = {
   plan: { label: '计划', icon: ListChecks },
   collabAgentToolCall: { label: '子代理调用', icon: Workflow },
   subAgentActivity: { label: '子代理活动', icon: Workflow },
+  toolCall: { label: '工具调用', icon: Wrench },
+  status: { label: '状态', icon: CircleDot },
 };
 const kindOf = (type: string) => itemKinds[type] ?? { label: type, icon: CircleDot };
 </script>

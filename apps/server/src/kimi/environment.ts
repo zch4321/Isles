@@ -1,0 +1,114 @@
+import type { HarnessDescriptor } from '@isles/contracts';
+import type { ConfigManager } from '@isles/config';
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { parse } from 'smol-toml';
+import { AcpRpcError, type AcpConnection } from '../acp/client.js';
+import type { AcpHarness } from '../acp/harness.js';
+import type { CliExecutable } from '../harness/executable.js';
+import type { Logger } from '../logging.js';
+import { agentRoot, type AgentWorkspace } from '../runtime/workspace.js';
+import type { AgentRecord } from '../storage/store.js';
+import { findKimiExecutable } from './executable.js';
+
+/** Kimi Code over ACP (`kimi acp`). Every Agent shares the human's Kimi home. */
+export class KimiEnvironment implements AcpHarness {
+  readonly descriptor: HarnessDescriptor = {
+    id: 'kimi',
+    displayName: 'Kimi Code',
+    configuration: 'cli-path',
+    capabilities: {
+      sessionResume: true,
+      interrupt: true,
+      // ACP prompts run one at a time; busy input waits for the next turn.
+      steer: false,
+      userQuestions: true,
+      nativeSubagents: true,
+      mcp: true,
+      workspaceInstructions: true,
+    },
+  };
+  readonly args = ['acp'];
+  /** Runs tools without approval prompts and keeps AskUserQuestion available. */
+  readonly sessionMode = 'yolo';
+  readonly home: string;
+  readonly log: Logger;
+  private selected: CliExecutable | undefined;
+  private discovery: Promise<CliExecutable> | undefined;
+  constructor(
+    readonly config: ConfigManager,
+    readonly workspace: AgentWorkspace,
+  ) {
+    this.home = config.current.cli.kimi.home;
+    this.log = workspace.log.child({ harness: 'kimi' });
+  }
+  get redactor() {
+    return this.workspace.redactor;
+  }
+  get dataDir() {
+    return this.workspace.dataDir;
+  }
+  get env() {
+    return { KIMI_CODE_HOME: this.home };
+  }
+  get binaryPath() {
+    return this.selected?.path ?? null;
+  }
+  invalidate() {
+    this.discovery = undefined;
+    this.selected = undefined;
+  }
+  async executable(refresh = false) {
+    if (refresh) this.invalidate();
+    this.discovery ??= findKimiExecutable({ binary: this.config.current.cli.kimi.binaryPath });
+    const discovery = this.discovery;
+    try {
+      const executable = await discovery;
+      if (this.discovery === discovery) this.selected = executable;
+      return executable;
+    } catch (error) {
+      if (this.discovery === discovery) this.discovery = undefined;
+      throw error;
+    }
+  }
+  /**
+   * Native errors and tool output may echo credentials from the shared home. They are
+   * read only to scrub them; nothing in the home is copied or written.
+   */
+  async learnSecrets() {
+    this.redactor.add(process.env);
+    const files: [string, (text: string) => unknown][] = [
+      [join(this.home, 'config.toml'), parse],
+      [join(this.home, 'server.token'), (text) => ({ token: text.trim() })],
+    ];
+    try {
+      for (const name of await readdir(join(this.home, 'credentials')))
+        if (name.endsWith('.json')) files.push([join(this.home, 'credentials', name), JSON.parse]);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+        throw new Error('无法读取 Kimi Code 凭据目录', { cause: error });
+    }
+    for (const [path, read] of files) {
+      try {
+        this.redactor.add(read(await readFile(path, 'utf8')));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+          throw new Error(`无法读取 Kimi Code 配置：${path}`, { cause: error });
+      }
+    }
+  }
+  async prepare(agent: AgentRecord) {
+    await this.workspace.prepareWorkspace(agent);
+    return this.workspace.token(agentRoot(this.workspace.dataDir, agent));
+  }
+  /** `authenticate` with the login method succeeds only when a stored login exists. */
+  async authenticated(client: AcpConnection) {
+    try {
+      await client.request('authenticate', { methodId: 'login' });
+      return true;
+    } catch (error) {
+      if (error instanceof AcpRpcError && error.code === -32000) return false;
+      throw error;
+    }
+  }
+}

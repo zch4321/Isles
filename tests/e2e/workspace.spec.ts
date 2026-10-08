@@ -150,7 +150,12 @@ test('switches registered harness catalogs and cached selections without applyin
   const codexSettings = dialog.getByRole('button', { name: 'Codex 路径设置', exact: true });
   const steering = dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
   await expect(harness).toHaveValue('codex');
-  await expect(harness.locator('option')).toHaveText(['Codex', 'Claude Code', 'Semantic Test']);
+  await expect(harness.locator('option')).toHaveText([
+    'Codex',
+    'Claude Code',
+    'Kimi Code',
+    'Semantic Test',
+  ]);
   await expect(model).toHaveValue('test-model');
   await expect(effort).toHaveValue('high');
   await expect(codexSettings).toBeVisible();
@@ -1161,4 +1166,68 @@ test('steers Claude busy input through the Web in the original run and persists 
   expect((await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.threadId).toBe(
     binding,
   );
+});
+
+test('creates Kimi Code without steer, replies through MCP and queues busy input for the next run', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto('/');
+  const kimiPath = (await (await page.request.get('/api/harnesses/kimi/config')).json())
+    .binaryPath as string;
+  await page.getByRole('button', { name: '新建 Agent' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
+  await dialog.getByLabel('Harness').selectOption('kimi');
+  await expect(dialog.getByLabel('模型', { exact: true })).toHaveValue('test-kimi-model');
+  await expect(dialog.getByLabel('推理等级')).toHaveValue('high');
+  await expect(
+    dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
+  ).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Kimi Code 路径设置', exact: true }).click();
+  await expect(dialog.getByLabel('Kimi Code 可执行文件路径')).toHaveValue(kimiPath);
+  await dialog.getByLabel('名称').fill('Kimi 浏览器验证');
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  expect(created.request().postDataJSON()).toMatchObject({
+    harness: 'kimi',
+    model: 'test-kimi-model',
+    reasoningEffort: 'high',
+    steerEnabled: false,
+  });
+  const kimi = (await created.json()) as Agent;
+  await expect
+    .poll(
+      async () => (await (await page.request.get(`/api/agents/${kimi.id}`)).json()).agent.status,
+    )
+    .toBe('ready');
+  const binding = (await (await page.request.get(`/api/agents/${kimi.id}`)).json()).agent
+    .threadId as string;
+  expect(binding).toMatch(/^session_/);
+  const input = page.getByRole('textbox', { name: '消息输入' });
+  await input.fill('浏览器 Kimi 私聊');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+    'Kimi MCP 回复：浏览器 Kimi 私聊',
+  );
+  await input.fill('保持执行以验证 Kimi 排队');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  await expect(page.getByTestId('agent-status')).toHaveText('执行中');
+  await input.fill('排队的 Kimi 消息');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+    'Kimi MCP 回复：排队的 Kimi 消息',
+  );
+  const runs = (await (await page.request.get(`/api/agents/${kimi.id}`)).json()).runs as {
+    threadId: string;
+    status: string;
+  }[];
+  expect(runs).toHaveLength(3);
+  expect(runs.every((run) => run.threadId === binding && run.status === 'completed')).toBe(true);
+  expect(errors).toEqual([]);
 });

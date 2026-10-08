@@ -2,7 +2,7 @@
 
 **让独立的 AI 一起工作。**
 
-面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server** 与 **Claude Code CLI**，通过独立的 harness adapter 参与私聊和混合群聊。Codex 与 Claude 均支持默认关闭的实时收信开关：开启时追加到当前执行，关闭时忙碌排队；Agent 也可通过 MCP 主动收信。Kimi Code 保留为后续候选。
+面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server**、**Claude Code CLI** 与 **Kimi Code**（通过通用 ACP adapter），各自参与私聊和混合群聊。Codex 与 Claude 支持默认关闭的实时收信开关：开启时追加到当前执行，关闭时忙碌排队；Kimi 忙碌时排队到下一轮。所有 Agent 都可通过 MCP 主动收信。
 
 Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到 `[channel: "评审", seq: 12, from: agent:"Alice"]` 这样的文本头部，自己的私聊显示为 `private`。普通消息用名称呈现群、发送者与提及对象，重名时在引号外附加 ID 短前缀；工具仍通过目录查询完整 UUID 寻址，消息仍以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，本轮验证见 [名称消息验收](docs/name-message-acceptance.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。
 
@@ -30,6 +30,8 @@ Web 界面采用工作台布局：左侧分为“群聊”和“Agents”，有�
 
 Claude Code 同样支持自动发现与“新建 Agent → Claude Code 路径设置”。发现顺序为 `ISLES_CLAUDE_BIN`、界面保存的路径、PATH，以及 `~/.local/bin`、旧本地安装、Homebrew 和 npm/pnpm 的常见目录；Windows npm 启动脚本通过其 JS 入口运行。界面路径独立保存在 `[claude].binary_path`，更新只影响后续启动，原 session 绑定保留。原生模型和 effort 元数据来自 CLI 初始化响应；`default` effort 表示沿用原生设置，其他等级按 CLI 实际返回的支持列表提供。
 
+Kimi Code 使用“新建 Agent → Kimi Code 路径设置”，发现顺序为 `ISLES_KIMI_BIN`、界面保存的路径、PATH，以及 `~/.local/bin`、Homebrew 和 npm/pnpm 的常见目录；路径保存在 `[kimi].binary_path`。模型与推理等级来自原生 ACP 会话的配置项：Isles 在 `<data_dir>/acp-catalog/kimi` 建立一个不发送消息的临时会话，逐个模型读取支持的 thinking 等级后删除该会话。没有 thinking 选项的模型显示 `default`。
+
 SQLite 驱动包含原生模块。项目已提供 `node-gyp`，本机还需要 Python 3 和 C/C++ 构建工具；macOS 使用 Xcode Command Line Tools。
 
 ```sh
@@ -42,6 +44,8 @@ pnpm dev
 本机需要已安装并完成原生认证的 Codex CLI。当前协议验证基线为 `codex-cli 0.160.0`，依据 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server) 与该版本生成的类型实现，使用 `instructionSources` 校验规则文件加载。升级 CLI 后应重新验证协议。Web 创建表单从真实 `model/list` 读取可用模型和推理等级。
 
 使用 Claude 时，本机需要已安装并完成原生认证的 Claude Code CLI。本轮已验证 `2.1.285` 的双向 `stream-json`、模型目录、规则来源、MCP、原生提问、steer 与会话恢复，直接运行本机 CLI。版本变化后重新验证原生协议；实施与真实验收见 [Claude CLI 验收](docs/claude-cli-acceptance.md)。
+
+使用 Kimi Code 时，本机需要已安装并通过 `kimi login` 登录的 Kimi Code CLI。Isles 以 `kimi acp` 启动原生进程，按 `2.1.1` 的 ACP v1 行为实现；版本变化后重新验证。设计与验收见 [Kimi Code ACP 验收](docs/kimi-acp-acceptance.md)。
 
 配置默认保存在 `~/.Isles/config.toml`；`~` 表示当前用户主目录。最小配置为：
 
@@ -65,13 +69,17 @@ level = 'info'
 # binary_path = '/opt/homebrew/bin/claude'
 # home = '~/.claude'
 
+[kimi]
+# binary_path = '/opt/homebrew/bin/kimi'
+# home = '~/.kimi-code'
+
 [dev]
 port = 5173
 ```
 
 路径支持 `~` 和绝对路径；相对路径从配置文件所在目录解析，与安装目录及启动时的工作目录无关。默认数据目录为 `~/.Isles/data`，工作区根目录为 `~/.Isles/workspace`，日志目录为 `~/.Isles/logs`。未填写 Codex 路径时自动发现；未填写 Codex home 时先使用 `CODEX_HOME`，否则使用 `~/.codex`。平台规则模板、数据库基线文件和 Web 静态资源仍按安装目录定位。
 
-Claude 路径留空时自动发现；Claude home 依次采用 `ISLES_CLAUDE_HOME`、`[claude].home`、`CLAUDE_CONFIG_DIR`、`~/.claude`。
+Claude 路径留空时自动发现；Claude home 依次采用 `ISLES_CLAUDE_HOME`、`[claude].home`、`CLAUDE_CONFIG_DIR`、`~/.claude`。Kimi 同理，home 依次采用 `ISLES_KIMI_HOME`、`[kimi].home`、`KIMI_CODE_HOME`、`~/.kimi-code`。
 
 配置优先级为 **环境变量 > TOML > 默认值**：
 
@@ -86,8 +94,10 @@ Claude 路径留空时自动发现；Claude home 依次采用 `ISLES_CLAUDE_HOME
 | `ISLES_CODEX_HOME`  | `[codex].home` / `CODEX_HOME`，否则 `~/.codex`          | 所有 Agent 共用的 Codex 目录；Isles 不修改其中的配置。           |
 | `ISLES_CLAUDE_BIN`  | `[claude].binary_path` / 自动发现                       | 可填写完整路径或 PATH 中的命令名；显式无效项直接报错。           |
 | `ISLES_CLAUDE_HOME` | `[claude].home` / `CLAUDE_CONFIG_DIR`，否则 `~/.claude` | 所有 Claude Agent 共用的原生配置目录。                           |
+| `ISLES_KIMI_BIN`    | `[kimi].binary_path` / 自动发现                         | 可填写完整路径或 PATH 中的命令名；显式无效项直接报错。           |
+| `ISLES_KIMI_HOME`   | `[kimi].home` / `KIMI_CODE_HOME`，否则 `~/.kimi-code`   | 所有 Kimi Agent 共用的原生配置目录。                             |
 
-手动修改 TOML 后需重启应用；开发时同时重启开发服务。Codex 和 Claude 路径设置分别更新自己的 `binary_path`：保存前重读最新 TOML，串行写入以保留其他字段值，然后重新序列化整份文件，原注释和排版不保留。
+手动修改 TOML 后需重启应用；开发时同时重启开发服务。各 harness 的路径设置分别更新自己段落中的 `binary_path`：保存前重读最新 TOML，串行写入以保留其他字段值，然后重新序列化整份文件，原注释和排版不保留。
 
 服务日志同时输出到终端和 `~/.Isles/logs`。日志文件按本地日期命名为 `isles-YYYY-MM-DD.log`，每行一条 JSON；单个文件达到 10 MB 后续写 `isles-YYYY-MM-DD.1.log` 等分段。Isles 保留最近 7 天的日志，总量不超过 100 MB，超出时先删除最旧的文件。`[log].level` 设置写入等级，默认 `info`，记录 Agent 生命周期、执行结果和错误；设为 `debug` 时额外记录原生 CLI 的 stderr。错误信息和 stderr 在写入前脱敏。`pnpm dev` 在终端中以易读格式显示日志，文件始终保存 JSON。
 
@@ -114,6 +124,8 @@ Web 和管理 HTTP API 暂无登录鉴权，仅供本机使用，不承诺把人
 Claude Agent 直接共用用户的 Claude home、原生认证、配置、插件、skills、用户 MCP 与记忆，每位 Agent 保持独立工作目录和固定 UUID。工作目录的 `CLAUDE.md` 通过 `@AGENTS.md` 导入唯一规则来源，托管段之外的用户内容保留；创建和恢复均通过原生 `get_context_usage` 校验加载的文件，并检查 Isles HTTP MCP 已连接。追加的 MCP 配置只用于当前进程，token 从环境变量读取。
 
 Claude 首次创建会发送中性用户消息 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，完成一次模型回合使会话落盘。初始化期间的工具调用被拦截，结果由 adapter 内部处理，成功后 Agent 就绪；初始化不会发布 Isles 聊天消息或生成 Isles run。失败保留已分配的 session 绑定并显示原因。后续使用 `--resume=<UUID>` 恢复原会话，输入确认与结束事件以输入 UUID 关联；原生最终输出保留为执行详情，正式发言继续使用 MCP。Claude 使用原生全权限模式，并将 `AskUserQuestion` 交到 Web 回答。Claude 支持按 Agent 开启 steer，默认关闭。开启时使用批次 UUID 发送追加输入，在原生执行边界进入当前任务，保持原 session 与 run；主线程 replay/started 或 result 的消费 UUID 列表确认接受。当前回合先结束时，Claude Code 接着把尚未消费的追加输入作为下一个原生回合执行，Isles 将其计入同一执行，全部处理完后执行结束。停止同时取消原生队列中的输入。
+
+Kimi Agent 直接共用用户的 Kimi home、登录、配置、skills、用户 MCP 与记忆，每位 Agent 保持独立工作目录和固定 session ID。Kimi 从工作目录加载 `AGENTS.md`。Isles 在 ACP `session/new` 与 `session/resume` 中传入 Isles HTTP MCP 地址及 `Authorization` 请求头，并在每次连接时设置 `yolo` 模式、Agent 的模型和 thinking 等级（Kimi 恢复会话时会重置这些设置）。新会话无需初始化消息即可恢复。工具权限请求按全权限策略自动允许一次；`AskUserQuestion` 以表单交到 Web，在给出的选项中回答。Kimi 的 ACP 一次执行一轮：忙碌时新消息排队，执行中仍可主动收信；Kimi 后台任务占用会话时，Isles 在 60 秒内重试提交。停止发送 `session/cancel` 并关闭原生进程。
 
 同一数据目录仅允许一个 Isles 服务。独立的 `runtime-lock.sqlite` 持有进程锁，冲突在初始化/恢复前明确拒绝；正常关闭或进程退出后由 SQLite/操作系统释放。关闭时先释放原生进程、Web SSE 和 MCP 流，再关闭 HTTP 服务与数据库。使用另一数据目录可并行运行另一份服务。
 

@@ -8,7 +8,9 @@ import { dirname, join, resolve } from 'node:path';
 import { buildApp } from '../../apps/server/src/app.js';
 import type { Store } from '../../apps/server/src/storage/store.js';
 import { claudeFixture } from '../../apps/server/test/claude-fixture.js';
+import { kimiFixture } from '../../apps/server/test/acp-fixture.js';
 import { claudeBrowserAdapter } from './claude.js';
+import { kimiBrowserAdapter } from './kimi.js';
 import { agentRoot } from '../../apps/server/src/runtime/workspace.js';
 import {
   MockHarness,
@@ -32,6 +34,8 @@ const config = new ConfigManager({
 const { dataDir } = config.current;
 const claude = await claudeFixture(root);
 await config.configureCliBinary('claude', claude.binary);
+const kimi = await kimiFixture(root);
+await config.configureCliBinary('kimi', kimi.binary);
 const harness = new MockHarness();
 const tokens = new Map<string, string>();
 const factory = harness.factory;
@@ -64,6 +68,7 @@ const app = await buildApp({
       harness.factory,
     )(workspace, configuration),
     claudeBrowserAdapter(workspace, configuration, () => browserStore),
+    kimiBrowserAdapter(workspace, configuration, () => browserStore),
   ],
 });
 const browserStore: Store = app.isles.store;

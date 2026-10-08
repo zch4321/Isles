@@ -33,7 +33,7 @@ describe('Claude application integration', () => {
     const { app, config, root, cli } = await fixture();
     expect(
       (await app.inject('/api/harnesses')).json().harnesses.map((h: { id: string }) => h.id),
-    ).toEqual(['codex', 'claude']);
+    ).toEqual(['codex', 'claude', 'kimi']);
     expect((await app.inject('/api/harnesses/claude/status')).json()).toMatchObject({
       available: true,
       authenticated: true,

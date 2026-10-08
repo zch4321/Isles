@@ -1,6 +1,6 @@
 # Isles（群岛）需求文档
 
-> 版本：0.21 · 日期：2026-10-08 · 状态：Codex 与 Claude CLI 接入已完成；保持固定 session、MCP 协作和按能力配置 steer
+> 版本：0.22 · 日期：2026-10-08 · 状态：Codex、Claude CLI 与 Kimi Code（ACP）已接入；保持固定 session、MCP 协作和按能力配置 steer
 >
 > 本文整理当前讨论中已明确的产品方向、首批接入范围与技术选型。标记为“待确认”的事项不视为已决定的实现方案；未确认的技术栈与排期不作预设。
 >
@@ -22,8 +22,8 @@ Isles 是面向人类与多个 Agent 的聊天协作产品。用户像使用聊�
 - **前端采用 Vue 3、Vite 和 TypeScript**，组件采用 shadcn-vue，样式采用 Tailwind CSS，服务端状态使用 TanStack Vue Query。
 - **后端采用 Node.js 与 Fastify**，通过 pnpm workspace 管理前端、后端及共享协议；浏览器接口采用 REST + SSE。
 - **数据库采用 SQLite，启用 WAL；数据访问采用 Drizzle ORM**，使用配套 Drizzle Kit 管理当前 schema 基线。
-- **当前接入 Codex 与 Claude Code CLI，通用 harness 适配层已完成**；保持私聊、混合群聊与固定 session。Codex 与 Claude 均支持默认关闭的 Agent steer 偏好；关闭时忙碌排队，MCP 主动收信可用。Kimi 留待后续。
-- **以原生接口为主**。Codex 使用 app-server，Claude Code 使用本机 CLI 的双向 stream-json；2026-10-08 用户恢复并授权 Claude CLI 接入，创建时发送一条中性用户消息使 session 落盘。Kimi Code 保留为后续候选。DeepSeek Harness（DSH）不纳入当前范围。
+- **当前接入 Codex、Claude Code CLI 与 Kimi Code，通用 harness 适配层已完成**；保持私聊、混合群聊与固定 session。Codex 与 Claude 支持默认关闭的 Agent steer 偏好，关闭时忙碌排队；Kimi 忙碌时排队。MCP 主动收信均可用。
+- **以原生接口为主**。Codex 使用 app-server，Claude Code 使用本机 CLI 的双向 stream-json；2026-10-08 用户恢复并授权 Claude CLI 接入，创建时发送一条中性用户消息使 session 落盘。Kimi Code 使用 `kimi acp`，经通用 ACP adapter 接入（2026-10-08 确认）。DeepSeek Harness（DSH）不纳入当前范围。
 - Electron 桌面端和 IM 接入留待后续考虑，不纳入首版交付范围。
 - **首版采用单用户、单机部署**：Web 服务与所有 harness 在同一台电脑或服务器上运行，不要求跨机器调度执行。
 - M1 只监听本机，管理页面和 HTTP API 暂不做登录鉴权；Codex 使用 `danger-full-access` 与 `approvalPolicy: never`。远程访问与后续用户鉴权另行设计。
@@ -332,6 +332,8 @@ adapter 必须具备固定 session 恢复（`sessionResume`）、MCP（`mcp`）�
 
 2026-10-08 Claude CLI 接入确认：每位 Agent 固定一个 UUID，创建时发送中性用户消息并等待模型回合成功，初始化由 adapter 内部处理，不产生 Isles 正式消息或 run。初始化工具调用被拦截，规则继续由工作目录文件原生加载；CLAUDE.md 导入唯一 AGENTS.md，并通过原生上下文目录验证。恢复使用原 UUID，失败显式报告。Claude 路径保存到 `[claude].binary_path`，home 采用 `ISLES_CLAUDE_HOME`、TOML、`CLAUDE_CONFIG_DIR`、`~/.claude` 的优先级；原生用户配置、认证、插件、MCP 与记忆共用。当前支持原生提问、停止与默认关闭的 steer，主动 MCP 收信可用。Claude 追加输入在原生执行边界进入当前任务，批次的主线程 replay/started 或 result 消费列表确认接受；当前回合先结束时，原生 CLI 接着执行尚未消费的追加输入，计入同一 run，全部处理完后 run 结束（2026-10-08 用户确认，替代撤回后排队）。停止取消原生队列中的追加输入。
 
+2026-10-08 Kimi Code 接入确认：新增通用 ACP adapter，手写 zod 校验的 JSON-RPC 客户端，不引入 ACP SDK；Kimi 作为首个 ACP harness。每位 Agent 固定一个 `session_` ID，`session/new` 返回后即可恢复，无需初始化消息。Isles MCP 的 bearer token 按用户确认直接写入 ACP 会话参数的 `Authorization` 请求头。规则文件依据 Kimi 文档从工作目录原生加载 `AGENTS.md`，运行时不额外校验。Kimi 不支持 steer：忙碌输入排队到下一轮，主动 MCP 收信可用。路径保存到 `[kimi].binary_path`，home 采用 `ISLES_KIMI_HOME`、TOML、`KIMI_CODE_HOME`、`~/.kimi-code` 的优先级；原生登录、配置、skills、MCP 与记忆共用。
+
 ### 8.2 协作工具
 
 通过 MCP 向 Agent 提供一套共同的交流能力，首批候选包括：
@@ -354,7 +356,7 @@ MCP 工具列表按连接 Agent 的权限生成；没有相应权限的 Agent �
 
 **2026-10-03 完成 harness 适配层范围确认；2026-10-04 增加按 Agent 配置的 steer，不新增 harness。** 仅注册 Codex，完整保留已验证的固定 session、消息输入输出、MCP 权限工具列表、工作目录和原生状态管理。本轮不新增真实 harness，独立的语义 fake adapter 用于验证平台不依赖 Codex 协议，不能作为新产品接入成功的证据。
 
-**Kimi Code 保留为后续候选；Claude Code CLI 已于 2026-10-08 恢复接入。** Claude 原生模型与 effort 目录、固定 session、规则文件、MCP、问题与混合群聊已分别验证，见 [验收](claude-cli-acceptance.md)。其余新 harness 的原生接口、版本、配置与规则入口仍需逐个验证。DSH 和第三方 Claude ACP 不进入当前实施范围。
+**Claude Code CLI 已于 2026-10-08 恢复接入；Kimi Code 同日经通用 ACP adapter 接入。** Claude 原生模型与 effort 目录、固定 session、规则文件、MCP、问题与混合群聊已分别验证，见 [验收](claude-cli-acceptance.md)。其余新 harness 的原生接口、版本、配置与规则入口仍需逐个验证。DSH 和第三方 Claude ACP 不进入当前实施范围。
 
 后续扩展仍优先考虑模型厂商自己维护、执行核心开源的 harness。用户曾于 2026-10-03 暂缓 Claude，2026-10-08 已明确恢复本机 CLI 接入。此方向以用户最新授权为准；开源适配层不改变原生执行核心的属性。此前还调研过 Grok Build、Qwen Code、Gemini CLI、Mistral Vibe、ZCode 和 MiniMax Code CLI。
 
@@ -412,7 +414,7 @@ Agent 发布待审查产物或明确提交，邀请使用不同模型的 Agent �
 ## 11. 待确认事项
 
 1. **部署与访问**：技术栈与单用户、单机部署已确定；M1 只监听本机且暂不做管理入口鉴权；后续用户鉴权与远程访问另行设计。Electron 和 IM 留待后续。
-2. **新 harness 接入细节**：Codex 与 Claude CLI 已接入；Kimi 是后续候选。后续版本基线、模型配置、规则加载与原生状态隔离需独立验证。
+2. **新 harness 接入细节**：Codex、Claude CLI 与 Kimi Code 已接入。后续版本基线、模型配置、规则加载与原生状态隔离需独立验证。
 3. **Agent 管理与权限细节**：当前已支持名称/模型/推理等级/拉群权限修改及保留数据的删除，编辑不能替换 harness。归档、撤销删除、永久清理，以及 Agent 之间私聊权限的细分仍待确认。
 4. **消息调度**：steer 按 Agent 默认关闭，可在支持的 harness 上开启并随时关闭；关闭或 unsupported 时忙碌排队，开启时向固定 session 的当前 turn 追加。2026-10-02 确认取消防抖，MCP 主动收信与历史读取共用接收记录，仍立即返回，不提供阻塞等待工具或 wait 参数。验证与故障边界见 [Steer 投递验收](steer-delivery-acceptance.md)。
 5. **发送机制**：正式发言统一 MCP、原生输出只在执行详情展示已确定；后续群聊仍需明确回复关系与交互细节。
@@ -426,7 +428,7 @@ Agent 发布待审查产物或明确提交，邀请使用不同模型的 Agent �
 
 ## 12. 当前范围边界
 
-- 首版为 Web，当前注册 Codex 与 Claude Code CLI；Codex 与 Claude 的 Agent steer 开关默认关闭，开启时向原 session 的当前执行追加输入。Kimi 为后续候选；DSH、Electron、IM 留待后续。
+- 首版为 Web，当前注册 Codex 与 Claude Code CLI；Codex 与 Claude 的 Agent steer 开关默认关闭，开启时向原 session 的当前执行追加输入。Kimi Code 经 ACP 接入，忙碌时排队；DSH、Electron、IM 留待后续。
 - 首版为单用户、单机部署，Web 服务与 harness 在同一台电脑或服务器上运行；多用户和跨机器执行不纳入首版。
 - 当前阶段仅用户能创建 Agent；Agent 之间的拉群和私聊能力按 Agent 权限开放。
 - 不把固定角色扮演作为基础交互。
