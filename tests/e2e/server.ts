@@ -11,6 +11,8 @@ import { claudeFixture } from '../../apps/server/test/claude-fixture.js';
 import { kimiFixture } from '../../apps/server/test/acp-fixture.js';
 import { claudeBrowserAdapter } from './claude.js';
 import { kimiBrowserAdapter } from './kimi.js';
+import { opencodeBrowserAdapter } from './opencode.js';
+import { opencodeConfig } from '../../apps/server/test/opencode-fixture.js';
 import { agentRoot } from '../../apps/server/src/runtime/workspace.js';
 import {
   MockHarness,
@@ -36,6 +38,8 @@ const claude = await claudeFixture(root);
 await config.configureCliBinary('claude', claude.binary);
 const kimi = await kimiFixture(root);
 await config.configureCliBinary('kimi', kimi.binary);
+const opencode = await opencodeConfig(root);
+await config.configureCliBinary('opencode', opencode.binary);
 const harness = new MockHarness();
 const tokens = new Map<string, string>();
 const factory = harness.factory;
@@ -69,6 +73,7 @@ const app = await buildApp({
     )(workspace, configuration),
     claudeBrowserAdapter(workspace, configuration, () => browserStore),
     kimiBrowserAdapter(workspace, configuration, () => browserStore),
+    opencodeBrowserAdapter(workspace, configuration, () => browserStore),
   ],
 });
 const browserStore: Store = app.isles.store;

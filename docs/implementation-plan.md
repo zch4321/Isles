@@ -1,13 +1,13 @@
 # Isles 实现计划
 
-> 版本：0.21 · 日期：2026-10-09 · 状态：Kimi Code、Claude CLI 与 steer 已通过真实验收；Markdown 聊天导出已实现
+> 版本：0.22 · 日期：2026-10-09 · 状态：Kimi Code、Claude CLI 与 steer 已通过真实验收；Markdown 聊天导出已实现
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
 ## 1. 已确定的方向
 
 - 采用已讨论的 Vue 3、Vite、TypeScript、shadcn-vue、Tailwind CSS、Fastify、SQLite/Drizzle 和 pnpm workspace。
-- 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex、Claude CLI 与 Kimi Code（ACP），按能力配置 steer。
+- 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex、Claude CLI、Kimi Code（ACP）与 OpenCode，按能力配置 steer。
 - Codex 是主要接入，首先用它跑通 Agent、固定 session、私聊和多 Agent 协作。
 - 2026-10-08 新增通用 ACP adapter，Kimi Code 为首个 ACP harness；新增 harness 复用业务层与 Runtime，通过 adapter 表达能力差异。
 - 2026-10-09 完成私聊、群聊及保留历史的 Markdown 导出，按已确认格式保存全部正式消息与系统消息，保持回复、提及和原消息编号。范围、实现及验证见 [聊天导出](chat-export-design.md)。
@@ -43,7 +43,7 @@
 
 消息持久化、权限检查、停止和恢复从相应功能的第一阶段就实现；M5 扩展故障覆盖和体验，不用于推迟基础正确性。
 
-统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex、Claude CLI 与 Kimi Code；Codex 与 Claude 支持默认关闭的 steer，三者均支持忙碌排队和主动收信。
+统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex、Claude CLI、Kimi Code 与 OpenCode；Codex、Claude 与 OpenCode 支持默认关闭的 steer，四者均支持忙碌排队和主动收信。
 
 配置与目录拆分的验收覆盖优先级、路径解析、数据库/token 位置、Codex 发现及错误、UI 保存与实时检测、工作区稳定性、共享目录和原生规则加载。当前结果为 89 项测试、7 项浏览器测试与两个真实 Codex Agent 的读写/重启验证通过。旧目录清理仍有进程占用及工具审批限制，具体边界见 [验收记录](config-workspace-acceptance.md#4-旧目录清理遗留项)。
 
@@ -198,6 +198,17 @@
 - preClose 释放原生进程与 MCP 流，随后关闭 HTTP 与数据库，覆盖持久 SSE 连接阻塞退出的回归。
 
 macOS 原生私聊、问答、停止/恢复、改名、Codex/Claude 混合群聊、同 session 服务重启和保留历史删除均已通过；Claude steer 的三来源同执行追加、在途停止与偏好重启持久化也已通过。自动化、浏览器与真实验证分层记录在 [Claude CLI 验收](claude-cli-acceptance.md)。
+
+### 7.1 OpenCode（2026-10-09）
+
+用户确认先集中适配器目录，再接 OpenCode；DSH 在用户 review 后另行接入。
+
+- 既有 Codex、Claude、ACP、Kimi 和共享发现/进程/缓存代码统一放入 `harness/`，通用契约与 Runtime 分工保持。
+- 使用本机 OpenCode v2 原生 HTTP/SSE，按 Agent 启动独立 stdio server，复用原生配置和认证数据库。
+- 固定 session 无需初始化消息；模型与 variant 来自启动完成后的原生目录。
+- 保留忙碌排队、默认关闭的 steer、MCP 主动收信、原生问题、子代理及工作目录规则。
+- 原生已提交的 inbox 交付与 execution 事件确认输入归属；覆盖回合结束、在途停止、确定拒绝及结果不明的竞态。
+- 自动化、浏览器及真实本机验证分层记录在 [OpenCode 验收](opencode-acceptance.md)。
 
 ## 8. M5：完整体验与长期运行
 

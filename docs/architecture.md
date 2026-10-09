@@ -1,6 +1,6 @@
 # Isles（群岛）架构设计
 
-> 版本：0.20 · 日期：2026-10-09 · 状态：Codex、Claude CLI 与通用 ACP adapter（Kimi Code）已接入；支持按能力配置 steer 与 Markdown 聊天导出
+> 版本：0.21 · 日期：2026-10-09 · 状态：Codex、Claude CLI、Kimi Code（ACP）与 OpenCode 原生适配器已接入；支持按能力配置 steer 与 Markdown 聊天导出
 >
 > 产品语义以 [需求文档](requirements.md) 为准。本文整理技术选型、模块边界和关键运行流程；已实现范围与阶段验收见 [实现计划](implementation-plan.md)。
 >
@@ -29,13 +29,13 @@ Isles 是一个让人类与独立 Agent 通过私聊、群聊协作的应用。�
 
 ### 2.1 已确认的选择
 
-| 部分         | 选择                                                | 责任                                                                                                 |
-| ------------ | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| 前端框架     | Vue 3                                               | 聊天、Agent 管理和运行状态界面。                                                                     |
-| 组件         | shadcn-vue                                          | 基础组件源码纳入项目，按产品交互调整。                                                               |
-| 样式         | Tailwind CSS                                        | 布局、主题和组件样式。                                                                               |
-| 数据访问     | Drizzle ORM                                         | TypeScript 表结构、查询与事务；配套 Drizzle Kit 管理 schema 基线。                                   |
-| 当前 harness | Codex app-server、Claude Code CLI、Kimi Code（ACP） | 通过独立 adapter 保持固定 session 与 MCP 协作；Codex 与 Claude 支持默认关闭的 steer，Kimi 忙碌排队。 |
+| 部分         | 选择                                                          | 责任                                                                                                           |
+| ------------ | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 前端框架     | Vue 3                                                         | 聊天、Agent 管理和运行状态界面。                                                                               |
+| 组件         | shadcn-vue                                                    | 基础组件源码纳入项目，按产品交互调整。                                                                         |
+| 样式         | Tailwind CSS                                                  | 布局、主题和组件样式。                                                                                         |
+| 数据访问     | Drizzle ORM                                                   | TypeScript 表结构、查询与事务；配套 Drizzle Kit 管理 schema 基线。                                             |
+| 当前 harness | Codex app-server、Claude Code CLI、Kimi Code（ACP）、OpenCode | 通过独立 adapter 保持固定 session 与 MCP 协作；Codex、Claude 与 OpenCode 支持默认关闭的 steer，Kimi 忙碌排队。 |
 
 ### 2.2 已确认的实施基线
 
@@ -80,7 +80,7 @@ flowchart TB
 
     STORE --> DB[(SQLite)]
     APP --> FILES[工作目录与共享产物]
-    AD <-->|原生双向协议| H[Codex app-server：当前唯一注册项]
+    AD <-->|原生双向协议| H[Codex、Claude、Kimi、OpenCode]
     H -->|协作工具调用| MCP
 ```
 
@@ -124,6 +124,7 @@ apps/
         claude/          # Claude adapter、stream-json 协议、模型目录及环境
         acp/             # 通用 ACP v1 客户端、adapter 与模型目录
         kimi/            # Kimi Code 的 ACP harness 配置：发现、home、认证与凭据脱敏
+        opencode/        # OpenCode v2 HTTP/SSE、已提交事件流、模型 variant 与原生表单
       logging.ts         # 服务日志输出、文件分段与保留
       storage/           # Drizzle schema、查询与事务
       artifacts/         # 目录与共享产物
@@ -427,13 +428,14 @@ M1 已确定 Codex 使用 `danger-full-access` 和 `approvalPolicy: never`，不
 
 Codex 的可执行文件发现与平台协议分开处理：先按显式配置、PATH 和已知安装目录查找并验证 CLI 版本，再将统一的命令与参数交给版本检测和 app-server 启动。Windows npm/pnpm 启动脚本解析为 Node 与 Codex JS 入口，保持 stdio 直连。Isles 自己的 `config.toml` 的 `[codex].binary_path` 保存界面路径设置，不写入用户的 Codex 配置目录；更新或手动重新检测会失效模型目录缓存，正在运行的 Agent 仍使用原进程和 session。显式无效路径报错，不静默退回自动发现。
 
-当前注册 Codex、Claude Code CLI 与 Kimi Code，通过各自 adapter 复用 Runtime、存储、权限和聊天业务。Claude 采用本机 CLI 的常驻双向 stream-json，保持原生配置与同一 UUID；Kimi 通过通用 ACP adapter 接入。Codex 与 Claude 支持按 Agent 默认关闭的 steer，Kimi 忙碌时排队。
+当前注册 Codex、Claude Code CLI、Kimi Code 与 OpenCode，通过各自 adapter 复用 Runtime、存储、权限和聊天业务。Claude 采用本机 CLI 的常驻双向 stream-json，保持原生配置与同一 UUID；Kimi 通过通用 ACP adapter 接入；OpenCode 使用原生 v2 HTTP/SSE。Codex、Claude 与 OpenCode 支持按 Agent 默认关闭的 steer，Kimi 忙碌时排队。
 
-| Harness     | 接入接口                                | 已查明的接口边界                                                                     |
-| ----------- | --------------------------------------- | ------------------------------------------------------------------------------------ |
-| Codex       | `codex app-server`，优先 stdio JSON-RPC | 已接入；协议和事件转换封装在 Codex adapter 内，保持固定 thread、MCP 与原生规则加载。 |
-| Kimi Code   | `kimi acp`，ACP v1 stdio JSON-RPC       | 已接入；`session/new` 的 ID 无需初始化即可恢复；MCP 经会话参数传入，不支持 steer。   |
-| Claude Code | `claude -p`，双向 `stream-json`         | 已接入；中性用户消息使 session 落盘，按 UUID 恢复；MCP、原生问答和混合群聊已验证。   |
+| Harness     | 接入接口                                | 已查明的接口边界                                                                           |
+| ----------- | --------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Codex       | `codex app-server`，优先 stdio JSON-RPC | 已接入；协议和事件转换封装在 Codex adapter 内，保持固定 thread、MCP 与原生规则加载。       |
+| Kimi Code   | `kimi acp`，ACP v1 stdio JSON-RPC       | 已接入；`session/new` 的 ID 无需初始化即可恢复；MCP 经会话参数传入，不支持 steer。         |
+| Claude Code | `claude -p`，双向 `stream-json`         | 已接入；中性用户消息使 session 落盘，按 UUID 恢复；MCP、原生问答和混合群聊已验证。         |
+| OpenCode    | `opencode serve --stdio`，v2 HTTP/SSE   | 已接入；空 session 可恢复；原生 inbox 和 execution 事件确认输入及 steer，支持 MCP 与问题。 |
 
 Claude adapter 封装 executable 发现、共享原生 home、认证和模型/effort 目录、CLI 控制消息以及执行事件。`CLAUDE.md` 的托管段仅导入 `@AGENTS.md`，用户内容保留；`get_context_usage.memoryFiles` 通过规范化真实路径确认两个文件已加载，`mcp_status` 确认 Isles 已连接。仅以启动参数追加带环境变量 token 的 HTTP MCP，用户配置文件保持原生所有权。
 
@@ -447,7 +449,7 @@ Claude steer 校验固定 session 与目标 run UUID，再将批次 UUID 写入�
 
 Codex `0.159.2` 的空 thread 仍需初始化历史才能恢复：`thread/start(ephemeral: false)` 返回后立即保存原生 ID，再以 `thread/inject_items` 写入一条中性的 assistant 标记 `Isles session initialized.`。该标记不含规则，不调用模型、不产生 Isles run。规则加载只依靠工作目录 AGENTS.md，并校验原生返回的 `instructionSources`；恢复与创建均不传 Isles 的 `developerInstructions`。已有原生历史不改写。2026-10-02 曾验证旧注入方式 thread 的恢复，这是历史证据，不要求保留旧版本兼容代码。
 
-DSH 不纳入当前范围。后续每个新 adapter 仍需分别验证事件、恢复、原生问题与 MCP 能力；历史与共享产物以协作工具提供的能力为基础。
+DSH 待 OpenCode 本轮 review 后接入。后续每个新 adapter 仍需分别验证事件、恢复、原生问题与 MCP 能力；历史与共享产物以协作工具提供的能力为基础。
 
 Codex 按 Agent 运行独立原生进程，各自使用独立工作目录，共用用户的 `CODEX_HOME`：配置、登录、MCP server、插件、skills、全局 `AGENTS.md` 与长期记忆都是用户本人的那一份，Agent 的 session 也保存在其中。Isles 不复制、不写入该目录的配置，每个 Agent 的差异在 `thread/start` / `thread/resume` 的会话级 `config` 中传入：
 
@@ -471,7 +473,17 @@ Agent 记录创建时所用的 Codex 目录；当前目录与之不同时拒绝�
 
 Kimi 配置以 `kimi acp` 启动、`KIMI_CODE_HOME` 指定原生 home、`yolo` 作为会话模式（工具不弹审批，保留 `AskUserQuestion`），以 `authenticate(login)` 检测已有登录，从 `config.toml`、`credentials/` 与 `server.token` 学习需要脱敏的值。Kimi 从工作目录原生加载 `AGENTS.md`。
 
-### 9.4 后续 harness 与暂缓项
+### 9.4 OpenCode 原生 v2 adapter
+
+`harness/opencode/` 内部封装 HTTP 请求、SSE 帧、模型目录、配置环境与事件转换。每位 Agent 启动独立的 `serve --stdio --hostname 127.0.0.1 --port 0`；随机 HTTP 密码只用于本机原生 server，stdio 模式在启动工具前清除该密码环境变量。Isles 不使用会复用用户 service 的 `--service` 模式。原生配置目录按 `OPENCODE_CONFIG_DIR` 使用；认证和 session 在用户的原生 SQLite 数据库中，固定绑定记录数据库绝对路径。
+
+`OPENCODE_CONFIG_CONTENT` 以 JSONC 解析并合并 Isles MCP 配置，保留其他字段与 MCP servers，用户文件保持原生所有权。创建传入固定 ID、工作目录、模型与会话级全权限规则；原生 AGENTS 发现机制负责规则加载，保留 OpenCode 的全局及目录规则语义。恢复只读取原 ID，核对目录，不创建替代 session。目录检测先通过原生 integration API 等待插件启动完成，再读取已启用的模型及 variants；可用模型包含免登录的免费提供商，不代表某个远端账号认证已实测成功。
+
+CLI 默认不保存历史事件归档，因此执行状态使用 `/api/event` 的原生已提交事件流；`server.connected` 确认订阅建立后才投递输入，session 过滤和提交序号避免串线与重复事件。execution.started 的事件 ID 是 Isles 原生 turn ID。普通输入和 steer 使用独立、稳定的消息 ID，原生 inbox.delivered 确认进入执行，HTTP 入队响应本身不结算平台接收。OpenCode 没有 expectedTurnId 原子校验，因此 adapter 同时核对目标 execution：跨越执行边界进入待核对，不伪称同一 turn，也不自动重投。停止等待已发入队请求结算，再撤销尚未消费的自有输入并中断、关闭进程。恢复时原生待处理输入需要先核对。
+
+原生文本、推理和工具的已提交事件转为执行条目；form.created 经事件流转为文本/选项及多选问题，答复标签映射回原生选项值，子代理的问题仍归属于主 Agent。执行失败来自原生 execution.failed，未知网络或协议结果保持结果不明。验收与原生边界见 [OpenCode 验收](opencode-acceptance.md)。
+
+### 9.5 后续 harness 与暂缓项
 
 2026-10-03 用户曾暂缓 Claude，2026-10-08 已明确恢复本机 Claude CLI 接入；本轮实现与验收见 [Claude CLI 验收](claude-cli-acceptance.md)。此前 SDK 调研保留为背景。
 
@@ -525,7 +537,7 @@ SQLite 保存平台业务事实，harness 自己的目录保存 session 和 memo
 
 配置模块提供服务、开发代理、数据库命令与 Runtime 共用的解析结果。平台规则模板、schema 基线文件与 Web 静态资源继续从安装目录加载，不能随着数据或工作区根目录改变。
 
-手动修改 TOML 后重启应用及开发服务。保留既有路径 UI；`GET/PUT /api/harnesses/:id/config` 读写 TOML 中对应 `[codex]`、`[claude]` 或 `[kimi]` 段，响应提供 `configFilePath`。PUT 只更新 `binary_path`，`null` 删除该项；写入前重读最新 TOML 保留其他字段值，再序列化整份文件，注释和排版不保留。保存后立即刷新发现与模型缓存，不中断已运行的原生进程，不热应用文件中的其他字段。
+手动修改 TOML 后重启应用及开发服务。保留既有路径 UI；`GET/PUT /api/harnesses/:id/config` 读写 TOML 中对应 `[codex]`、`[claude]`、`[kimi]` 或 `[opencode]` 段，响应提供 `configFilePath`。PUT 只更新 `binary_path`，`null` 删除该项；写入前重读最新 TOML 保留其他字段值，再序列化整份文件，注释和排版不保留。保存后立即刷新发现与模型缓存，不中断已运行的原生进程，不热应用文件中的其他字段。
 
 工作区路径在创建 Agent 时持久化，修改配置的工作区根目录仅用于新 Agent；同版本已有 Agent 继续使用已保存路径。共享根目录随当前配置更新，不自动搬移旧共享文件。共享目录绝对路径与使用/引用规则写入每个 Agent 的 `AGENTS.md`。本轮不增加设置 UI、文件迁移或权限/沙箱层，仍使用 full access 与 never。
 
@@ -557,7 +569,7 @@ UI 同样要说明：不同编号 Agent 具有独立上下文；同一 Agent 的
 
 ## 12. 验证与搭建顺序
 
-Codex、Claude CLI 与 Kimi Code（ACP）适配层及默认关闭的 steer 开关已完成；三者通过同一契约接入。更具体的阶段见 [实现计划](implementation-plan.md)：
+Codex、Claude CLI、Kimi Code（ACP）与 OpenCode 适配层及按能力默认关闭的 steer 开关已完成；四者通过同一契约接入。更具体的阶段见 [实现计划](implementation-plan.md)：
 
 1. 搭建工程、Web 外壳、服务启动、配置和数据库基线入口。
 2. 依据 Codex 官方文档和版本对应的协议类型直接接入，完成单 Agent 私聊、固定 session、停止和恢复闭环；必要联调随功能开展，不单列前置协议验证阶段。

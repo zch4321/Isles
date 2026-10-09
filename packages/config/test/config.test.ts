@@ -46,6 +46,11 @@ describe('ConfigManager startup configuration', () => {
         codex: { home: join(homeDir, '.codex'), binaryPath: null },
         claude: { home: join(homeDir, '.claude'), binaryPath: null },
         kimi: { home: join(homeDir, '.kimi-code'), binaryPath: null },
+        opencode: {
+          home: join(homeDir, '.config', 'opencode'),
+          databasePath: join(homeDir, '.local', 'share', 'opencode', 'opencode.db'),
+          binaryPath: null,
+        },
       },
     });
     const contents = readFileSync(configFilePath, 'utf8');
@@ -56,6 +61,7 @@ describe('ConfigManager startup configuration', () => {
       codex: {},
       claude: {},
       kimi: {},
+      opencode: {},
       dev: { port: 5173 },
     });
     create();
@@ -177,6 +183,50 @@ home = "~/profiles/codex"
     );
   });
 
+  it('uses native OpenCode XDG config and database scope without changing login storage', () => {
+    const { create, homeDir } = fixture('');
+    const native = create({
+      XDG_CONFIG_HOME: join(homeDir, 'native-config'),
+      XDG_DATA_HOME: join(homeDir, 'native-data'),
+      OPENCODE_DB: 'profiles/work.db',
+    });
+    expect(native.current.cli.opencode).toEqual({
+      home: join(homeDir, 'native-config', 'opencode'),
+      databasePath: join(homeDir, 'native-data', 'opencode', 'profiles', 'work.db'),
+      binaryPath: null,
+    });
+    expect(
+      create({
+        OPENCODE_CONFIG_DIR: join(homeDir, 'explicit'),
+        XDG_CONFIG_HOME: join(homeDir, 'ignored'),
+      }).current.cli.opencode.home,
+    ).toBe(join(homeDir, 'explicit'));
+    expect(
+      create({ OPENCODE_DB: join(homeDir, 'native.db') }).current.cli.opencode.databasePath,
+    ).toBe(join(homeDir, 'native.db'));
+    expect(create({ OPENCODE_DB: '~/literal.db' }).current.cli.opencode.databasePath).toBe(
+      join(homeDir, '.local', 'share', 'opencode', '~', 'literal.db'),
+    );
+  });
+
+  it('gives explicit Isles OpenCode home and binary priority while retaining its native database', () => {
+    const { create, homeDir } = fixture(
+      '[opencode]\nbinary_path = "file-opencode"\nhome = "~/file-config"',
+    );
+    const manager = create({
+      ISLES_OPENCODE_HOME: '~/selected-config',
+      ISLES_OPENCODE_BIN: './bin/opencode',
+      OPENCODE_CONFIG_DIR: join(homeDir, 'native-config'),
+      OPENCODE_DB: join(homeDir, 'native.db'),
+    });
+    expect(manager.current.cli.opencode).toEqual({
+      home: join(homeDir, 'selected-config'),
+      databasePath: join(homeDir, 'native.db'),
+      binaryPath: join(homeDir, '.Isles', 'bin', 'opencode'),
+    });
+    expect(manager.cliConfiguration('opencode').binaryPath).toBe('file-opencode');
+  });
+
   it('accepts explicit and environment-selected config files', () => {
     const { homeDir } = fixture();
     const override = new ConfigManager({
@@ -225,6 +275,8 @@ home = "~/profiles/codex"
     ['ISLES_CODEX_BIN', ' '],
     ['ISLES_CODEX_HOME', ''],
     ['ISLES_LOG_LEVEL', 'verbose'],
+    ['ISLES_OPENCODE_HOME', ''],
+    ['OPENCODE_DB', ':memory:'],
   ])('rejects invalid environment override %s', (key, value) => {
     const { create, configFilePath } = fixture('');
     expect(() => create({ [key]: value })).toThrow(key);

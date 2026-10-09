@@ -32,6 +32,12 @@ const cliHarnesses = {
     nativeHomeVariable: 'CLAUDE_CONFIG_DIR',
     defaultHome: '.claude',
   },
+  opencode: {
+    binaryVariable: 'ISLES_OPENCODE_BIN',
+    homeVariable: 'ISLES_OPENCODE_HOME',
+    nativeHomeVariable: 'OPENCODE_CONFIG_DIR',
+    defaultHome: '.config/opencode',
+  },
   kimi: {
     binaryVariable: 'ISLES_KIMI_BIN',
     homeVariable: 'ISLES_KIMI_HOME',
@@ -60,6 +66,7 @@ const fileSchema = z.strictObject({
   codex: cliSectionSchema,
   claude: cliSectionSchema,
   kimi: cliSectionSchema,
+  opencode: cliSectionSchema,
   dev: z.strictObject({ port: portSchema.optional() }).optional(),
 });
 const environmentSchema = z.object({
@@ -76,6 +83,16 @@ const environmentSchema = z.object({
   ISLES_KIMI_BIN: binarySchema.optional(),
   ISLES_KIMI_HOME: pathSchema.optional(),
   KIMI_CODE_HOME: pathSchema.optional(),
+  ISLES_OPENCODE_BIN: binarySchema.optional(),
+  ISLES_OPENCODE_HOME: pathSchema.optional(),
+  OPENCODE_CONFIG_DIR: pathSchema.optional(),
+  XDG_CONFIG_HOME: pathSchema.optional(),
+  XDG_DATA_HOME: pathSchema.optional(),
+  OPENCODE_DB: pathSchema
+    .refine((value) => value !== ':memory:', {
+      message: 'OpenCode requires a persistent database path',
+    })
+    .optional(),
 });
 
 const defaultToml = `# Isles configuration. Paths are relative to this file's directory.
@@ -104,6 +121,10 @@ level = "info"
 # binary_path = "kimi"
 # home = "~/.kimi-code"
 
+[opencode]
+# binary_path = "opencode"
+# home = "~/.config/opencode"
+
 [dev]
 port = 5173
 `;
@@ -127,6 +148,8 @@ export interface CliPaths {
   readonly home: string;
   /** The environment override when set, otherwise the TOML value. */
   readonly binaryPath: string | null;
+  /** OpenCode stores native sessions and login credentials in the same database. */
+  readonly databasePath?: string;
 }
 
 export interface CliConfiguration {
@@ -205,11 +228,24 @@ export class ConfigManager {
         home: this.resolvePath(
           env[spec.homeVariable] ??
             file[id]?.home ??
-            env[spec.nativeHomeVariable] ??
-            join(this.homeDir, spec.defaultHome),
+            (id === 'opencode' && env.OPENCODE_CONFIG_DIR
+              ? resolve(env.OPENCODE_CONFIG_DIR)
+              : env[spec.nativeHomeVariable]) ??
+            (id === 'opencode' && env.XDG_CONFIG_HOME
+              ? resolve(env.XDG_CONFIG_HOME, 'opencode')
+              : join(this.homeDir, spec.defaultHome)),
           base,
         ),
         binaryPath: binary.environment ?? binary.file,
+        ...(id === 'opencode'
+          ? {
+              databasePath: resolve(
+                env.XDG_DATA_HOME ?? join(this.homeDir, '.local', 'share'),
+                'opencode',
+                env.OPENCODE_DB ?? 'opencode.db',
+              ),
+            }
+          : {}),
       });
     }
     this.snapshot = Object.freeze({

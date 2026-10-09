@@ -156,6 +156,7 @@ test('switches registered harness catalogs and cached selections without applyin
     'Codex',
     'Claude Code',
     'Kimi Code',
+    'OpenCode',
     'Semantic Test',
   ]);
   await expect(model).toHaveValue('test-model');
@@ -1358,4 +1359,123 @@ test('creates Kimi Code, queues busy input and answers a native multi-select que
   );
   await expect(page.getByText('Kimi 浏览器验证 需要你的回答')).not.toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test('creates OpenCode with steer off, resumes its fixed session and answers a native multiselect question', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '新建 Agent' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
+  await dialog.getByLabel('Harness').selectOption('opencode');
+  await expect(dialog.getByLabel('模型', { exact: true })).toHaveValue('fixture/fixture-model');
+  await expect(dialog.getByLabel('推理等级')).toHaveValue('default');
+  const steering = dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
+  await expect(steering).toBeEnabled();
+  await expect(steering).toHaveAttribute('aria-checked', 'false');
+  await dialog.getByLabel('名称').fill('OpenCode 浏览器验证');
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  const agent = (await created.json()) as Agent;
+  try {
+    expect(created.request().postDataJSON()).toMatchObject({
+      harness: 'opencode',
+      steerEnabled: false,
+    });
+    await expect
+      .poll(
+        async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.status,
+      )
+      .toBe('ready');
+    const binding = (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent
+      .threadId as string;
+    expect(binding).toMatch(/^ses_/);
+    await send(page, '浏览器 OpenCode 私聊');
+    await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+      'OpenCode MCP 回复：浏览器 OpenCode 私聊',
+    );
+    await page.getByRole('button', { name: '停止 Agent', exact: true }).click();
+    await expect(page.getByTestId('agent-status')).toHaveText('已停止');
+    await page.getByRole('button', { name: '恢复 Agent', exact: true }).click();
+    await expect(page.getByTestId('agent-status')).toHaveText('可用');
+    expect((await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.threadId).toBe(
+      binding,
+    );
+    await send(page, 'OpenCode 多选提问');
+    await expect(page.getByText('OpenCode 浏览器验证 需要你的回答')).toBeVisible();
+    await expect(page.getByRole('button', { name: '提交回答' })).toBeDisabled();
+    await page.getByRole('checkbox', { name: '代码', exact: true }).check();
+    await page.getByRole('checkbox', { name: '测试', exact: true }).check();
+    await page.getByRole('button', { name: '提交回答' }).click();
+    await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+      'OpenCode 多选回答：代码、测试',
+    );
+    const runs = (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs as {
+      threadId: string;
+      status: string;
+    }[];
+    await expect
+      .poll(async () =>
+        (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs.every(
+          (run: { status: string }) => run.status === 'completed',
+        ),
+      )
+      .toBe(true);
+    expect(runs).toHaveLength(2);
+    expect(runs.every((run) => run.threadId === binding)).toBe(true);
+  } finally {
+    await page.request.delete(`/api/agents/${agent.id}`);
+  }
+});
+
+test('steers OpenCode busy input in its original native execution through the Web', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '新建 Agent' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
+  await dialog.getByLabel('Harness').selectOption('opencode');
+  await dialog.getByLabel('名称').fill('OpenCode steer 浏览器验证');
+  await dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }).click();
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  const agent = (await created.json()) as Agent;
+  try {
+    expect(agent.steerEnabled).toBe(true);
+    await expect(page.getByTestId('agent-status')).toHaveText('可用');
+    await send(page, '保持执行以验证 OpenCode steer');
+    await expect(page.getByTestId('agent-status')).toHaveText('执行中');
+    const before = (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs[0] as {
+      id: string;
+      turnId: string;
+      threadId: string;
+    };
+    await send(page, 'OpenCode 忙碌追加消息');
+    await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+      'OpenCode MCP 回复：OpenCode 忙碌追加消息',
+    );
+    await expect
+      .poll(async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs)
+      .toMatchObject([
+        { id: before.id, turnId: before.turnId, threadId: before.threadId, status: 'completed' },
+      ]);
+    const detail = await (await page.request.get(`/api/agents/${agent.id}`)).json();
+    expect(detail.runs).toHaveLength(1);
+    await page.reload();
+    expect(
+      (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.steerEnabled,
+    ).toBe(true);
+  } finally {
+    await page.request.delete(`/api/agents/${agent.id}`);
+  }
 });
