@@ -20,6 +20,7 @@ import { claudeFixture } from './claude-fixture.js';
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const cleanup of cleanups.reverse()) await cleanup();
   cleanups.length = 0;
 });
@@ -99,6 +100,107 @@ async function fixture() {
 }
 
 describe('Claude CLI adapter', () => {
+  it('keeps the latest context snapshot when two result controls respond in reverse order', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    await f.cli.set({ reverseContextResponses: [4096, 2048] });
+    const first = f.input('first', id);
+    await session.submit(first);
+    await vi.waitFor(() =>
+      expect(f.events).toContainEqual(
+        expect.objectContaining({ type: 'turn_completed', turnId: first.runId }),
+      ),
+    );
+    // The fixture withholds this query until another completed input requests a newer snapshot.
+    await vi.waitFor(async () => {
+      const reads = (await f.cli.records()).filter(
+        (frame) =>
+          frame.type === 'control_request' &&
+          (frame.request as Record<string, unknown>).subtype === 'get_context_usage',
+      );
+      expect(reads).toHaveLength(3);
+    });
+    const second = f.input('second', id);
+    await session.submit(second);
+    await vi.waitFor(() =>
+      expect(f.received).toContainEqual({
+        type: 'system',
+        subtype: 'context_responses_replayed',
+        session_id: id,
+      }),
+    );
+    const usages = f.events.filter((event) => event.type === 'context_usage');
+    expect(usages.map((event) => event.usage?.usedTokens)).toEqual([1024, 1024, 2048]);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(2);
+    expect((await f.cli.records()).filter((frame) => frame.type === 'user')).toHaveLength(3);
+  });
+  it('warns with redacted diagnostics when a post-result usage control fails and still completes the run', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const secret = 'fixture-context-secret';
+    f.adapter.environment.redactor.add(secret);
+    const warn = vi.spyOn(f.adapter.environment.log, 'warn').mockImplementation(() => {});
+    await f.cli.set({ contextError: `Unavailable ${secret}` });
+    const input = f.input('hello', id);
+    await session.submit(input);
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledOnce());
+    const detail = warn.mock.calls[0]![0] as { err: Error };
+    expect(detail.err.message).not.toContain(secret);
+    expect(f.events).toContainEqual({
+      type: 'turn_completed',
+      sessionId: id,
+      turnId: input.runId,
+      status: 'completed',
+      error: null,
+    });
+    expect(f.events.filter((event) => event.type === 'context_usage')).toHaveLength(2);
+    expect(f.output.exit).not.toHaveBeenCalled();
+    await f.cli.set({});
+    await session.submit(f.input('next', id));
+    await vi.waitFor(() =>
+      expect(f.events.filter((event) => event.type === 'context_usage')).toHaveLength(3),
+    );
+  });
+  it('reads current context with summary controls at initialization, results and resume without extra prompts', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const usage = () => f.events.filter((event) => event.type === 'context_usage');
+    expect(usage()).toEqual([
+      {
+        type: 'context_usage',
+        sessionId: id,
+        usage: { usedTokens: 1024, maxTokens: 200000, estimated: true },
+      },
+      {
+        type: 'context_usage',
+        sessionId: id,
+        usage: { usedTokens: 1024, maxTokens: 200000, estimated: true },
+      },
+    ]);
+    await f.cli.set({ contextTokens: 4096, staleResult: true, subagentResult: true });
+    const input = f.input('hello', id);
+    await session.submit(input);
+    await vi.waitFor(() => expect(usage()).toHaveLength(3));
+    expect(usage().at(-1)).toMatchObject({ usage: { usedTokens: 4096 } });
+    await session.close();
+    await f.cli.set({ contextTokens: 2048 });
+    await (await f.connect()).resumeSession(id);
+    expect(usage().at(-1)).toMatchObject({ sessionId: id, usage: { usedTokens: 2048 } });
+    const records = await f.cli.records();
+    const reads = records.filter(
+      (frame) =>
+        frame.type === 'control_request' &&
+        (frame.request as Record<string, unknown>).subtype === 'get_context_usage',
+    );
+    expect(reads).toHaveLength(4);
+    expect(
+      reads.every((frame) => (frame.request as Record<string, unknown>).detail === 'summary'),
+    ).toBe(true);
+    expect(records.filter((frame) => frame.type === 'user')).toHaveLength(2);
+  });
   it('reads native models/efforts without sending a model prompt and reports native authentication', async () => {
     const f = await fixture();
     expect(await f.adapter.catalog.status()).toMatchObject({
@@ -130,7 +232,7 @@ describe('Claude CLI adapter', () => {
     const saved: string[] = [];
     const id = await session.createSession((id) => saved.push(id));
     expect(saved).toEqual([id]);
-    expect(f.events).toEqual([]);
+    expect(f.events.every((event) => event.type === 'context_usage')).toBe(true);
     expect(await readFile(join(f.agent.workspace, 'CLAUDE.md'), 'utf8')).toContain(
       '@AGENTS.md\n<!-- isles:end -->\n\n# User guidance',
     );
@@ -314,7 +416,9 @@ describe('Claude CLI adapter', () => {
     expect(
       await session.steer!({ sessionId: id, expectedTurnId: input.runId, batchId, text: 'late' }),
     ).toEqual({ turnId: input.runId });
-    await vi.waitFor(() => expect(f.events.at(-1)).toMatchObject({ type: 'turn_completed' }));
+    await vi.waitFor(() =>
+      expect(f.events).toContainEqual(expect.objectContaining({ type: 'turn_completed' })),
+    );
     expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
       {
         type: 'turn_completed',

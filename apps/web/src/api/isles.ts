@@ -106,6 +106,7 @@ export const updateAgent = (id: string, input: UpdateAgent) =>
 export const deleteAgent = (id: string) => api(`/agents/${id}`, agentSchema, undefined, 'DELETE');
 export const controlAgent = (id: string, action: 'stop' | 'resume') =>
   api(`/agents/${id}/${action}`, agentSchema, {});
+export const newAgentSession = (id: string) => api(`/agents/${id}/new-session`, agentSchema, {});
 export const answerQuestion = (agentId: string, questionId: string, answer: QuestionAnswer) =>
   api(
     `/agents/${agentId}/questions/${questionId}/answer`,

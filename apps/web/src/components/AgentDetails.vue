@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Agent, Run } from '@isles/contracts';
 import { useMutation, useQueryClient } from '@tanstack/vue-query';
-import { Check, Copy, LoaderCircle, Pencil, SquareTerminal, Trash2 } from '@lucide/vue';
+import { ChartPie, Check, Copy, LoaderCircle, Pencil, SquareTerminal, Trash2 } from '@lucide/vue';
 import { computed, onBeforeUnmount, ref } from 'vue';
 import { updateAgent } from '@/api/isles';
 import { invalidateAll, useChannels, useHarnessName, useHarnessCapability } from '@/api/queries';
@@ -9,6 +9,7 @@ import RunCard from './RunCard.vue';
 import StatusBadge from './StatusBadge.vue';
 import EditAgentDialog from './EditAgentDialog.vue';
 import DeleteAgentDialog from './DeleteAgentDialog.vue';
+import AgentContextDialog from './AgentContextDialog.vue';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { channelTitle, type Directory } from '@/lib/channels';
@@ -22,6 +23,7 @@ const harnessName = useHarnessName(() => props.agent.harness);
 const supportsSteer = useHarnessCapability(() => props.agent.harness, 'steer');
 const editOpen = ref(false);
 const deleteOpen = ref(false);
+const contextOpen = ref(false);
 
 const copied = ref('');
 const copyError = ref('');
@@ -114,6 +116,12 @@ function inputs(run: Run) {
             <Check v-if="copied === 'thread'" /><Copy v-else />
           </Button>
         </dd>
+        <dt class="text-muted-foreground">上下文</dt>
+        <dd>
+          <Button variant="outline" size="sm" @click="contextOpen = true">
+            <ChartPie />查看上下文
+          </Button>
+        </dd>
         <dt class="text-muted-foreground">工作目录</dt>
         <dd class="flex items-start gap-1">
           <code class="min-w-0 flex-1 font-mono text-xs leading-5 break-all">{{
@@ -132,7 +140,7 @@ function inputs(run: Run) {
       <p v-if="copyError" role="alert" class="text-xs text-destructive">{{ copyError }}</p>
       <p class="text-xs leading-relaxed text-muted-foreground">
         每个 Agent
-        在私聊和所有群中使用固定的原生会话，拥有独立的上下文和工作目录。原生配置、插件和长期记忆由
+        在私聊和所有群中共用一个原生会话，拥有独立的上下文和工作目录。原生配置、插件和长期记忆由
         {{ harnessName }} 管理。
       </p>
     </section>
@@ -215,5 +223,6 @@ function inputs(run: Run) {
     </section>
     <EditAgentDialog v-if="agent.status !== 'deleted'" v-model:open="editOpen" :agent="agent" />
     <DeleteAgentDialog v-model:open="deleteOpen" :agent="agent" @deleted="$emit('deleted')" />
+    <AgentContextDialog v-if="contextOpen" v-model:open="contextOpen" :agent="agent" />
   </div>
 </template>

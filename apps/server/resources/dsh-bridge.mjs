@@ -61,6 +61,28 @@ export function apply(ctx, config = {}) {
       event,
       ...(eventId === undefined ? {} : { eventId }),
     });
+  const contextUsage = (rec) => {
+    try {
+      const meter = ctx.get('tokenMeter');
+      if (!meter || !rec.agent) return undefined;
+      const measurement = meter.measure(rec.agent.session);
+      return {
+        usedTokens: measurement.totalTokens,
+        maxTokens: rec.contextWindow ?? null,
+        estimated:
+          measurement.baseline.kind === 'estimated' || measurement.surfaceDeltaTokens !== 0,
+      };
+    } catch {
+      // Provider diagnostics can contain credentials; metrics never abort the loop.
+      ctx.logger.warn('Isles DSH context usage read failed');
+      return undefined;
+    }
+  };
+  const sessionInfo = (rec) => ({
+    sessionId: rec.id,
+    cwd: rec.cwd,
+    contextUsage: contextUsage(rec),
+  });
   const emitAssistant = (rec, turnId, step, blocks, status, eventId) => {
     for (const [blockType, itemType, prefix] of [
       ['text', 'agentMessage', 'assistant'],
@@ -133,6 +155,16 @@ export function apply(ctx, config = {}) {
         if (!rec || rec.agent?.session !== session) return;
         const data = nativeEvent.data;
         const eventId = `${rec.id}:${nativeEvent.seq}`;
+        if (nativeEvent.type === 'request/context') rec.contextWindow = data.contextWindow;
+        if (
+          nativeEvent.surfaceOp !== undefined ||
+          ['request/context', 'request/header', 'compaction/end', 'image/offload'].includes(
+            nativeEvent.type,
+          )
+        ) {
+          const usage = contextUsage(rec);
+          if (usage) emit(rec, { type: 'context_usage', usage }, `${eventId}:context`);
+        }
         if (nativeEvent.type === 'turn/start') {
           rec.activeTurn = String(data.turn);
           emit(rec, { type: 'turn_started', turnId: rec.activeTurn }, eventId);
@@ -329,7 +361,16 @@ export function apply(ctx, config = {}) {
     if (!selection || typeof selection.provider !== 'string' || typeof selection.model !== 'string')
       throw new Error('DSH 模型选择缺少 provider 或 model');
     await ctx.llm.resolveCallConfig(selection);
-    return { ...selection };
+    // resolveCallConfig returns request controls only. Capacity belongs to the
+    // adapter's resolved model metadata, also available before a resumed call.
+    let contextWindow;
+    try {
+      const info = await ctx.llm.resolveModelInfo(selection.provider, selection.model);
+      contextWindow = info.context?.contextWindow;
+    } catch {
+      ctx.logger.warn('Isles DSH context model read failed');
+    }
+    return { selection: { ...selection }, contextWindow };
   }
   function recoverInputs(rec) {
     let turnId;
@@ -387,11 +428,12 @@ export function apply(ctx, config = {}) {
     if (existing?.handle) {
       if (existing.cwd !== resolve(params.cwd))
         throw new Error('DSH 会话工作目录与 Agent 工作目录不一致');
-      return { sessionId: existing.id, cwd: existing.cwd };
+      return sessionInfo(existing);
     }
     if (creations.has(params.sessionId)) return creations.get(params.sessionId);
     const task = (async () => {
-      const selection = { current: await validateSelection(params.selection) };
+      const resolved = await validateSelection(params.selection);
+      const selection = { current: resolved.selection };
       const rec = {
         id: params.sessionId,
         cwd: resolve(params.cwd),
@@ -400,6 +442,7 @@ export function apply(ctx, config = {}) {
         streams: new Map(),
         tools: new Map(),
         interrupting: false,
+        contextWindow: resolved.contextWindow,
       };
       sessions.set(rec.id, rec);
       try {
@@ -416,7 +459,7 @@ export function apply(ctx, config = {}) {
         rec.handle = await (resume
           ? ctx.agents.resume({ ...options, resumeSessionId: rec.id })
           : ctx.agents.create({ ...options, sessionId: rec.id, meta: { cwd: rec.cwd } }));
-        return { sessionId: rec.id, cwd: rec.cwd };
+        return sessionInfo(rec);
       } catch (error) {
         sessions.delete(rec.id);
         throw error;
@@ -474,7 +517,10 @@ export function apply(ctx, config = {}) {
           ? rejection('该输入批次已接收，重复投递已拒绝')
           : { sessionId: rec.id, messageId: params.messageId };
     if (!steer && rec.activeTurn !== undefined) return rejection('DSH 会话仍在执行');
-    if (selection) rec.selection.current = selection;
+    if (selection) {
+      rec.selection.current = selection.selection;
+      rec.contextWindow = selection.contextWindow;
+    }
     const message = createUserMessage({
       source: { kind: 'user', rpcId: `isles:${params.messageId}` },
       content: [{ type: 'text', text: params.text }],

@@ -70,11 +70,32 @@ export const modelInfoSchema = z
       input: z.array(z.string()),
       output: z.array(z.string()),
     }),
+    limit: z.object({ context: z.number().int().nonnegative() }).passthrough().optional(),
   })
   .passthrough();
 export type OpenCodeModel = z.infer<typeof modelInfoSchema>;
 export const modelsResponseSchema = z.object({ data: z.array(modelInfoSchema) });
 export const defaultModelResponseSchema = z.object({ data: modelInfoSchema.optional() });
+const tokenCount = z.number().finite().nonnegative();
+export const contextResponseSchema = z.object({
+  data: z.array(
+    z
+      .object({
+        type: z.string(),
+        status: z.string().optional(),
+        model: modelRefSchema.optional(),
+        tokens: z
+          .object({
+            input: tokenCount,
+            output: tokenCount,
+            reasoning: tokenCount,
+            cache: z.object({ read: tokenCount, write: tokenCount }),
+          })
+          .optional(),
+      })
+      .passthrough(),
+  ),
+});
 export const modelKey = (model: Pick<OpenCodeModelRef, 'providerID' | 'id'>) =>
   `${model.providerID}/${model.id}`;
 export function modelRef(model: string, effort: string): OpenCodeModelRef {

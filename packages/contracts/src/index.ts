@@ -206,8 +206,17 @@ export const answerQuestionSchema = z
     ),
   })
   .strict();
+export const contextUsageSchema = z.object({
+  sessionId: z.string().min(1),
+  usedTokens: z.number().int().nonnegative(),
+  maxTokens: z.number().int().positive().nullable(),
+  estimated: z.boolean(),
+  updatedAt: z.string(),
+});
 export const agentDetailSchema = z.object({
   agent: agentSchema,
+  contextUsage: contextUsageSchema.nullable(),
+  pendingMessageCount: z.number().int().nonnegative(),
   runs: z.array(runSchema),
   questions: z.array(questionSchema),
   cursor: z.number().int(),
@@ -266,6 +275,7 @@ export type UserQuestion = z.infer<typeof questionSchema>;
 export type QuestionDefinition = z.infer<typeof questionDefinitionSchema>;
 export type QuestionAnswer = z.infer<typeof answerQuestionSchema>;
 export type AgentDetail = z.infer<typeof agentDetailSchema>;
+export type ContextUsage = z.infer<typeof contextUsageSchema>;
 export type ChannelDetail = z.infer<typeof channelDetailSchema>;
 export type CreateAgent = z.input<typeof createAgentSchema>;
 export type UpdateAgent = z.infer<typeof updateAgentSchema>;

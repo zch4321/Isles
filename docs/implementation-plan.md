@@ -1,6 +1,6 @@
 # Isles 实现计划
 
-> 版本：0.23 · 日期：2026-10-09 · 状态：Kimi Code、Claude CLI、OpenCode 与 DSH 已接入，按能力配置 steer；Markdown 聊天导出已实现
+> 版本：0.24 · 日期：2026-10-09 · 状态：五种 harness 已接入；支持 steer、Markdown 聊天导出与 Agent 上下文管理
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
@@ -11,6 +11,7 @@
 - Codex 是主要接入，首先用它跑通 Agent、固定 session、私聊和多 Agent 协作。
 - 2026-10-08 新增通用 ACP adapter，Kimi Code 为首个 ACP harness；新增 harness 复用业务层与 Runtime，通过 adapter 表达能力差异。
 - 2026-10-09 完成私聊、群聊及保留历史的 Markdown 导出，按已确认格式保存全部正式消息与系统消息，保持回复、提及和原消息编号。范围、实现及验证见 [聊天导出](chat-export-design.md)。
+- 2026-10-09 用户确认私聊上下文管理：五种 harness 按原生口径报告当前用量；仅在空闲且无待投递消息时显式新建会话，保留记录、群关系、工作文件和停止意愿。实现与分层验证见 [上下文管理](agent-context.md)。
 - 2026-10-03 用户曾暂缓 Claude，2026-10-08 已恢复并授权本机 CLI 接入；新增 ClaudeAdapter，创建时发送中性用户消息使 session 落盘。第三方 Claude ACP 留待后续，可复用 ACP adapter；DSH 已于 2026-10-09 获授权以原生 SDK 桥接接入。
 - M0 已完成。M1 链路验收及 AGENTS.md 原生加载、真实压缩和恢复的补充验收已通过，最新证据见 [基础修复计划](foundation-repair-plan.md)。原 [实施计划](m1-implementation-plan.md)和[验收记录](m1-acceptance.md)保留为历史事实。
 - M2 规则于 2026-09-30 确认，2026-10-02 调整为即时唤醒与 MCP 主动收信；任务与验收标准见 [M2 实施计划](m2-implementation-plan.md)。

@@ -104,6 +104,11 @@ export const sessionUpdateSchema = z
   })
   .passthrough();
 export const chunkSchema = z.object({ content: contentBlockSchema }).passthrough();
+export const usageUpdateSchema = z.object({
+  sessionUpdate: z.literal('usage_update'),
+  used: z.number().int().nonnegative(),
+  size: z.number().int().positive(),
+});
 export const planSchema = z
   .object({
     entries: z.array(

@@ -1,6 +1,6 @@
 # Isles（群岛）架构设计
 
-> 版本：0.22 · 日期：2026-10-09 · 状态：Codex、Claude CLI、Kimi Code（ACP）、OpenCode 与 DSH 原生适配器已接入；支持按能力配置 steer 与 Markdown 聊天导出
+> 版本：0.23 · 日期：2026-10-09 · 状态：五种原生 harness 已接入；支持 steer、Markdown 聊天导出与上下文管理
 >
 > 产品语义以 [需求文档](requirements.md) 为准。本文整理技术选型、模块边界和关键运行流程；已实现范围与阶段验收见 [实现计划](implementation-plan.md)。
 >
@@ -15,7 +15,7 @@ Isles 是一个让人类与独立 Agent 通过私聊、群聊协作的应用。�
 以下约束已确定：
 
 1. 首版为单用户、单机 Web 应用，Web 服务与所有 harness 在同一台电脑或服务器上运行。
-2. 每个 Agent 对应一个 harness、模型与实例，固定绑定一个原生 session。创建尚未完成时可以没有 session；创建成功后始终恢复该绑定。
+2. 每个 Agent 对应一个 harness、模型与实例，绑定一个当前原生 session。创建尚未完成时可以没有 session；服务重启恢复该绑定。用户可在空闲且无待投递时显式新建会话。
 3. 私聊、群聊和不同工作内容共享该 Agent 的原生 session。需要并行上下文时，由用户创建新的编号 Agent。
 4. 只有用户能够创建 Agent。自然语言指定的 leader 身份不自动授予平台权限。
 5. 拉群、私聊按 Agent 授权；未获授权的 Agent 看不到相应 MCP 工具，服务端同时校验调用。
@@ -288,6 +288,8 @@ Web 将已删除群放入“历史对话”，显示名称、删除标记、消�
 
 每个 Agent 的 Runtime 持有固定 session 绑定、原生连接、待输入通知和当前执行。不同 Agent 可以并行；同一 Agent 在任一时刻只能存在一条由 Isles 管理的活动执行路径，不维护群消息防抖计时器或全员轮次屏障。
 
+上下文用量通过独立的 `HarnessEvent.context_usage` 上报，不要求活跃 turn。Store 将当前 session 快照持久化为既有 `agent` 事件的数据，详情返回 token、窗口、估算标识和更新时间。`Runtime.newSession()` 同步核验空闲与全部频道的待投递，建立显式切换边界，再关闭旧连接、创建新 session、记录私聊系统分界。管理操作和投递在此期间互斥；新到达输入交给新会话，旧连接回调和旧 session 用量被过滤。操作保留身份、历史、工作区、群关系与停止意愿。接口、原生口径和测试见 [上下文管理](agent-context.md)。
+
 M1 使用持久排队；当前按 Agent 保存 `steerEnabled`，默认 `false`。只有用户开启且 adapter 声明 `steer` 时，忙碌输入才追加到当前主 session/turn；否则排队到下一轮。支持 harness 也允许创建、编辑时关闭；unsupported 不允许开启，但已有开启值可关闭。切换频道或偏好不生成新 session。
 
 用户期望状态与观测状态分开保存：例如用户已要求停止，但原生执行仍在取消中，界面应呈现这一事实。
@@ -391,7 +393,7 @@ M2 的 Codex adapter 不依赖原生的 MCP 热刷新：权限变更后，在该
 
 协作权限控制 Isles 的接口，不自动约束 harness 的全部 shell、文件和网络能力。若要求同机 Agent 之间具有强制隔离，需要操作系统、沙箱或容器配合。
 
-harness 自带的子代理、fork、review 等能力属于该 Agent 自己，Isles 不禁止也不接管，由 Agent 自行决定是否使用。子代理不是 Isles Agent：没有自己的频道身份，不出现在联系人中，也不受“仅用户创建 Agent”约束。固定 session 约束针对的是 Isles：只向 Agent 的主 session 投递消息、只恢复主 session，不为频道、消息或任务新建或替换它。子代理经 Isles 工具的发言归属该 Agent。
+harness 自带的子代理、fork、review 等能力属于该 Agent 自己，Isles 不禁止也不接管，由 Agent 自行决定是否使用。子代理不是 Isles Agent：没有自己的频道身份，不出现在联系人中，也不受“仅用户创建 Agent”约束。固定 session 约束针对的是 Isles：只向 Agent 的当前主 session 投递消息、只恢复主 session，不为频道、消息或任务自动新建或替换它；用户显式新建会话采用独立管理入口。子代理经 Isles 工具的发言归属该 Agent。
 
 Codex 的子代理设置沿用用户自己的 Codex 配置。子代理运行在该 Agent 的原生进程中，其 turn 事件不影响主 session 的执行状态；子代理在主 turn 执行期间提出的原生问题与主 session 的问题一样在 Web 回答。M1 曾在 Agent 配置中关闭 `features.multi_agent` 与 `features.multi_agent_v2` 并在启动规则中禁止子代理，2026-09-30 用户明确子代理属于 Agent 自身能力后取消。
 

@@ -30,6 +30,7 @@ import {
   sessionStateSchema,
   sessionUpdateSchema,
   toolCallSchema,
+  usageUpdateSchema,
   type AcpConfigOption,
   type AcpFormField,
   type AcpRequestId,
@@ -513,6 +514,16 @@ class AcpSession implements HarnessSession {
     const parsed = sessionUpdateSchema.safeParse(params);
     if (!parsed.success || parsed.data.sessionId !== this.sessionId) return;
     const update = parsed.data.update;
+    if (update.sessionUpdate === 'usage_update') {
+      const usage = usageUpdateSchema.safeParse(update);
+      if (usage.success)
+        this.output.event({
+          type: 'context_usage',
+          sessionId: parsed.data.sessionId,
+          usage: { usedTokens: usage.data.used, maxTokens: usage.data.size, estimated: false },
+        });
+      return;
+    }
     if (update.sessionUpdate === 'current_mode_update') {
       if (typeof update.currentModeId === 'string') this.mode = update.currentModeId;
       return;

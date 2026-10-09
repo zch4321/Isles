@@ -26,6 +26,12 @@ fs.mkdirSync(sessions, { recursive: true });
 const send = (frame) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...frame }) + '\n');
 const update = (sessionId, value) => send({ method: 'session/update', params: { sessionId, update: value } });
 const chunk = (sessionId, text, kind = 'agent_message_chunk') => update(sessionId, { sessionUpdate: kind, content: { type: 'text', text } });
+const usage = (sessionId, config) => {
+  if (!config.contextUsage) return;
+  if (config.otherSessionUsage) update('unrelated-session', { sessionUpdate: 'usage_update', used: 999999, size: 1000000 });
+  if (config.invalidUsage) update(sessionId, { sessionUpdate: 'usage_update', used: -1, size: 0 });
+  update(sessionId, { sessionUpdate: 'usage_update', ...config.contextUsage });
+};
 const models = [
   { value: 'kimi-code/k3', name: 'K3', thinking: ['low', 'high', 'max'] },
   { value: 'kimi-code/fast', name: 'Fast', thinking: settings().restrictedThinking ? ['on', 'max'] : [] },
@@ -59,15 +65,18 @@ const end = (stopReason) => {
   const current = active;
   active = undefined;
   send({ id: current.id, result: settings().invalidPromptResult ? {} : { stopReason } });
+  usage(current.sessionId, settings());
   if (settings().lateAfterEnd) chunk(current.sessionId, 'late output');
 };
 const begin = (frame) => {
   const config = settings();
   const { sessionId } = frame.params;
   const text = frame.params.prompt.map((block) => block.text).join('');
+  if (config.usageBeforeReject) { usage(sessionId, config); send({ id: frame.id, error: { code: -32603, message: 'session prompt failed' } }); return; }
   fs.writeFileSync(path.join(sessions, sessionId + '.json'), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(sessions, sessionId + '.json'), 'utf8')), turns: true }));
   if (text === 'rpc-error') { send({ id: frame.id, error: { code: -32603, message: 'session prompt failed' } }); return; }
   active = { id: frame.id, sessionId, text };
+  if (config.usageBeforeHold) usage(sessionId, config);
   if (text === 'hold' || config.holdTurn) { if (config.chunkBeforeHold) chunk(sessionId, 'Working'); return; }
   if (text === 'silent') { end('end_turn'); return; }
   if (text === 'exit') { chunk(sessionId, 'Starting'); setTimeout(() => process.exit(1), 20); return; }
@@ -122,6 +131,7 @@ const handlers = {
   },
   'session/resume': ({ sessionId, cwd, mcpServers }) => {
     if (!fs.existsSync(path.join(sessions, sessionId + '.json'))) throw { code: -32602, message: 'Invalid params: Unknown sessionId: ' + sessionId, data: { sessionId } };
+    if (settings().usageOnResume) usage(sessionId, settings());
     return open(sessionId, cwd, mcpServers);
   },
   'session/load': ({ sessionId, cwd, mcpServers }) => {

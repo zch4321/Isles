@@ -29,6 +29,10 @@ import type { ClaudeCommand } from './executable.js';
 export const CLAUDE_INITIALIZATION_MESSAGE =
   'Isles session initialized. Reply only READY. Do not use tools or send messages.';
 const guidanceSchema = z.object({ memoryFiles: z.array(z.object({ path: z.string() })) });
+const contextUsageSchema = z.object({
+  totalTokens: z.number().int().nonnegative(),
+  maxTokens: z.number().int().positive(),
+});
 const mcpSchema = z.object({
   mcpServers: z.array(z.object({ name: z.string(), status: z.string() })),
 });
@@ -124,6 +128,7 @@ class ClaudeSession implements HarnessSession {
   private client: ClaudeConnection | undefined;
   private env: Record<string, string> | undefined;
   private sessionId: string | undefined;
+  private contextUsageRevision = 0;
   private closed = false;
   private closing: Promise<void> | undefined;
   private active: ActiveInput | undefined;
@@ -190,7 +195,7 @@ class ClaudeSession implements HarnessSession {
       hooks: { PreToolUse: [{ matcher: null, hookCallbackIds: ['isles-bootstrap'] }] },
     });
     onCreated?.(sessionId);
-    await this.verifyGuidance();
+    const context = await this.verifyGuidance();
     const deadline = Date.now() + 30_000;
     for (;;) {
       const status = mcpSchema
@@ -203,10 +208,12 @@ class ClaudeSession implements HarnessSession {
         );
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    this.contextUsage(sessionId, context);
     return sessionId;
   }
   private async verifyGuidance() {
-    const context = guidanceSchema.parse(await this.native().control('get_context_usage'));
+    const response = await this.native().control('get_context_usage', { detail: 'summary' });
+    const context = guidanceSchema.parse(response);
     const normalize = async (path: string) => {
       const absolute = await realpath(resolve(this.agent.workspace, path));
       return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
@@ -218,6 +225,34 @@ class ClaudeSession implements HarnessSession {
       if (!loaded.has(await normalize(join(this.agent.workspace, name))))
         throw new Error(
           `Claude Code 未确认加载工作目录的 ${name}，请检查规则排除设置与 CLI 版本。`,
+        );
+    }
+    return response;
+  }
+  private contextUsage(sessionId: string, response: unknown) {
+    const usage = contextUsageSchema.safeParse(response);
+    if (!usage.success || this.closed || sessionId !== this.sessionId) return;
+    this.output.event({
+      type: 'context_usage',
+      sessionId,
+      usage: {
+        usedTokens: usage.data.totalTokens,
+        maxTokens: usage.data.maxTokens,
+        estimated: true,
+      },
+    });
+  }
+  private async refreshContextUsage(sessionId: string) {
+    const revision = ++this.contextUsageRevision;
+    try {
+      const response = await this.native().control('get_context_usage', { detail: 'summary' });
+      // Native controls can finish out of order while appended inputs complete successive turns.
+      if (revision === this.contextUsageRevision) this.contextUsage(sessionId, response);
+    } catch (error) {
+      if (!this.closed)
+        this.environment.log.warn(
+          { err: this.error(error) },
+          'Claude Code context usage unavailable',
         );
     }
   }
@@ -250,6 +285,7 @@ class ClaudeSession implements HarnessSession {
       await this.native().sendUser(id, messageId, CLAUDE_INITIALIZATION_MESSAGE);
       await completed;
       this.active = undefined;
+      await this.refreshContextUsage(id);
       return id;
     } catch (error) {
       await this.close();
@@ -503,6 +539,7 @@ class ClaudeSession implements HarnessSession {
         frame.is_error === true || frame.subtype !== 'success' ? this.resultError(frame) : null;
       if (active.bootstrap) active.finish(failure);
       else {
+        void this.refreshContextUsage(this.sessionId!);
         active.failure ??= failure;
         active.idle = true;
         this.settle(active);

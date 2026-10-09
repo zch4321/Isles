@@ -122,6 +122,165 @@ describe('OpenCode native SSE', () => {
 });
 
 describe('OpenCode v2 adapter', () => {
+  it('restores the latest main-session context call, including cache and reasoning, without session billing totals', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const tokens = { input: 100, output: 20, reasoning: 30, cache: { read: 400, write: 50 } };
+    f.native.onRequest = ({ path }) => {
+      if (path === '/api/model') return { data: [{ ...fixtureModel, limit: { context: 2000 } }] };
+      if (path.endsWith('/context'))
+        return {
+          data: [
+            {
+              type: 'assistant',
+              tokens: { ...tokens, input: 9000 },
+              model: { providerID: 'fixture', id: fixtureModel.id },
+            },
+            {
+              type: 'compaction',
+              status: 'completed',
+              tokens: { ...tokens, input: 10000 },
+              summary: 'summary',
+              recent: '',
+            },
+            { type: 'assistant', tokens, model: { providerID: 'fixture', id: fixtureModel.id } },
+          ],
+        };
+    };
+    await session.resumeSession(id);
+    expect(f.events).toContainEqual({
+      type: 'context_usage',
+      sessionId: id,
+      usage: { usedTokens: 600, maxTokens: 2000, estimated: false },
+    });
+    const count = f.native.calls.filter((call) => call.path.endsWith('/context')).length;
+    f.native.emit(f.native.frame('ses_child', 'session.step.ended', { tokens }));
+    f.native.emit(
+      f.native.frame(id, 'session.usage.updated', { tokens: { ...tokens, input: 999999 } }),
+    );
+    await Promise.resolve();
+    expect(f.native.calls.filter((call) => call.path.endsWith('/context'))).toHaveLength(count);
+  });
+
+  it('refreshes idle usage after calls and compaction, ignores compaction billing and uses the selected window', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    let messages: Record<string, unknown>[] = [];
+    f.native.onRequest = ({ path }) => {
+      if (path === '/api/model')
+        return {
+          data: [
+            { ...fixtureModel, limit: { context: 1000 } },
+            { ...fixtureModel, id: 'large-model', limit: { context: 4000 } },
+          ],
+        };
+      if (path.endsWith('/context')) return { data: messages };
+    };
+    const id = await session.createSession(() => {});
+    messages = [
+      {
+        type: 'assistant',
+        model: { providerID: 'fixture', id: fixtureModel.id },
+        tokens: { input: 120, output: 20, reasoning: 10, cache: { read: 30, write: 20 } },
+      },
+    ];
+    f.native.emit(f.native.frame(id, 'session.step.ended'));
+    await vi.waitFor(() =>
+      expect(f.events.at(-1)).toMatchObject({
+        type: 'context_usage',
+        usage: { usedTokens: 200, maxTokens: 1000, estimated: false },
+      }),
+    );
+    f.native.emit(
+      f.native.frame(id, 'session.model.selected', {
+        model: { providerID: 'fixture', id: 'large-model' },
+      }),
+    );
+    await vi.waitFor(() => expect(f.events.at(-1)).toMatchObject({ usage: { maxTokens: 4000 } }));
+    messages = [
+      {
+        type: 'compaction',
+        status: 'completed',
+        summary: 'short summary',
+        recent: 'recent',
+        tokens: { input: 9999, output: 999, reasoning: 90, cache: { read: 99, write: 99 } },
+      },
+    ];
+    f.native.emit(f.native.frame(id, 'session.compaction.ended', { tokens: messages[0]!.tokens }));
+    await vi.waitFor(() =>
+      expect(f.events.at(-1)).toMatchObject({
+        type: 'context_usage',
+        usage: { maxTokens: 4000, estimated: true },
+      }),
+    );
+    const usage = f.events.at(-1)!;
+    expect(usage.type === 'context_usage' && usage.usage?.usedTokens).toBeGreaterThan(0);
+    expect(usage.type === 'context_usage' && usage.usage?.usedTokens).toBeLessThan(100);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('clears opaque native compaction occupancy until a fresh call reports the retained window', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const tokens = { input: 200, output: 20, reasoning: 10, cache: { read: 50, write: 20 } };
+    let messages: Record<string, unknown>[] = [];
+    f.native.onRequest = ({ path }) => {
+      if (path === '/api/model') return { data: [{ ...fixtureModel, limit: { context: 4000 } }] };
+      if (path.endsWith('/context')) return { data: messages };
+    };
+    const id = await session.createSession(() => {});
+    messages = [{ type: 'assistant', tokens }];
+    f.native.emit(f.native.frame(id, 'session.step.ended'));
+    await vi.waitFor(() =>
+      expect(f.events.at(-1)).toMatchObject({
+        type: 'context_usage',
+        usage: { usedTokens: 300, estimated: false },
+      }),
+    );
+    messages = [
+      {
+        type: 'compaction',
+        status: 'completed',
+        summary: '',
+        recent: '',
+        providerContext: { content: [{ type: 'compaction', encryptedContent: 'opaque-window' }] },
+        tokens: { ...tokens, input: 99999 },
+      },
+    ];
+    f.native.emit(f.native.frame(id, 'session.compaction.ended', { tokens: messages[0]!.tokens }));
+    await vi.waitFor(() =>
+      expect(f.events.at(-1)).toEqual({ type: 'context_usage', sessionId: id, usage: null }),
+    );
+    const beforeResume = f.events.length;
+    await session.resumeSession(id);
+    expect(f.events.slice(beforeResume)).toEqual([
+      { type: 'context_usage', sessionId: id, usage: null },
+    ]);
+    messages.push({ type: 'assistant', tokens });
+    f.native.emit(f.native.frame(id, 'session.step.ended'));
+    await vi.waitFor(() =>
+      expect(f.events.at(-1)).toMatchObject({
+        type: 'context_usage',
+        usage: { usedTokens: 300, maxTokens: 4000, estimated: false },
+      }),
+    );
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('keeps metric read failures separate from the native execution connection', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    f.native.onRequest = ({ path }) => {
+      if (path.endsWith('/context')) throw new Error('metrics unavailable');
+    };
+    const id = await session.createSession(() => {});
+    f.native.emit(f.native.frame(id, 'session.step.ended'));
+    await Promise.resolve();
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+    expect(f.native.closed).toBe(false);
+  });
+
   it('reads enabled native models, default and variants without executing a prompt', async () => {
     const f = await fixture();
     f.native.onRequest = ({ path }) => {

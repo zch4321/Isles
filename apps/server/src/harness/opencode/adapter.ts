@@ -12,6 +12,7 @@ import {
   HarnessSubmissionRejected,
   type HarnessAdapter,
   type HarnessHandlers,
+  type HarnessContextUsage,
   type HarnessRequestId,
   type HarnessSession,
   type HarnessSteerInput,
@@ -33,7 +34,12 @@ import {
   inboxListSchema,
   inboxResponseSchema,
   modelRef,
+  modelRefSchema,
   sessionResponseSchema,
+  contextResponseSchema,
+  modelsResponseSchema,
+  modelKey,
+  type OpenCodeModelRef,
   type OpenCodeEvent,
   type OpenCodeForm,
 } from './protocol.js';
@@ -126,6 +132,9 @@ class OpenCodeSession implements HarnessSession {
   private ownedInputs = new Set<string>();
   private admissions = new Set<Promise<unknown>>();
   private toolNames = new Map<string, string>();
+  private contextModels = new Map<string, number>();
+  private contextModel?: OpenCodeModelRef;
+  private contextRefresh = Promise.resolve();
   constructor(
     private environment: OpenCodeEnvironment,
     private factory: OpenCodeClientFactory,
@@ -236,6 +245,88 @@ class OpenCodeSession implements HarnessSession {
       throw new Error('OpenCode session 的工作目录与 Agent 不一致');
     this.sessionId = session.id;
     this.descendants.add(session.id);
+    this.contextModel = session.model ?? modelRef(this.agent.model, this.agent.reasoningEffort);
+    try {
+      const models = modelsResponseSchema.parse(
+        await this.native().request('GET', '/api/model'),
+      ).data;
+      this.contextModels = new Map(
+        models
+          .filter((model) => model.limit && model.limit.context > 0)
+          .map((model) => [modelKey(model), model.limit!.context]),
+      );
+    } catch (error) {
+      this.environment.log.warn(
+        { error: this.environment.redactor.text(error) },
+        'OpenCode context model read failed',
+      );
+    }
+    await this.refreshContext();
+  }
+  private refreshContext() {
+    const sessionId = this.sessionId;
+    this.contextRefresh = this.contextRefresh
+      .then(async () => {
+        if (!sessionId || this.closing || sessionId !== this.sessionId) return;
+        const messages = contextResponseSchema.parse(
+          await this.native().request('GET', `/api/session/${sessionId}/context`),
+        ).data;
+        if (this.closing || sessionId !== this.sessionId || !messages.length) return;
+        // Same latest-call boundary as OpenCode's TUI contextUsage. Compaction's
+        // own request usage describes the old prompt, never its replacement.
+        const compacted = messages.findLastIndex(
+          (message) => message.type === 'compaction' && message.status === 'completed',
+        );
+        const last = messages.findLast(
+          (message, index) => index > compacted && message.type === 'assistant' && message.tokens,
+        );
+        let usage: HarnessContextUsage | null;
+        if (last?.tokens) {
+          const tokens = last.tokens;
+          usage = {
+            usedTokens:
+              tokens.input +
+              tokens.output +
+              tokens.reasoning +
+              tokens.cache.read +
+              tokens.cache.write,
+            maxTokens: this.contextModel
+              ? (this.contextModels.get(modelKey(this.contextModel)) ?? null)
+              : null,
+            estimated: false,
+          };
+        } else if (compacted >= 0 && messages[compacted]?.providerContext !== undefined) {
+          // Native compaction can retain an opaque encrypted provider window
+          // while summary/recent are empty. Its size needs the next call's
+          // provider usage; clear the pre-compaction sample until then.
+          usage = null;
+        } else {
+          // OpenCode core util/token.ts uses four characters per token. Price
+          // only active message content, excluding IDs and compaction billing.
+          const content = messages
+            .slice(Math.max(0, compacted))
+            .map((message) =>
+              message.type === 'compaction'
+                ? { summary: message.summary, recent: message.recent }
+                : (message.content ?? message.text ?? ''),
+            );
+          usage = {
+            usedTokens: Math.max(0, Math.round(JSON.stringify(content).length / 4)),
+            maxTokens: this.contextModel
+              ? (this.contextModels.get(modelKey(this.contextModel)) ?? null)
+              : null,
+            estimated: true,
+          };
+        }
+        this.handlers.event({ type: 'context_usage', sessionId, usage });
+      })
+      .catch((error: unknown) => {
+        this.environment.log.warn(
+          { error: this.environment.redactor.text(error) },
+          'OpenCode context usage refresh failed',
+        );
+      });
+    return this.contextRefresh;
   }
   async submit(input: HarnessTurnInput) {
     if (input.sessionId !== this.sessionId || this.active || this.stopped)
@@ -336,6 +427,21 @@ class OpenCodeSession implements HarnessSession {
     );
   }
   private event(event: OpenCodeEvent) {
+    if (event.type === 'session.model.selected' || event.type === 'session.step.started') {
+      const model = modelRefSchema.safeParse(event.data.model);
+      if (model.success) this.contextModel = model.data;
+      else this.environment.log.warn('OpenCode context model event invalid');
+    }
+    if (
+      [
+        'session.model.selected',
+        'session.step.ended',
+        'session.step.failed',
+        'session.compaction.ended',
+        'session.revert.committed',
+      ].includes(event.type)
+    )
+      void this.refreshContext();
     const active = this.active;
     if (!active) return;
     if (event.type === 'session.execution.started') {

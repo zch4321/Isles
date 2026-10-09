@@ -121,6 +121,58 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
 }
 
 describe('Kimi Code discovery', () => {
+  it('projects usage updates after completion and during resume, filtering invalid and unrelated sessions', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({
+      contextUsage: { used: 12345, size: 262144 },
+      otherSessionUsage: true,
+      invalidUsage: true,
+    });
+    const input = f.input('hello', id);
+    await session.submit(input);
+    await f.completed(input.runId);
+    const usage = () => f.events.filter((event) => event.type === 'context_usage');
+    await vi.waitFor(() =>
+      expect(usage()).toEqual([
+        {
+          type: 'context_usage',
+          sessionId: id,
+          usage: { usedTokens: 12345, maxTokens: 262144, estimated: false },
+        },
+      ]),
+    );
+    await session.close();
+    await f.cli.set({ contextUsage: { used: 1024, size: 262144 }, usageOnResume: true });
+    await (await f.connect()).resumeSession(id);
+    expect(usage().at(-1)).toMatchObject({ sessionId: id, usage: { usedTokens: 1024 } });
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+  });
+
+  it('does not accept a rejected or pending prompt from a usage update', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ contextUsage: { used: 10, size: 262144 }, usageBeforeReject: true });
+    await expect(session.submit(f.input('hello', id))).rejects.toBeInstanceOf(
+      HarnessSubmissionRejected,
+    );
+    expect(f.events.map((event) => event.type)).toEqual(['context_usage']);
+    await f.cli.set({ contextUsage: { used: 20, size: 262144 }, usageBeforeHold: true });
+    const input = f.input('hold', id);
+    let accepted = false;
+    const submission = session.submit(input).then((result) => {
+      accepted = true;
+      return result;
+    });
+    await vi.waitFor(() =>
+      expect(f.events.filter((event) => event.type === 'context_usage')).toHaveLength(2),
+    );
+    expect(accepted).toBe(false);
+    expect(f.events.some((event) => event.type === 'turn_started')).toBe(false);
+    await session.interrupt(id, input.runId);
+    await submission;
+    expect(await f.completed(input.runId)).toMatchObject({ status: 'interrupted' });
+  });
   it('accepts the bare version Kimi prints and rejects other programs', async () => {
     const version = (output: string) => () => Promise.resolve(output);
     const root = await mkdtemp(join(tmpdir(), 'isles-kimi-executable-'));

@@ -193,6 +193,9 @@ export async function buildApp(options: AppOptions) {
     await runtime.resume(request.params.id);
     return store.publicAgent(request.params.id);
   });
+  app.post<{ Params: { id: string } }>('/api/agents/:id/new-session', (request) =>
+    runtime.newSession(request.params.id),
+  );
   app.post<{ Params: { id: string; questionId: string } }>(
     '/api/agents/:id/questions/:questionId/answer',
     (request) => {

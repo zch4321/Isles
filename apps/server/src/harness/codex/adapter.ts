@@ -19,6 +19,7 @@ import {
   inputRequestSchema,
   NativeRpcError,
   threadResponseSchema,
+  tokenUsageNotificationSchema,
   turnNotificationSchema,
   turnResponseSchema,
   turnSteerResponseSchema,
@@ -103,6 +104,7 @@ export class CodexAdapter implements HarnessAdapter {
 }
 
 class CodexSession implements HarnessSession {
+  private sessionId: string | undefined;
   private client: NativeClient | undefined;
   private closing: Promise<void> | undefined;
   private submissions = new Map<string, { accepted: boolean }>();
@@ -159,6 +161,7 @@ class CodexSession implements HarnessSession {
     });
     // Save the usable ID even when later persistence or instruction checks fail.
     const id = z.object({ thread: z.object({ id: z.string().min(1) }) }).parse(response).thread.id;
+    this.sessionId = id;
     onCreated(id);
     await this.native().request('thread/inject_items', {
       threadId: id,
@@ -173,6 +176,7 @@ class CodexSession implements HarnessSession {
     return this.verifyGuidance(response);
   }
   async resumeSession(sessionId: string) {
+    this.sessionId = sessionId;
     const response = await this.native().request('thread/resume', {
       ...this.threadParams(),
       threadId: sessionId,
@@ -249,6 +253,17 @@ class CodexSession implements HarnessSession {
     if (submission) submission.accepted = true;
   }
   private notification(method: string, params: Record<string, unknown>) {
+    if (method === 'thread/tokenUsage/updated') {
+      const parsed = tokenUsageNotificationSchema.safeParse(params);
+      if (!parsed.success || parsed.data.threadId !== this.sessionId) return;
+      const { last, modelContextWindow } = parsed.data.tokenUsage;
+      this.output.event({
+        type: 'context_usage',
+        sessionId: parsed.data.threadId,
+        usage: { usedTokens: last.totalTokens, maxTokens: modelContextWindow, estimated: false },
+      });
+      return;
+    }
     if (method === 'turn/started' || method === 'turn/completed') {
       const parsed = turnNotificationSchema.safeParse(params);
       if (!parsed.success) return;

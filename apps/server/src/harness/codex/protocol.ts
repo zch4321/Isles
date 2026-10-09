@@ -1,4 +1,4 @@
-// Deliberately small projection of Codex CLI 0.160.0 generated protocol.
+// Deliberately small projection of Codex CLI 0.161.0 generated protocol.
 // Regenerate for comparison: codex app-server generate-ts --out /tmp/isles-protocol
 // Official wire format: https://learn.chatgpt.com/docs/app-server (JSONL, no jsonrpc header).
 import { questionDefinitionSchema } from '@isles/contracts';
@@ -24,6 +24,14 @@ export const turnNotificationSchema = z.object({
     id: z.string(),
     status: z.string(),
     error: z.object({ message: z.string() }).passthrough().nullable().optional(),
+  }),
+});
+export const tokenUsageNotificationSchema = z.object({
+  threadId: z.string(),
+  tokenUsage: z.object({
+    // `total` accumulates billed usage; `last` describes the current model context.
+    last: z.object({ totalTokens: z.number().int().nonnegative() }),
+    modelContextWindow: z.number().int().positive().nullable(),
   }),
 });
 export const inputRequestSchema = z.object({

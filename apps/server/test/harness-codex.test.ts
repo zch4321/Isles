@@ -125,6 +125,56 @@ async function fixture() {
 }
 
 describe('Codex adapter protocol boundary', () => {
+  it('reports last context usage outside turns and filters other native threads', async () => {
+    const { session, wire, output } = await fixture();
+    await session.createSession(() => {});
+    const usage = {
+      total: { totalTokens: 900000 },
+      last: { totalTokens: 12345 },
+      modelContextWindow: 200000,
+    };
+    wire.notification('thread/tokenUsage/updated', { threadId: 'subagent', tokenUsage: usage });
+    expect(output.event).not.toHaveBeenCalled();
+    wire.notification('thread/tokenUsage/updated', { threadId: 'session-one', tokenUsage: usage });
+    expect(output.event).toHaveBeenLastCalledWith({
+      type: 'context_usage',
+      sessionId: 'session-one',
+      usage: { usedTokens: 12345, maxTokens: 200000, estimated: false },
+    });
+    await session.resumeSession('restored');
+    wire.notification('thread/tokenUsage/updated', { threadId: 'session-one', tokenUsage: usage });
+    expect(output.event).toHaveBeenCalledTimes(1);
+    wire.notification('thread/tokenUsage/updated', {
+      threadId: 'restored',
+      tokenUsage: { ...usage, last: { totalTokens: 1000 }, modelContextWindow: null },
+    });
+    expect(output.event).toHaveBeenLastCalledWith({
+      type: 'context_usage',
+      sessionId: 'restored',
+      usage: { usedTokens: 1000, maxTokens: null, estimated: false },
+    });
+    for (const invalid of [-1, '1000', 1.5])
+      wire.notification('thread/tokenUsage/updated', {
+        threadId: 'restored',
+        tokenUsage: { ...usage, last: { totalTokens: invalid } },
+      });
+    expect(output.event).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not treat a usage notification as turn acceptance', async () => {
+    const { session, wire, setRequest, input, output } = await fixture();
+    await session.createSession(() => {});
+    setRequest(async () => {
+      wire.notification('thread/tokenUsage/updated', {
+        threadId: input.sessionId,
+        tokenUsage: { last: { totalTokens: 10 }, modelContextWindow: 200000 },
+      });
+      throw new NativeRpcError('input rejected');
+    });
+    await expect(session.submit(input)).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    expect(output.event).toHaveBeenCalledOnce();
+    expect(output.event).toHaveBeenCalledWith(expect.objectContaining({ type: 'context_usage' }));
+  });
   it('persists the created ID before injection and guidance verification can fail', async () => {
     const { session, calls, setRequest } = await fixture();
     const saved: string[] = [];

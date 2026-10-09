@@ -150,6 +150,8 @@ class DshSession implements HarnessSession {
       throw new Error('DSH session 的工作目录与 Agent 不一致');
     if (this.closing) throw new Error('DSH 连接已关闭');
     this.sessionId = sessionId;
+    if (session.contextUsage)
+      this.handlers.event({ type: 'context_usage', sessionId, usage: session.contextUsage });
   }
   async submit(input: HarnessTurnInput) {
     if (this.stopped || input.sessionId !== this.sessionId || this.active)
@@ -255,13 +257,22 @@ class DshSession implements HarnessSession {
     }
     if (method !== 'isles/event') return;
     const frame = eventSchema.parse(params);
-    if (frame.sessionId !== this.sessionId || !this.active) return;
+    if (frame.sessionId !== this.sessionId) return;
     if (frame.eventId) {
       if (this.events.has(frame.eventId)) return;
       this.events.add(frame.eventId);
     }
-    const active = this.active;
     const event = frame.event;
+    if (event.type === 'context_usage') {
+      this.handlers.event({
+        type: 'context_usage',
+        sessionId: this.sessionId!,
+        usage: event.usage,
+      });
+      return;
+    }
+    const active = this.active;
+    if (!active) return;
     if (event.type === 'turn_started') {
       if (active.turnId === event.turnId) return;
       if (active.turnId || active.ended) {

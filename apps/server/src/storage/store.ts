@@ -1,9 +1,10 @@
-import { agentSchema, channelSchema, messageKey } from '@isles/contracts';
+import { agentSchema, channelSchema, contextUsageSchema, messageKey } from '@isles/contracts';
 import type {
   Agent,
   AgentDetail,
   Channel,
   ChannelDetail,
+  ContextUsage,
   DeliveryStatus,
   IslesEvent,
   Message,
@@ -224,6 +225,84 @@ export class Store {
         .where(eq(agents.id, id))
         .run();
       this.event('agent', { agentId: id }, update);
+    });
+  }
+  /** Latest native context snapshot belongs to the current session, including after restart. */
+  contextUsage(id: string): ContextUsage | null {
+    const agent = this.getAgent(id);
+    const latest = this.db
+      .select({ data: events.data })
+      .from(events)
+      .where(
+        and(
+          eq(events.agentId, id),
+          eq(events.type, 'agent'),
+          sql`json_type(${events.data}, '$.contextUsage') is not null`,
+        ),
+      )
+      .orderBy(desc(events.id))
+      .limit(1)
+      .get();
+    if (!latest) return null;
+    const usage = (JSON.parse(latest.data) as { contextUsage: ContextUsage | null }).contextUsage;
+    return usage?.sessionId === agent.threadId ? contextUsageSchema.parse(usage) : null;
+  }
+  recordContextUsage(
+    id: string,
+    sessionId: string,
+    usage: Omit<ContextUsage, 'sessionId' | 'updatedAt'> | null,
+  ) {
+    const agent = this.getAgent(id);
+    if (agent.status === 'deleted' || agent.threadId !== sessionId) return;
+    if (usage === null) {
+      this.change(() => this.event('agent', { agentId: id }, { contextUsage: null }));
+      return;
+    }
+    const snapshot = contextUsageSchema.safeParse({ ...usage, sessionId, updatedAt: now() });
+    if (!snapshot.success) return;
+    this.change(() => this.event('agent', { agentId: id }, { contextUsage: snapshot.data }));
+  }
+  /** Explicit session replacement invalidates old telemetry without removing any history. */
+  beginNewSession(id: string) {
+    this.change(() => {
+      const agent = this.getAgent(id);
+      if (agent.status === 'deleted') throw new HttpError(410, '该 Agent 已删除');
+      const update = {
+        threadId: null,
+        threadCreationAttempted: false,
+        status: 'creating' as const,
+        error: null,
+      };
+      this.db
+        .update(agents)
+        .set({ ...update, updatedAt: now() })
+        .where(eq(agents.id, id))
+        .run();
+      this.event(
+        'agent',
+        { agentId: id },
+        {
+          ...update,
+          contextUsage: null,
+          previousSessionId: agent.threadId,
+          sessionReset: 'started',
+        },
+      );
+    });
+  }
+  completeNewSession(id: string, previousSessionId: string | null) {
+    this.change(() => {
+      const agent = this.getAgent(id);
+      this.systemMessage(agent.channelId, '已新建会话，后续消息使用新的上下文。');
+      this.event(
+        'agent',
+        { agentId: id },
+        {
+          previousSessionId,
+          sessionId: agent.threadId,
+          sessionReset: 'completed',
+        },
+      );
     });
   }
   /** Retire an Agent while retaining its identity, native session and historical records. */
@@ -770,6 +849,35 @@ export class Store {
 
   // Scheduling
 
+  /** Include parked group messages as well as admissions whose outcome is still pending. */
+  pendingMessageCount(agentId: string): number {
+    return this.db
+      .select({ count: sql<number>`count(*)` })
+      .from(deliveries)
+      .innerJoin(messages, deliveryMessageJoin)
+      .innerJoin(channels, eq(deliveries.channelId, channels.id))
+      .where(
+        and(
+          eq(deliveries.agentId, agentId),
+          inArray(deliveries.status, ['queued', 'submitting', 'steering']),
+          this.liveChannel(),
+          ne(messages.sender, 'system'),
+        ),
+      )
+      .get()!.count;
+  }
+  hasActiveRun(agentId: string): boolean {
+    return Boolean(
+      this.db
+        .select({ id: runs.id })
+        .from(runs)
+        .where(
+          and(eq(runs.agentId, agentId), inArray(runs.status, ['starting', 'running', 'waiting'])),
+        )
+        .limit(1)
+        .get(),
+    );
+  }
   /** Unread user or Agent messages in unpaused channels; system notices never wake anyone. */
   hasPendingMessages(agentId: string): boolean {
     return Boolean(
@@ -1227,6 +1335,8 @@ export class Store {
       .all();
     return {
       agent,
+      contextUsage: this.contextUsage(id),
+      pendingMessageCount: this.pendingMessageCount(id),
       runs: history.map((r) => this.getRun(r.id)),
       questions: this.pendingQuestions([id]),
       cursor: this.cursor(),

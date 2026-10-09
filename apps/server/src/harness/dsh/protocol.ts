@@ -23,7 +23,16 @@ export const catalogSchema = z.object({
   models: z.array(modelInfoSchema),
   defaultSelection: selectionSchema.optional(),
 });
-export const sessionSchema = z.object({ sessionId: z.string().min(1), cwd: z.string().min(1) });
+export const contextUsageSchema = z.object({
+  usedTokens: z.number().int().nonnegative(),
+  maxTokens: z.number().int().positive().nullable(),
+  estimated: z.boolean(),
+});
+export const sessionSchema = z.object({
+  sessionId: z.string().min(1),
+  cwd: z.string().min(1),
+  contextUsage: contextUsageSchema.optional(),
+});
 export const rejectionSchema = z.object({ rejected: z.literal(true), reason: z.string().min(1) });
 export const admissionSchema = z.object({
   sessionId: z.string().min(1),
@@ -33,6 +42,7 @@ const turnId = z.string().min(1);
 export const eventSchema = z.object({
   sessionId: z.string().min(1),
   event: z.discriminatedUnion('type', [
+    z.object({ type: z.literal('context_usage'), usage: contextUsageSchema }),
     z.object({ type: z.literal('turn_started'), turnId }),
     z.object({
       type: z.literal('turn_completed'),

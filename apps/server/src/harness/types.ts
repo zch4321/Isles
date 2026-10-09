@@ -10,6 +10,12 @@ import type { AgentRecord } from '../storage/store.js';
 
 export type HarnessRequestId = string | number;
 
+export interface HarnessContextUsage {
+  usedTokens: number;
+  maxTokens: number | null;
+  estimated: boolean;
+}
+
 export interface HarnessCatalog {
   status(): Promise<HarnessStatus>;
   models(): Promise<Model[]>;
@@ -17,6 +23,7 @@ export interface HarnessCatalog {
 }
 
 export type HarnessEvent =
+  | { type: 'context_usage'; sessionId: string; usage: HarnessContextUsage | null }
   | { type: 'turn_started'; sessionId: string; turnId: string }
   | {
       type: 'turn_completed';

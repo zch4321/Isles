@@ -322,6 +322,37 @@ describe('DSH native SDK adapter', () => {
     },
   );
 
+  it('restores context usage and accepts idle main-session updates independently of a turn', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    f.native.onRequest = ({ method }) =>
+      method === 'isles/session/resume'
+        ? {
+            sessionId: id,
+            cwd: f.agent.workspace,
+            contextUsage: { usedTokens: 800, maxTokens: 4000, estimated: false },
+          }
+        : undefined;
+    await session.resumeSession(id);
+    const update = {
+      type: 'context_usage',
+      usage: { usedTokens: 120, maxTokens: 4000, estimated: true },
+    };
+    f.native.event('other-session', update);
+    f.native.notify('isles/event', { sessionId: id, event: update, eventId: 'compacted' });
+    f.native.notify('isles/event', { sessionId: id, event: update, eventId: 'compacted' });
+    expect(f.events).toEqual([
+      {
+        type: 'context_usage',
+        sessionId: id,
+        usage: { usedTokens: 800, maxTokens: 4000, estimated: false },
+      },
+      { type: 'context_usage', sessionId: id, usage: update.usage },
+    ]);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
   it('changes selection only for a new submit and preserves provider and nested model identity', async () => {
     const f = await fixture();
     const session = await f.connect();

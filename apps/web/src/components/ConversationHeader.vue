@@ -2,6 +2,7 @@
 import type { Agent, Channel } from '@isles/contracts';
 import {
   ArrowLeft,
+  ChartPie,
   Download,
   Ellipsis,
   LoaderCircle,
@@ -10,7 +11,7 @@ import {
   Play,
   Square,
 } from '@lucide/vue';
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -22,6 +23,7 @@ import { useHarnessName } from '@/api/queries';
 import GroupAvatar from './GroupAvatar.vue';
 import ParticipantAvatar from './ParticipantAvatar.vue';
 import StatusBadge from './StatusBadge.vue';
+import AgentContextDialog from './AgentContextDialog.vue';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -49,6 +51,7 @@ const canResume = computed(
 );
 const running = computed(() => props.members.filter((m) => m.status === 'running').length);
 const harnessName = useHarnessName(() => props.agent?.harness ?? '');
+const contextOpen = ref(false);
 </script>
 
 <template>
@@ -73,6 +76,15 @@ const harnessName = useHarnessName(() => props.agent?.harness ?? '');
           {{ harnessName }} · {{ agent.model }} · {{ agent.reasoningEffort }}
         </p>
       </div>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label="上下文"
+        title="上下文"
+        @click="contextOpen = true"
+      >
+        <ChartPie />
+      </Button>
       <Button
         v-if="agent.status !== 'deleted' && canResume"
         variant="outline"
@@ -192,4 +204,5 @@ const harnessName = useHarnessName(() => props.agent?.harness ?? '');
       </DropdownMenuPortal>
     </DropdownMenuRoot>
   </header>
+  <AgentContextDialog v-if="agent && contextOpen" v-model:open="contextOpen" :agent="agent" />
 </template>

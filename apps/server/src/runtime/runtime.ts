@@ -46,6 +46,7 @@ interface Handle {
 export class Runtime {
   private handles = new Map<string, Handle>();
   private deleting = new Set<string>();
+  private resetting = new Set<string>();
   private baseUrl: string | undefined;
   private closing = false;
   private readonly log: Logger;
@@ -176,6 +177,7 @@ export class Runtime {
     const agent = this.store.getAgent(id);
     if (agent.status === 'deleted') throw new HttpError(410, 'Agent 已删除，历史仅供查看');
     if (this.deleting.has(id)) throw new HttpError(409, 'Agent 正在删除，请等待操作完成');
+    if (this.resetting.has(id)) throw new HttpError(409, 'Agent 正在新建会话，请等待操作完成');
     return agent;
   }
   private running(agentId: string) {
@@ -225,10 +227,10 @@ export class Runtime {
 
   private runnable(id: string) {
     const agent = this.store.getAgent(id);
-    return agent.desiredState === 'running' && agent.status !== 'error';
+    return agent.desiredState === 'running' && agent.status !== 'error' && !this.resetting.has(id);
   }
   kick(id: string) {
-    if (this.closing || !this.baseUrl) return;
+    if (this.closing || !this.baseUrl || this.resetting.has(id)) return;
     const handle = this.handle(id);
     if (handle.active) {
       this.kickSteer(id, handle, handle.active);
@@ -314,9 +316,9 @@ export class Runtime {
           this.kickSteer(id, handle, active);
       });
   }
-  private async connect(id: string, handle: Handle) {
+  private async connect(id: string, handle: Handle, previousSessionId?: string | null) {
     const agent = this.store.getAgent(id);
-    if (agent.desiredState !== 'running' || this.closing) return;
+    if ((agent.desiredState !== 'running' && !this.resetting.has(id)) || this.closing) return;
     if (agent.threadCreationAttempted && !agent.threadId)
       throw new Error('原生 thread 创建结果不明，不能创建替代 thread；请核对原生记录。');
     const adapter = this.harnesses.get(agent.harness);
@@ -334,7 +336,10 @@ export class Runtime {
       connected: (value) => {
         connection = value;
         handle.session = value;
-        if (this.closing || this.store.getAgent(id).desiredState !== 'running')
+        if (
+          this.closing ||
+          (this.store.getAgent(id).desiredState !== 'running' && !this.resetting.has(id))
+        )
           void value
             .close()
             .catch((error: unknown) =>
@@ -352,14 +357,18 @@ export class Runtime {
       },
     });
     if (connection !== session) throw new Error('Harness 未发布正确的原生连接');
-    handle.session = session;
     if (adapter.descriptor.capabilities.steer && !session.steer)
       throw new Error('Harness 声明支持 steer，但未提供投递方法');
-    if (this.store.getAgent(id).desiredState !== 'running' || this.closing) {
+    if (
+      (this.store.getAgent(id).desiredState !== 'running' && !this.resetting.has(id)) ||
+      this.closing
+    ) {
       await session.close();
       if (handle.session === session) delete handle.session;
       return;
     }
+    if (handle.session !== session)
+      throw new Error('原生连接已在启动期间退出，请恢复 Agent 后重试。');
     let sessionId: string;
     if (agent.threadId) {
       sessionId = await session.resumeSession(agent.threadId);
@@ -368,6 +377,8 @@ export class Runtime {
       this.store.updateAgent(id, { threadCreationAttempted: true });
       sessionId = await session.createSession((createdId) => {
         if (!createdId) throw new Error('Harness 返回了空的原生 session ID');
+        if (createdId === previousSessionId)
+          throw new Error('Harness 返回了原会话 ID，请检查原生会话创建接口。');
         const saved = this.store.getAgent(id).threadId;
         if (saved && saved !== createdId)
           throw new Error('Harness 试图替换已保存的原生 session 绑定');
@@ -376,6 +387,8 @@ export class Runtime {
       if (sessionId !== this.store.getAgent(id).threadId)
         throw new Error('Harness 新建的 session 与已保存绑定不一致');
     }
+    if (handle.session !== session)
+      throw new Error('原生连接已在会话初始化期间退出，请恢复 Agent 后重试。');
     this.store.updateAgent(id, {
       threadId: sessionId,
       status: this.store.getAgent(id).desiredState === 'running' ? 'ready' : 'stopped',
@@ -507,6 +520,10 @@ export class Runtime {
       });
   }
   private event(id: string, handle: Handle, event: HarnessEvent) {
+    if (event.type === 'context_usage') {
+      this.store.recordContextUsage(id, event.sessionId, event.usage);
+      return;
+    }
     const active = handle.active;
     if (!active || event.sessionId !== active.run.threadId) return;
     const run = this.store.getRun(active.run.id);
@@ -706,10 +723,66 @@ export class Runtime {
     this.log.info({ agentId: id }, 'Agent resumed');
     this.kick(id);
   }
+  /** User-requested replacement is serialized against every admission and management action. */
+  async newSession(id: string) {
+    if (!this.baseUrl || this.closing) throw new HttpError(503, 'Runtime 尚未就绪');
+    const agent = this.managed(id);
+    const handle = this.handle(id);
+    if (
+      handle.task ||
+      handle.active ||
+      this.store.hasActiveRun(id) ||
+      !['ready', 'stopped', 'error'].includes(agent.status)
+    )
+      throw new HttpError(409, 'Agent 正在执行或初始化，请等待空闲后新建会话。');
+    if (this.store.pendingMessageCount(id))
+      throw new HttpError(409, 'Agent 有待投递消息，请处理完消息后新建会话。');
+    this.resetting.add(id);
+    handle.controlRevision = (handle.controlRevision ?? 0) + 1;
+    let task: Promise<void> | undefined;
+    try {
+      // Establish the boundary synchronously. Incoming messages now wait for the new session.
+      this.store.beginNewSession(id);
+      task = this.replaceSession(id, handle, agent.threadId);
+      handle.task = task;
+      await task;
+      return this.store.publicAgent(id);
+    } finally {
+      if (handle.task === task) delete handle.task;
+      this.resetting.delete(id);
+      if (!this.closing && this.runnable(id) && this.store.hasPendingMessages(id)) this.kick(id);
+    }
+  }
+  private async replaceSession(id: string, handle: Handle, previousSessionId: string | null) {
+    try {
+      const previous = handle.session;
+      // Fence late events and exits from the old process before shutdown awaits native I/O.
+      if (handle.session === previous) delete handle.session;
+      await previous?.close();
+      delete handle.refresh;
+      if (this.closing) throw new Error('服务正在关闭，请启动后继续新建会话。');
+      await this.connect(id, handle, previousSessionId);
+      if (this.closing || !this.store.getAgent(id).threadId)
+        throw new Error('新会话初始化尚未完成，请查看 Agent 状态。');
+      this.store.completeNewSession(id, previousSessionId);
+      this.log.info(
+        { agentId: id, previousSessionId, sessionId: this.store.getAgent(id).threadId },
+        'Agent started a new native session',
+      );
+    } catch (error) {
+      const reason = this.workspace.redactor.text(error);
+      this.store.updateAgent(id, { desiredState: 'stopped', status: 'error', error: reason });
+      await handle.session?.close();
+      delete handle.session;
+      this.log.warn({ agentId: id, reason }, 'New native session initialization failed');
+      throw new HttpError(503, reason);
+    }
+  }
   async deleteAgent(id: string) {
     const agent = this.store.getAgent(id);
     if (agent.status === 'deleted') return this.store.publicAgent(id);
     if (this.deleting.has(id)) throw new HttpError(409, 'Agent 正在删除，请等待操作完成');
+    if (this.resetting.has(id)) throw new HttpError(409, 'Agent 正在新建会话，请等待操作完成');
     this.deleting.add(id);
     const handle = this.handle(id);
     handle.controlRevision = (handle.controlRevision ?? 0) + 1;
@@ -754,7 +827,9 @@ export class Runtime {
     await Promise.all(
       [...this.handles.values()].map(async (handle) => {
         await handle.session?.close();
-        await handle.task;
+        await handle.task?.catch((error: unknown) =>
+          this.log.warn({ err: error }, 'Agent initialization ended during shutdown'),
+        );
       }),
     );
   }

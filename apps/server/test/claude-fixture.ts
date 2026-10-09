@@ -41,6 +41,7 @@ let question;
 let folded = [];
 const queued = new Map();
 let mcpReads = 0;
+let pendingContextResponse;
 const acknowledge = (frame) => {
   send({ type: 'command_lifecycle', state: 'started', command_uuid: frame.uuid, session_id: sid });
   send({ type: 'user', uuid: frame.uuid, isReplay: true, session_id: sid, parent_tool_use_id: null, message: frame.message });
@@ -52,7 +53,7 @@ const finish = (message, error = false) => {
   const consumed = [current.uuid, ...folded];
   const representative = settings().resultUsesSteerUuid && folded.length ? folded.at(-1) : current.uuid;
   send({ type: 'assistant', uuid: crypto.randomUUID(), session_id: sid, parent_tool_use_id: null, user_message_uuid: representative, message: { id: 'msg-' + current.uuid, content: [{ type: 'text', text: message }] } });
-  send({ type: 'result', subtype: 'success', is_error: error, result: message, session_id: sid, uuid: crypto.randomUUID(), user_message_uuid: representative, user_message_uuids: consumed, queued_turn_count: queued.size });
+  send({ type: 'result', subtype: 'success', is_error: error, result: message, session_id: sid, uuid: crypto.randomUUID(), user_message_uuid: representative, user_message_uuids: consumed, queued_turn_count: queued.size, usage: { input_tokens: 900000, output_tokens: 100000 } });
   folded = [];
   // Like the CLI, run queued input as the next turn shortly after the result.
   if (queued.size && !settings().holdQueued) setTimeout(next, 20);
@@ -81,7 +82,18 @@ lines.on('line', (line) => {
         { value: 'haiku', displayName: 'Haiku' },
       ] };
     } else if (request.subtype === 'get_context_usage') {
-      response = { memoryFiles: ['CLAUDE.md', ...(config.missingGuidance ? [] : ['AGENTS.md'])].map((name) => ({ path: path.join(process.cwd(), name), type: 'Project', tokens: 10 })) };
+      if (config.contextError) { send({ type: 'control_response', response: { subtype: 'error', request_id: frame.request_id, error: config.contextError } }); return; }
+      response = { totalTokens: config.contextTokens ?? 1024, maxTokens: 200000, rawMaxTokens: 200000, memoryFiles: ['CLAUDE.md', ...(config.missingGuidance ? [] : ['AGENTS.md'])].map((name) => ({ path: path.join(process.cwd(), name), type: 'Project', tokens: 10 })) };
+      if (config.reverseContextResponses) {
+        response.totalTokens = config.reverseContextResponses[pendingContextResponse ? 1 : 0];
+        const reply = () => send({ type: 'control_response', response: { subtype: 'success', request_id: frame.request_id, response } });
+        if (!pendingContextResponse) { pendingContextResponse = reply; return; }
+        reply();
+        pendingContextResponse();
+        pendingContextResponse = undefined;
+        send({ type: 'system', subtype: 'context_responses_replayed', session_id: sid });
+        return;
+      }
     } else if (request.subtype === 'mcp_status') {
       response = { mcpServers: [{ name: 'isles', status: config.failedMcp ? 'failed' : config.pendingMcp && !mcpReads++ ? 'pending' : 'connected' }] };
     } else if (request.subtype === 'interrupt') {
@@ -153,6 +165,7 @@ function begin(frame) {
   }
   if (frame.message.content === 'wrong-session') { send({ type: 'assistant', session_id: crypto.randomUUID(), message: { content: [] } }); return; }
   if (config.staleResult) send({ type: 'result', subtype: 'success', session_id: sid, user_message_uuid: crypto.randomUUID(), is_error: false });
+  if (config.subagentResult) send({ type: 'result', subtype: 'success', session_id: crypto.randomUUID(), user_message_uuid: frame.uuid, parent_tool_use_id: 'subagent-tool', is_error: false });
   finish('Reply: ' + frame.message.content);
 }
 `,
