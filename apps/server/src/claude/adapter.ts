@@ -433,6 +433,7 @@ class ClaudeSession implements HarnessSession {
         options: question.options,
         isOther: true,
         isSecret: false,
+        multiSelect: question.multiSelect ?? false,
       })),
     });
   }

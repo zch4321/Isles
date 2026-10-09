@@ -2,7 +2,7 @@ import type { Model } from '@isles/contracts';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CachedCatalog, type CatalogSnapshot } from '../harness/catalog-cache.js';
-import { initializeAcp, type AcpClientFactory, type AcpConnection } from './client.js';
+import { AcpRpcError, initializeAcp, type AcpClientFactory, type AcpConnection } from './client.js';
 import type { AcpHarness } from './harness.js';
 import {
   newSessionResultSchema,
@@ -79,7 +79,12 @@ export class AcpCatalog extends CachedCatalog {
       let options = session.configOptions ?? [];
       const selector = options.find((option) => option.category === 'model');
       if (!selector)
-        return [{ ...model('default', 'Default', '', options), isDefault: true }] satisfies Model[];
+        return [
+          {
+            ...(await model(client, session.sessionId, 'default', 'Default', '', options)),
+            isDefault: true,
+          },
+        ] satisfies Model[];
       const models: Model[] = [];
       for (const entry of selectValues(selector)) {
         const current = options.find((option) => option.id === selector.id)?.currentValue;
@@ -93,7 +98,14 @@ export class AcpCatalog extends CachedCatalog {
               }),
             ).configOptions ?? options;
         models.push({
-          ...model(entry.value, entry.name, entry.description ?? '', options),
+          ...(await model(
+            client,
+            session.sessionId,
+            entry.value,
+            entry.name,
+            entry.description ?? '',
+            options,
+          )),
           isDefault: entry.value === selector.currentValue,
         });
       }
@@ -116,10 +128,36 @@ export class AcpCatalog extends CachedCatalog {
 }
 
 /** Models without a thinking selector keep the native setting, reported as `default`. */
-function model(id: string, displayName: string, description: string, options: AcpConfigOption[]) {
+async function model(
+  client: AcpConnection,
+  sessionId: string,
+  id: string,
+  displayName: string,
+  description: string,
+  options: AcpConfigOption[],
+) {
   const thinking = options.find((option) => option.category === 'thought_level');
   const levels = selectValues(thinking).map((level) => level.value);
-  const current = thinking?.currentValue;
+  let current = thinking?.currentValue;
+  // Kimi appends its retained current value to the new model's options, even when
+  // that model rejects it. Verify it in this disposable session before publishing it.
+  if (thinking && typeof current === 'string' && levels.includes(current)) {
+    const retained = current;
+    try {
+      const state = sessionStateSchema.parse(
+        await client.request('session/set_config_option', {
+          sessionId,
+          configId: thinking.id,
+          value: current,
+        }),
+      );
+      current =
+        state.configOptions?.find((option) => option.id === thinking.id)?.currentValue ?? retained;
+    } catch (error) {
+      if (!(error instanceof AcpRpcError) || error.code !== -32602) throw error;
+      levels.splice(levels.indexOf(retained), 1);
+    }
+  }
   return {
     id,
     model: id,

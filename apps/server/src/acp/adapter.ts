@@ -261,7 +261,8 @@ class AcpSession implements HarnessSession {
     const option = this.options.find((candidate) => candidate.category === category);
     if (!option || !selectValues(option).some((entry) => entry.value === value))
       throw new Error(`${this.name} 当前不支持${label} ${value}，请修改 Agent 设置`);
-    if (option.currentValue === value) return;
+    // Kimi can retain an unsupported thinking value after switching models.
+    if (option.currentValue === value && category !== 'thought_level') return;
     this.observe(
       sessionStateSchema.parse(
         await this.native().request('session/set_config_option', {
@@ -326,32 +327,38 @@ class AcpSession implements HarnessSession {
           { sessionId: input.sessionId, prompt: [{ type: 'text', text: input.text }] },
           { timeout: null },
         )
-        .then(
-          (value) => {
-            const { stopReason } = promptResultSchema.parse(value);
-            active.accept();
-            const interrupted = active.interrupted || stopReason === 'cancelled';
-            this.complete(
-              active,
-              interrupted ? 'interrupted' : stopReason === 'refusal' ? 'failed' : 'completed',
-              stopReason === 'refusal'
-                ? `${this.name} 拒绝继续执行`
-                : ['max_tokens', 'max_turn_requests'].includes(stopReason)
-                  ? `${this.name} 已达到单轮上限（${stopReason}）`
-                  : null,
-            );
-          },
-          (error: unknown) => {
-            if (!active.accepted) {
+        .then((value) => {
+          const { stopReason } = promptResultSchema.parse(value);
+          active.accept();
+          const interrupted = active.interrupted || stopReason === 'cancelled';
+          this.complete(
+            active,
+            interrupted ? 'interrupted' : stopReason === 'refusal' ? 'failed' : 'completed',
+            stopReason === 'refusal'
+              ? `${this.name} 拒绝继续执行`
+              : ['max_tokens', 'max_turn_requests'].includes(stopReason)
+                ? `${this.name} 已达到单轮上限（${stopReason}）`
+                : null,
+          );
+        })
+        .catch((error: unknown) => {
+          if (this.closed) return;
+          if (error instanceof AcpRpcError) {
+            if (active.accepted) this.complete(active, 'failed', error.message);
+            else {
               if (this.active === active) this.active = undefined;
               if (busy(error)) resolve('busy');
-              else if (error instanceof AcpRpcError)
-                reject(new HarnessSubmissionRejected(error.message));
-              else reject(this.error(error));
-            } else if (error instanceof AcpRpcError) this.complete(active, 'failed', error.message);
-            // A closed transport after acceptance is reported once through exit.
-          },
-        );
+              else reject(new HarnessSubmissionRejected(error.message));
+            }
+            return;
+          }
+          // Invalid results and transport failures leave the input uncertain.
+          // Report through exit both before and after the first update.
+          this.exit(this.error(error));
+          return this.close().catch((closeError: unknown) =>
+            this.harness.log.warn({ err: closeError }, 'Closing an invalid ACP session failed'),
+          );
+        });
     });
   }
   private complete(
@@ -490,6 +497,7 @@ class AcpSession implements HarnessSession {
       question: [message, field.description].filter(Boolean).join('\n'),
       isOther: false,
       isSecret: false,
+      multiSelect: field.type === 'array',
       options:
         choices?.map((choice) => ({
           label: choice.const,

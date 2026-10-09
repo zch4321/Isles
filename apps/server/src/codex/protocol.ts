@@ -30,7 +30,10 @@ export const inputRequestSchema = z.object({
   threadId: z.string(),
   turnId: z.string(),
   itemId: z.string(),
-  questions: z.array(questionDefinitionSchema).min(1).max(3),
+  questions: z
+    .array(questionDefinitionSchema.omit({ multiSelect: true }))
+    .min(1)
+    .max(3),
   isBlocking: z.boolean(),
 });
 

@@ -1168,7 +1168,7 @@ test('steers Claude busy input through the Web in the original run and persists 
   );
 });
 
-test('creates Kimi Code without steer, replies through MCP and queues busy input for the next run', async ({
+test('creates Kimi Code, queues busy input and answers a native multi-select question through the Web', async ({
   page,
 }) => {
   const errors: string[] = [];
@@ -1229,5 +1229,23 @@ test('creates Kimi Code without steer, replies through MCP and queues busy input
   }[];
   expect(runs).toHaveLength(3);
   expect(runs.every((run) => run.threadId === binding && run.status === 'completed')).toBe(true);
+  await send(page, 'Kimi 多选提问');
+  await expect(page.getByText('Kimi 浏览器验证 需要你的回答')).toBeVisible();
+  await expect(page.getByRole('button', { name: '提交回答' })).toBeDisabled();
+  await page.getByRole('checkbox', { name: '代码', exact: true }).check();
+  await page.getByRole('checkbox', { name: '测试', exact: true }).check();
+  await page.getByRole('checkbox', { name: '文档', exact: true }).check();
+  await page.getByRole('checkbox', { name: '文档', exact: true }).uncheck();
+  const [answered] = await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/answer')),
+    page.getByRole('button', { name: '提交回答' }).click(),
+  ]);
+  expect(answered.request().postDataJSON()).toEqual({
+    answers: { scope: { answers: ['代码', '测试'] } },
+  });
+  await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+    'Kimi 多选回答：代码、测试',
+  );
+  await expect(page.getByText('Kimi 浏览器验证 需要你的回答')).not.toBeVisible();
   expect(errors).toEqual([]);
 });

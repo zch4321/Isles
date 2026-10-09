@@ -91,6 +91,7 @@ class FakeSession implements HarnessSession {
           question: 'Continue?',
           isOther: false,
           isSecret: false,
+          multiSelect: false,
           options: [{ label: 'Continue', description: 'Keep working' }],
         },
       ],

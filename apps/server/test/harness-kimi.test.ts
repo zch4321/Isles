@@ -226,6 +226,22 @@ describe('Kimi Code ACP adapter', () => {
     expect(f.events).toEqual([]);
   });
 
+  it('filters a retained thinking value that the selected model cannot set', async () => {
+    const f = await fixture({ model: 'kimi-code/fast', reasoningEffort: 'high' });
+    await f.cli.set({ initialThinking: 'high', restrictedThinking: true });
+    expect(await f.adapter.catalog.models()).toMatchObject([
+      { model: 'kimi-code/k3', defaultReasoningEffort: 'high' },
+      {
+        model: 'kimi-code/fast',
+        supportedReasoningEfforts: ['on', 'max'],
+        defaultReasoningEffort: 'max',
+      },
+    ]);
+    expect(await f.frames('session/prompt')).toEqual([]);
+    const session = await f.connect();
+    await expect(session.createSession(() => {})).rejects.toThrow('Unsupported thinking');
+  });
+
   it('resumes the exact session after a restart and reapplies settings that Kimi resets', async () => {
     const f = await fixture({ model: 'kimi-code/fast', reasoningEffort: 'default' });
     const first = await f.created();
@@ -339,6 +355,27 @@ describe('Kimi Code ACP adapter', () => {
     expect(f.events.some((event) => event.type === 'turn_completed')).toBe(false);
   });
 
+  it('settles an invalid prompt result as uncertain before any update', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ invalidPromptResult: true });
+    const error = await session.submit(f.input('silent', id)).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(HarnessSubmissionRejected);
+    expect(f.output.exit).toHaveBeenCalledTimes(1);
+    expect(f.events).toEqual([]);
+  });
+
+  it('reports an invalid result after acceptance once instead of completing the turn', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ invalidPromptResult: true });
+    await session.submit(f.input('hello', id));
+    await vi.waitFor(() => expect(f.output.exit).toHaveBeenCalledTimes(1));
+    expect(f.events.some((event) => event.type === 'turn_started')).toBe(true);
+    expect(f.events.some((event) => event.type === 'turn_completed')).toBe(false);
+  });
+
   it('leaves an unaccepted prompt uncertain when Isles closes the session', async () => {
     const f = await fixture();
     const { session, id } = await f.created();
@@ -381,9 +418,9 @@ describe('Kimi Code ACP adapter', () => {
     const many = f.input('ask-many', id);
     await session.submit(many);
     await vi.waitFor(() => expect(f.questions).toHaveLength(2));
-    expect(f.questions[1]!.questions.map((q) => [q.id, q.question])).toEqual([
-      ['q0', 'Which result?'],
-      ['q1', 'Which extras?'],
+    expect(f.questions[1]!.questions.map((q) => [q.id, q.question, q.multiSelect])).toEqual([
+      ['q0', 'Which result?', false],
+      ['q1', 'Which extras?', true],
     ]);
     session.answer(f.questions[1]!.requestId, {
       answers: { q0: { answers: ['One'] }, q1: { answers: ['One', 'Two'] } },

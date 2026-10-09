@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /** A real stdio process replaying the Kimi Code 2.1.1 ACP shapes captured in native probes. */
@@ -28,7 +28,7 @@ const update = (sessionId, value) => send({ method: 'session/update', params: { 
 const chunk = (sessionId, text, kind = 'agent_message_chunk') => update(sessionId, { sessionUpdate: kind, content: { type: 'text', text } });
 const models = [
   { value: 'kimi-code/k3', name: 'K3', thinking: ['low', 'high', 'max'] },
-  { value: 'kimi-code/fast', name: 'Fast', thinking: [] },
+  { value: 'kimi-code/fast', name: 'Fast', thinking: settings().restrictedThinking ? ['on', 'max'] : [] },
 ];
 const modes = ['default', 'plan', 'auto', 'yolo'];
 const state = new Map();
@@ -36,13 +36,13 @@ const options = (s) => {
   const model = models.find((entry) => entry.value === s.model);
   return [
     { type: 'select', id: 'model', name: 'Model', category: 'model', currentValue: s.model, options: models.map(({ value, name }) => ({ value, name })) },
-    ...(model.thinking.length ? [{ type: 'select', id: 'thinking', name: 'Thinking', category: 'thought_level', currentValue: s.thinking, options: model.thinking.map((value) => ({ value, name: 'Thinking ' + value })) }] : []),
+    ...(model.thinking.length ? [{ type: 'select', id: 'thinking', name: 'Thinking', category: 'thought_level', currentValue: s.thinking, options: [...new Set([...model.thinking, s.thinking])].map((value) => ({ value, name: 'Thinking ' + value })) }] : []),
     { type: 'select', id: 'mode', name: 'Mode', category: 'mode', currentValue: s.mode, options: modes.map((value) => ({ value, name: value })) },
   ];
 };
 // Like Kimi, model, thinking and mode are per process and reset on resume.
 const open = (id, cwd, mcpServers) => {
-  const s = { id, cwd, mcpServers, model: 'kimi-code/k3', thinking: 'max', mode: 'default' };
+  const s = { id, cwd, mcpServers, model: 'kimi-code/k3', thinking: settings().initialThinking ?? 'max', mode: 'default' };
   state.set(id, s);
   return { configOptions: options(s), modes: { currentModeId: s.mode, availableModes: modes.map((id) => ({ id, name: id })) } };
 };
@@ -58,7 +58,7 @@ const end = (stopReason) => {
   if (!active) return;
   const current = active;
   active = undefined;
-  send({ id: current.id, result: { stopReason } });
+  send({ id: current.id, result: settings().invalidPromptResult ? {} : { stopReason } });
   if (settings().lateAfterEnd) chunk(current.sessionId, 'late output');
 };
 const begin = (frame) => {
@@ -138,7 +138,6 @@ const handlers = {
       const model = models.find((entry) => entry.value === value);
       if (!model) throw { code: -32602, message: 'Unknown model' };
       s.model = value;
-      if (model.thinking.length && !model.thinking.includes(s.thinking)) s.thinking = model.thinking.at(-1);
     } else if (configId === 'thinking') {
       if (!models.find((entry) => entry.value === s.model).thinking.includes(value)) throw { code: -32602, message: 'Unsupported thinking' };
       s.thinking = value;
@@ -194,7 +193,11 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   return {
     home,
     binary,
-    set: (settings: Record<string, unknown>) => writeFile(scenario, JSON.stringify(settings)),
+    set: async (settings: Record<string, unknown>) => {
+      const temporary = `${scenario}.tmp`;
+      await writeFile(temporary, JSON.stringify(settings));
+      await rename(temporary, scenario);
+    },
     records: async () =>
       (await readFile(log, 'utf8').catch(() => ''))
         .trim()

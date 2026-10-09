@@ -337,6 +337,7 @@ class CodexSession implements HarnessSession {
       turnId: request.turnId,
       questions: request.questions.map((q) => ({
         ...q,
+        multiSelect: false,
         header: this.environment.redactor.text(q.header),
         question: this.environment.redactor.text(q.question),
         options:

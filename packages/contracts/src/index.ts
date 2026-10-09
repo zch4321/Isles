@@ -187,6 +187,7 @@ export const questionDefinitionSchema = z.object({
   question: z.string(),
   isOther: z.boolean(),
   isSecret: z.boolean(),
+  multiSelect: z.boolean(),
   options: z.array(z.object({ label: z.string(), description: z.string() })).nullable(),
 });
 export const questionSchema = z.object({

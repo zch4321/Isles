@@ -44,12 +44,13 @@ export function kimiBrowserAdapter(
     let closed = false;
     let mcp: { url: string; authorization: string } | undefined;
     let active: { finish(stopReason: string): void } | undefined;
+    let question: { id: string; respond(result: unknown): void } | undefined;
     const open = (params: { mcpServers: { url: string; headers: { value: string }[] }[] }) => {
       const server = params.mcpServers[0]!;
       mcp = { url: server.url, authorization: server.headers[0]!.value };
       return { configOptions };
     };
-    const reply = async (text: string) => {
+    const reply = async (text: string, answer?: string) => {
       const database = store();
       const agentId = new URL(mcp!.url).pathname.split('/').at(-1)!;
       const envelope = parseMessageText(text, database.getAgent(agentId).channelId, agentId, {
@@ -74,7 +75,7 @@ export function kimiBrowserAdapter(
               name: 'send_message',
               arguments: {
                 channelId: channel.channel_id,
-                body: `Kimi MCP 回复：${latest.body}`,
+                body: answer ?? `Kimi MCP 回复：${latest.body}`,
                 replyTo: latest.seq,
                 clientId: `kimi-${randomUUID()}`,
               },
@@ -116,24 +117,55 @@ export function kimiBrowserAdapter(
         if (method !== 'session/prompt') throw new AcpRpcError('Method not found', -32601, null);
         const text = value.prompt.map((block) => block.text).join('');
         return new Promise((resolve, reject) => {
+          const complete = (answer?: string) => {
+            void reply(text, answer).then(() => {
+              handlers.notification('session/update', {
+                sessionId: value.sessionId,
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'Kimi 原生执行详情' },
+                },
+              });
+              active?.finish('end_turn');
+            }, reject);
+          };
           const timer = setTimeout(
             () => {
-              void reply(text).then(() => {
-                handlers.notification('session/update', {
+              if (text.includes('Kimi 多选提问')) {
+                const id = `question-${randomUUID()}`;
+                question = {
+                  id,
+                  respond: (result) => {
+                    const response = result as { action: string; content?: { scope: string[] } };
+                    if (response.action === 'accept')
+                      complete(`Kimi 多选回答：${response.content!.scope.join('、')}`);
+                    else active?.finish('cancelled');
+                  },
+                };
+                handlers.request(id, 'elicitation/create', {
                   sessionId: value.sessionId,
-                  update: {
-                    sessionUpdate: 'agent_message_chunk',
-                    content: { type: 'text', text: 'Kimi 原生执行详情' },
+                  mode: 'form',
+                  message: '选择需要处理的内容',
+                  requestedSchema: {
+                    properties: {
+                      scope: {
+                        type: 'array',
+                        title: '执行范围',
+                        items: {
+                          anyOf: ['代码', '文档', '测试'].map((label) => ({ const: label })),
+                        },
+                      },
+                    },
                   },
                 });
-                active?.finish('end_turn');
-              }, reject);
+              } else complete();
             },
             text.includes('保持执行以验证 Kimi 排队') ? 1_500 : 250,
           );
           active = {
             finish: (stopReason) => {
               clearTimeout(timer);
+              question = undefined;
               active = undefined;
               resolve({ stopReason });
             },
@@ -143,7 +175,9 @@ export function kimiBrowserAdapter(
       notify: (method) => {
         if (method === 'session/cancel') active?.finish('cancelled');
       },
-      respond: () => {},
+      respond: (id, result) => {
+        if (question?.id === id) question.respond(result);
+      },
       reject: () => {},
       close: async () => {
         closed = true;

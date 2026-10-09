@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /** A real stdio process replaying the CLI 2.1.285 wire shapes captured in native probes. */
@@ -146,7 +146,7 @@ function begin(frame) {
   if (frame.message.content === 'ask') {
     const toolId = 'tool-' + frame.uuid;
     question = { toolId, requestId: 'question-' + frame.uuid };
-    const input = { questions: [{ question: 'Which result?', header: 'Result', options: [{ label: 'One', description: 'First result' }, { label: 'Two', description: 'Second result' }], multiSelect: false }] };
+    const input = { questions: [{ question: 'Which result?', header: 'Result', options: [{ label: 'One', description: 'First result' }, { label: 'Two', description: 'Second result' }], multiSelect: config.multiSelect ?? false }] };
     send({ type: 'assistant', session_id: sid, parent_tool_use_id: null, user_message_uuid: frame.uuid, message: { id: 'ask-' + frame.uuid, content: [{ type: 'tool_use', id: toolId, name: 'AskUserQuestion', input }] } });
     send({ type: 'control_request', request_id: question.requestId, request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', tool_use_id: toolId, input } });
     return;
@@ -160,7 +160,11 @@ function begin(frame) {
   return {
     home,
     binary,
-    set: (settings: Record<string, unknown>) => writeFile(scenario, JSON.stringify(settings)),
+    set: async (settings: Record<string, unknown>) => {
+      const temporary = `${scenario}.tmp`;
+      await writeFile(temporary, JSON.stringify(settings));
+      await rename(temporary, scenario);
+    },
     records: async () =>
       (await readFile(log, 'utf8').catch(() => ''))
         .trim()

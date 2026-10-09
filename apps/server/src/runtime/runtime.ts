@@ -619,6 +619,8 @@ export class Runtime {
     for (const q of question.questions) {
       questionDefinitionSchema.parse(q);
       const response = answers.answers[q.id]!;
+      if (!q.multiSelect && response.answers.length !== 1)
+        throw new HttpError(400, '该问题请选择一个答案');
       if (
         q.options &&
         !q.isOther &&

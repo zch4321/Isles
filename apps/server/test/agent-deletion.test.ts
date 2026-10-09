@@ -71,6 +71,7 @@ describe('Agent logical deletion', () => {
         options: [],
         isOther: false,
         isSecret: false,
+        multiSelect: false,
       },
     ]);
     const authored = store.saveMessage(

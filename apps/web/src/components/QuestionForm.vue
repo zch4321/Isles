@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { QuestionAnswer, UserQuestion } from '@isles/contracts';
 import { LoaderCircle, MessageCircleQuestionMark } from '@lucide/vue';
-import { reactive } from 'vue';
+import { computed, reactive } from 'vue';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -11,11 +11,26 @@ const emit = defineEmits<{ submit: [answers: QuestionAnswer] }>();
 // Choosing OTHER switches a question with options to a free-text answer.
 const OTHER = Symbol('other');
 const choices = reactive<Record<string, string | typeof OTHER>>({});
+const selections = reactive<Record<string, string[]>>(
+  Object.fromEntries(props.question.questions.map((q) => [q.id, []])),
+);
+const otherSelections = reactive<Record<string, boolean>>({});
 const typed = reactive<Record<string, string>>({});
+const unansweredMultiple = computed(() =>
+  props.question.questions.some(
+    (q) => q.multiSelect && q.options && !selections[q.id]?.length && !otherSelections[q.id],
+  ),
+);
 
 function submit() {
   const answers: QuestionAnswer['answers'] = {};
   for (const q of props.question.questions) {
+    if (q.multiSelect && q.options) {
+      const values = [...(selections[q.id] ?? [])];
+      if (otherSelections[q.id]) values.push(typed[q.id]?.trim() ?? '');
+      answers[q.id] = { answers: values };
+      continue;
+    }
     const choice = choices[q.id];
     const value = q.options && choice !== OTHER ? choice : typed[q.id]?.trim();
     answers[q.id] = { answers: [value ?? ''] };
@@ -39,6 +54,9 @@ function submit() {
           class="mr-1.5 rounded border bg-background px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground"
           >{{ q.header }}</span
         >{{ q.question }}
+        <span v-if="q.multiSelect" class="ml-1.5 text-xs font-normal text-muted-foreground"
+          >可多选</span
+        >
       </legend>
       <div v-if="q.options" class="mt-2 grid gap-1.5 sm:grid-cols-2">
         <label
@@ -47,6 +65,15 @@ function submit() {
           class="flex cursor-pointer items-start gap-2.5 rounded-md border bg-background px-3 py-2 transition-colors hover:border-ring/60 has-checked:border-primary has-checked:ring-1 has-checked:ring-primary/30"
         >
           <input
+            v-if="q.multiSelect"
+            v-model="selections[q.id]"
+            type="checkbox"
+            :name="`${question.id}:${q.id}`"
+            :value="option.label"
+            class="mt-[3px] accent-primary"
+          />
+          <input
+            v-else
             v-model="choices[q.id]"
             type="radio"
             :name="`${question.id}:${q.id}`"
@@ -66,6 +93,14 @@ function submit() {
           class="flex cursor-pointer items-start gap-2.5 rounded-md border bg-background px-3 py-2 transition-colors hover:border-ring/60 has-checked:border-primary has-checked:ring-1 has-checked:ring-primary/30"
         >
           <input
+            v-if="q.multiSelect"
+            v-model="otherSelections[q.id]"
+            type="checkbox"
+            :name="`${question.id}:${q.id}`"
+            class="mt-[3px] accent-primary"
+          />
+          <input
+            v-else
             v-model="choices[q.id]"
             type="radio"
             :name="`${question.id}:${q.id}`"
@@ -77,7 +112,7 @@ function submit() {
         </label>
       </div>
       <Input
-        v-if="!q.options || choices[q.id] === OTHER"
+        v-if="!q.options || choices[q.id] === OTHER || (q.multiSelect && otherSelections[q.id])"
         v-model="typed[q.id]"
         :type="q.isSecret ? 'password' : 'text'"
         required
@@ -90,7 +125,7 @@ function submit() {
     </fieldset>
 
     <div class="mt-4 flex justify-end">
-      <Button type="submit" size="sm" :disabled="pending">
+      <Button type="submit" size="sm" :disabled="pending || unansweredMultiple">
         <LoaderCircle v-if="pending" class="animate-spin" />提交回答
       </Button>
     </div>

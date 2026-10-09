@@ -49,7 +49,7 @@ Kimi Code 2.1.1（Homebrew，`@moonshot-ai/kimi-code`）。以下行为在本机
 - Kimi 的 ACP 一次执行一轮，不支持 steer；忙碌输入排队到下一轮，执行中仍可通过 `receive_messages` 主动收信。
 - Kimi 后台任务触发的回合与子代理活动不通过 ACP 转发，Isles 只记录由 Isles 发起的回合。
 - 原生问题只能在给出的选项中回答。
-- Kimi 将执行失败报告为 `end_turn`，此类 run 显示为已完成，失败原因见原生输出。
+- Kimi 2.1.1 会将部分模型请求失败报告为 `end_turn`，此类 run 显示为已完成。HTTP 400 已实测可能没有任何 ACP 输出，默认服务日志也无法取得失败原因；需要核对 Kimi 的原生会话记录。通用 ACP adapter 仅依据原生协议给出的终态结算。
 - 取消后紧接着开始新回合时，Kimi 迟到的消息块可能计入新 run（消息块没有回合标识）。
 - 规则文件依据 Kimi 文档从工作目录加载，运行时不额外校验。
 - MCP token 写入会话参数，由 Kimi 按其会话记录方式保存。
@@ -86,3 +86,15 @@ pnpm --filter @isles/server exec tsx test/verify-native-kimi.ts
 | 服务重启与删除 | 关闭服务后重新启动，恢复同一 session 并回复 `KIMI_RESTART_OK`；删除 Agent 后历史保留。                                                 |
 
 执行详情中，连续消息块与思考块各合并为一条已完成条目；Shell 显示为命令执行，Isles MCP 与 `AskUserQuestion` 显示为工具调用，均包含输入与输出。8 个 run 全部完成，无错误。
+
+## 7. Review 修复
+
+2026-10-09 修复三处接入问题：
+
+- prompt 响应的校验异常与传输错误统一关闭当前连接，并将输入保留为结果待核对；收到首个更新后的异常同样结算，正常停止保持原有关闭语义。
+- Kimi 在切换模型后可能保留不受支持的 thinking 值，并把它追加到选项中。目录探测在临时会话中显式设置当前 thinking 值，剔除原生明确拒绝的值；创建与恢复也显式验证 Agent 配置的 thinking。
+- 问题契约保留 `multiSelect`，Kimi 与 Claude 原生多选在 Web 使用复选框，至少选择一个答案后提交完整数组；单选请求只接受一个答案。
+
+回归覆盖包括：接受前后的异常 prompt 结果、服务继续响应及投递待核对、thinking 值继承与明确拒绝、Web 多选提交和取消选择。
+
+验证结果：`pnpm check` 通过（234 项通过、2 项跳过），Chrome E2E 19 项全部通过。本机 Kimi Code 2.1.1 的隔离目录探测确认：第二个模型只支持 `on/max` 时，目录剔除继承的 `high`，默认值为 `max`；该探测未发起模型请求。

@@ -479,38 +479,46 @@ describe('Claude CLI adapter', () => {
     );
     expect(f.output.exit).not.toHaveBeenCalled();
   });
-  it('maps AskUserQuestion and sends the answer only to the pending native request', async () => {
-    const f = await fixture();
-    const session = await f.connect();
-    const id = await session.createSession(() => {});
-    const input = f.input('ask', id);
-    await session.submit(input);
-    await vi.waitFor(() => expect(f.questions).toHaveLength(1));
-    const question = f.questions[0]!;
-    expect(question).toMatchObject({
-      sessionId: id,
-      turnId: input.runId,
-      questions: [{ id: 'question-0', question: 'Which result?' }],
-    });
-    session.answer(question.requestId, { answers: { 'question-0': { answers: ['Two'] } } });
-    await vi.waitFor(() =>
-      expect(f.events.some((event) => event.type === 'turn_completed')).toBe(true),
-    );
-    expect(
-      (await f.cli.records()).find(
-        (frame) =>
-          frame.type === 'control_response' &&
-          (frame.response as { request_id: string }).request_id === question.requestId,
-      ),
-    ).toMatchObject({
-      response: {
-        response: { behavior: 'allow', updatedInput: { answers: { 'Which result?': 'Two' } } },
-      },
-    });
-    expect(() =>
-      session.answer(question.requestId, { answers: { 'question-0': { answers: ['One'] } } }),
-    ).toThrow('已失效');
-  });
+  it.each([false, true])(
+    'maps AskUserQuestion (multiSelect=%s) to the pending native request',
+    async (multiSelect) => {
+      const f = await fixture();
+      await f.cli.set({ multiSelect });
+      const session = await f.connect();
+      const id = await session.createSession(() => {});
+      const input = f.input('ask', id);
+      await session.submit(input);
+      await vi.waitFor(() => expect(f.questions).toHaveLength(1));
+      const question = f.questions[0]!;
+      expect(question).toMatchObject({
+        sessionId: id,
+        turnId: input.runId,
+        questions: [{ id: 'question-0', question: 'Which result?', multiSelect }],
+      });
+      const answers = multiSelect ? ['One', 'Two'] : ['Two'];
+      session.answer(question.requestId, { answers: { 'question-0': { answers } } });
+      await vi.waitFor(() =>
+        expect(f.events.some((event) => event.type === 'turn_completed')).toBe(true),
+      );
+      expect(
+        (await f.cli.records()).find(
+          (frame) =>
+            frame.type === 'control_response' &&
+            (frame.response as { request_id: string }).request_id === question.requestId,
+        ),
+      ).toMatchObject({
+        response: {
+          response: {
+            behavior: 'allow',
+            updatedInput: { answers: { 'Which result?': answers.join(', ') } },
+          },
+        },
+      });
+      expect(() =>
+        session.answer(question.requestId, { answers: { 'question-0': { answers: ['One'] } } }),
+      ).toThrow('已失效');
+    },
+  );
   it('interrupts and closes only its owned process while preserving the session for resume', async () => {
     const f = await fixture();
     const session = await f.connect();

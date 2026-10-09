@@ -862,6 +862,15 @@ describe('durable runtime with simulated Codex', () => {
         payload: { answers: { choice: { answers: [value] } } },
       });
     expect((await answer(question.id, '无效选项')).statusCode).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/api/agents/${agent.id}/questions/${question.id}/answer`,
+          payload: { answers: { choice: { answers: ['继续', '结束'] } } },
+        })
+      ).statusCode,
+    ).toBe(400);
     expect((await answer(question.id, '继续')).statusCode).toBe(200);
     expect(client.responses).toEqual([
       { id: 700, result: { answers: { choice: { answers: ['继续'] } } } },

@@ -157,4 +157,19 @@ describe('Kimi Code application integration', () => {
       new Set(app.isles.store.agentDetail(agent.id).runs.map((run) => run.threadId)).size,
     ).toBe(1);
   });
+
+  it('keeps the service alive and the delivery uncertain on an invalid native result', async () => {
+    const { app, cli, create, send } = await fixture();
+    const agent = await create();
+    await cli.set({ invalidPromptResult: true });
+    await send(agent, 'invalid response');
+    await vi.waitFor(() =>
+      expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([{ status: 'uncertain' }]),
+    );
+    expect(app.isles.store.publicAgent(agent.id).status).toBe('error');
+    expect(app.isles.store.listMessages(agent.channelId)[0]!.deliveries[0]!.status).toBe(
+      'uncertain',
+    );
+    expect((await app.inject('/api/health')).statusCode).toBe(200);
+  });
 });

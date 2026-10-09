@@ -273,6 +273,7 @@ describe('Codex adapter protocol boundary', () => {
       questions: [
         {
           ...request.questions[0],
+          multiSelect: false,
           header: '[redacted]',
           question: 'Pick [redacted]',
           options: [{ label: '[redacted]', description: '[redacted]' }],
