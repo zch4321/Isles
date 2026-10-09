@@ -6,6 +6,11 @@ import { OpenCodeClient, type OpenCodeClientFactory, type OpenCodeConnection } f
 import type { OpenCodeEnvironment } from './environment.js';
 import { defaultModelResponseSchema, modelKey, modelsResponseSchema } from './protocol.js';
 
+const providerLabels: Record<string, string> = {
+  'opencode-go': 'Go（订阅）',
+  opencode: 'Zen（按量）',
+};
+
 export class OpenCodeCatalog extends CachedCatalog {
   constructor(
     private environment: OpenCodeEnvironment,
@@ -45,8 +50,8 @@ export class OpenCodeCatalog extends CachedCatalog {
         .map((model) => ({
           id: modelKey(model),
           model: modelKey(model),
-          displayName: model.name,
-          description: model.providerID,
+          displayName: `${providerLabels[model.providerID] ?? model.providerID} · ${model.name}`,
+          description: modelKey(model),
           supportedReasoningEfforts: ['default', ...model.variants.map((variant) => variant.id)],
           defaultReasoningEffort: 'default',
           isDefault: selected !== undefined && modelKey(model) === modelKey(selected),
