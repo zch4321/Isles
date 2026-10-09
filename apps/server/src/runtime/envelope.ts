@@ -1,5 +1,6 @@
 import type { Agent, Channel, Message } from '@isles/contracts';
 import type { ChannelRecord, ClaimedChannel } from '../storage/store.js';
+import { nameLabels } from './names.js';
 
 export type Directory = ReadonlyMap<string, Pick<Agent, 'name' | 'harness' | 'model'>>;
 export const directoryOf = (agents: Agent[]): Directory =>
@@ -14,31 +15,6 @@ type Named = { id: string; name: string };
 type NamedChannel = Pick<Channel, 'id' | 'kind' | 'name' | 'agentId'>;
 const quote = (name: string) =>
   JSON.stringify(name).replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
-const compactId = (id: string) => id.replaceAll('-', '');
-
-/** Short IDs only disambiguate display names; tool addresses remain full UUIDs. */
-function uniquePrefix(id: string, peers: string[]) {
-  const value = compactId(id);
-  let length = Math.min(8, value.length);
-  while (
-    length < value.length &&
-    peers.some((other) => other !== id && compactId(other).startsWith(value.slice(0, length)))
-  )
-    length++;
-  return value.slice(0, length);
-}
-
-function namedLabels(entries: Named[]) {
-  const names = new Map(entries.map(({ id, name }) => [id, name]));
-  const peers = new Map<string, string[]>();
-  for (const [id, name] of names) peers.set(name, [...(peers.get(name) ?? []), id]);
-  return new Map(
-    [...names].map(([id, name]) => {
-      const sameName = peers.get(name)!;
-      return [id, `${quote(name)}${sameName.length > 1 ? `#${uniquePrefix(id, sameName)}` : ''}`];
-    }),
-  );
-}
 
 /** One fresh directory snapshot is shared by all headers and paging markers in a result. */
 export class MessageLabels {
@@ -49,14 +25,15 @@ export class MessageLabels {
     agents: Named[],
     channels: NamedChannel[],
   ) {
-    this.agentLabels = namedLabels(agents);
-    this.groupLabels = namedLabels(
+    this.agentLabels = nameLabels(agents, quote);
+    this.groupLabels = nameLabels(
       channels
         .filter((channel) => channel.kind === 'group')
         .map((channel) => ({
           id: channel.id,
           name: channel.name ?? '群聊',
         })),
+      quote,
     );
   }
   agent(id: string) {

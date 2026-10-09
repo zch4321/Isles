@@ -18,6 +18,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { HttpError, Redactor } from './errors.js';
+import { chatExportFormatter } from './chat/markdown.js';
 import { defaultAdapters } from './harness/defaults.js';
 import { HarnessRegistry } from './harness/registry.js';
 import type { HarnessAdapter } from './harness/types.js';
@@ -216,6 +217,24 @@ export async function buildApp(options: AppOptions) {
   app.get<{ Params: { id: string } }>('/api/channels/:id', (request) =>
     store.channelDetail(request.params.id),
   );
+  app.get<{ Params: { id: string } }>('/api/channels/:id/export', (request, reply) => {
+    const { timeZone } = z
+      .strictObject({ timeZone: z.string().min(1).max(100).default('UTC') })
+      .parse(request.query);
+    const format = chatExportFormatter(timeZone);
+    const { filename, markdown } = format(store.chatExportSnapshot(request.params.id));
+    const encoded = encodeURIComponent(filename).replace(
+      /[!'()*]/g,
+      (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
+    return reply
+      .type('text/markdown; charset=utf-8')
+      .header(
+        'Content-Disposition',
+        `attachment; filename="chat-history.md"; filename*=UTF-8''${encoded}`,
+      )
+      .send(markdown);
+  });
   app.patch<{ Params: { id: string } }>('/api/channels/:id', (request) =>
     runtime.updateChannel(request.params.id, updateChannelSchema.parse(request.body)),
   );

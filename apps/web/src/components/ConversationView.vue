@@ -6,6 +6,7 @@ import { computed, ref } from 'vue';
 import {
   answerQuestion,
   controlAgent,
+  downloadChat,
   fetchOlderMessages,
   sendMessage,
   updateChannel,
@@ -103,6 +104,11 @@ const send = useMutation({
     }),
   ...mutationHandlers,
 });
+const exporting = useMutation({
+  mutationFn: (channelId: string) => downloadChat(channelId),
+  onMutate: mutationHandlers.onMutate,
+  onError: mutationHandlers.onError,
+});
 
 const draft = useDraft(() => props.channelId);
 async function submit() {
@@ -170,12 +176,14 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
         :members="members"
         :inspector-open="inspectorOpen"
         :control-pending="control.isPending.value || pause.isPending.value"
+        :export-pending="exporting.isPending.value"
         @back="emit('back')"
         @stop="control.mutate('stop')"
         @resume="control.mutate('resume')"
         @pause="pause.mutate(true)"
         @continue="pause.mutate(false)"
         @toggle-inspector="emit('toggleInspector')"
+        @export="exporting.mutate(channelId)"
       />
       <div
         v-if="agent?.error"

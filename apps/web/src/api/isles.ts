@@ -19,12 +19,7 @@ import { z } from 'zod';
 
 const errorSchema = z.object({ error: z.string() });
 
-export async function api<T>(
-  path: string,
-  schema: z.ZodType<T>,
-  data?: unknown,
-  method = data === undefined ? 'GET' : 'POST',
-): Promise<T> {
+async function request(path: string, data?: unknown, method = data === undefined ? 'GET' : 'POST') {
   const response = await fetch(`/api${path}`, {
     method,
     ...(data === undefined
@@ -33,13 +28,48 @@ export async function api<T>(
   }).catch(() => {
     throw new Error('Isles 服务连接异常，请检查服务状态后重试');
   });
-  // Proxies can answer with non-JSON bodies when the server is down.
-  const body: unknown = await response.json().catch(() => undefined);
-  if (!response.ok)
+  if (!response.ok) {
+    // Proxies can answer with non-JSON bodies when the server is down.
+    const body: unknown = await response.json().catch(() => undefined);
     throw new Error(
       errorSchema.safeParse(body).data?.error ?? `服务请求失败（${response.status}）`,
     );
+  }
+  return response;
+}
+
+export async function api<T>(
+  path: string,
+  schema: z.ZodType<T>,
+  data?: unknown,
+  method = data === undefined ? 'GET' : 'POST',
+): Promise<T> {
+  const response = await request(path, data, method);
+  const body: unknown = await response.json().catch(() => undefined);
   return schema.parse(body);
+}
+
+export async function downloadChat(channelId: string) {
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const response = await request(
+    `/channels/${encodeURIComponent(channelId)}/export?timeZone=${encodeURIComponent(timeZone)}`,
+  );
+  const filename = response.headers
+    .get('Content-Disposition')!
+    .match(/filename\*=UTF-8''(.+)$/)![1]!;
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = decodeURIComponent(filename);
+    link.hidden = true;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 }
 
 export const fetchHarnesses = () =>

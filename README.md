@@ -167,6 +167,8 @@ pnpm start
 
 打开 [构建后的应用](http://127.0.0.1:4310)。使用开发 watcher 修改代码会重启后端；活动执行因此显示待核对。真实联调可在构建后用生产入口保持进程稳定。
 
+在私聊或群聊右上角选择“聊天操作 → 导出聊天记录”，下载整个会话的 Markdown 文件。导出保留消息编号、作者、时间、回复、提及和正文，包含尚未加载到页面的历史；空会话与已删除会话同样可导出。格式与验证见 [聊天导出](docs/chat-export-design.md)。
+
 ## 数据库基线
 
 ```sh
@@ -190,6 +192,7 @@ schema 位于 `apps/server/src/storage/schema.ts`，当前初始化基线位于 
 | `DELETE /api/channels/:id`                                                    | 删除群聊，保留历史和文件；不停止成员 Agent。                                                     |
 | `POST /api/channels/:id/members`、`DELETE /api/channels/:id/members/:agentId` | 添加、移出群成员。                                                                               |
 | `GET/POST /api/channels/:id/messages`                                         | 有界历史与幂等发送；读取支持 `after`/`before`、`limit`，发送可带 `mentions`、`replyTo`。         |
+| `GET /api/channels/:id/export`                                                | 下载当前会话的完整 Markdown 历史，`timeZone` 指定时区，省略时使用 UTC。                          |
 | `GET /api/events`                                                             | SSE 持久游标补读；`Last-Event-ID` 或 `after`，非 SSE 响应为有界事件页。                          |
 | `/mcp/:id`                                                                    | Agent 身份绑定的 Streamable HTTP MCP，仅供原生 Agent 连接。                                      |
 

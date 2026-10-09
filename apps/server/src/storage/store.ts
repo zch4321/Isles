@@ -15,7 +15,7 @@ import type {
   RunStatus,
   UserQuestion,
 } from '@isles/contracts';
-import { and, asc, desc, eq, gt, inArray, lt, ne, notExists, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, lt, lte, ne, notExists, or, sql } from 'drizzle-orm';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -76,6 +76,13 @@ export interface ClaimedChannel {
   messages: Message[];
   /** Earlier unread messages marked skipped instead of being submitted. */
   skipped: number;
+}
+
+export interface ChatExportSnapshot {
+  channel: Pick<ChannelRecord, 'id' | 'kind' | 'name' | 'agentId'>;
+  exportedAt: string;
+  agents: { id: string; name: string }[];
+  messages: Omit<Message, 'channelId' | 'clientId' | 'deliveries'>[];
 }
 
 // Each channel contributes its most recent unread messages, plus every unread mention.
@@ -520,6 +527,41 @@ export class Store {
   }
 
   // Messages
+
+  /** All formal history in one read snapshot; exporting does not acknowledge deliveries. */
+  chatExportSnapshot(channelId: string): ChatExportSnapshot {
+    return this.database.sqlite.transaction(() => {
+      const channel = this.getChannel(channelId);
+      const exportedAt = now();
+      const rows = this.db
+        .select({
+          seq: messages.seq,
+          sender: messages.sender,
+          senderId: messages.senderId,
+          body: messages.body,
+          replyTo: messages.replyTo,
+          mentions: messages.mentions,
+          createdAt: messages.createdAt,
+        })
+        .from(messages)
+        .where(
+          and(eq(messages.channelId, channelId), lte(messages.seq, channel.nextMessageSeq - 1)),
+        )
+        .orderBy(asc(messages.seq))
+        .all();
+      return {
+        channel: {
+          id: channel.id,
+          kind: channel.kind,
+          name: channel.name,
+          agentId: channel.agentId,
+        },
+        exportedAt,
+        agents: this.db.select({ id: agents.id, name: agents.name }).from(agents).all(),
+        messages: rows.map((row) => ({ ...row, mentions: JSON.parse(row.mentions) as string[] })),
+      };
+    })();
+  }
 
   private withDeliveries(rows: (typeof messages.$inferSelect)[]): Message[] {
     const byMessage = new Map<string, Message['deliveries']>();

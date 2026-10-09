@@ -1,6 +1,6 @@
 # Isles（群岛）架构设计
 
-> 版本：0.19 · 日期：2026-10-08 · 状态：Codex、Claude CLI 与通用 ACP adapter（Kimi Code）已接入；按能力配置 steer，Kimi 设计见 [Kimi Code ACP 验收](kimi-acp-acceptance.md)
+> 版本：0.20 · 日期：2026-10-09 · 状态：Codex、Claude CLI 与通用 ACP adapter（Kimi Code）已接入；支持按能力配置 steer 与 Markdown 聊天导出
 >
 > 产品语义以 [需求文档](requirements.md) 为准。本文整理技术选型、模块边界和关键运行流程；已实现范围与阶段验收见 [实现计划](implementation-plan.md)。
 >
@@ -547,6 +547,8 @@ Agent 可自行 clone、开发和执行 Git 操作。凭据分发与 push、PR�
 - 用户交互入口：原生审批与问题，明确关联到哪个 Agent 和哪次执行。
 
 聊天消息与执行日志分别展示。无目标频道的原生输出不能因打开了某个聊天页面就归入该频道。
+
+会话右上“聊天操作”菜单提供 Markdown 导出，私聊、群聊及保留的已删除历史共用入口。`Store.chatExportSnapshot()` 在同步只读事务中固定消息编号上限、频道与作者目录并读取完整消息；`chat/markdown.ts` 格式化消息和浏览器时区的时间戳。REST 导出接口返回带下载文件名的 Markdown，Web 下载 Blob 并释放临时 URL。导出不经过 Runtime 投递或 MCP 收信，消息范围独立于页面的 100 条分页，保持未读、投递、事件与执行状态。名称消歧从消息封装抽为 `runtime/names.ts`，由模型消息与导出共用。格式及验证见 [聊天导出](chat-export-design.md)。
 
 用户应能区分“消息已保存”“等待 Agent 处理”“正在执行”和“等待用户”，并看见 session 无法恢复、能力不支持等实际状态。
 

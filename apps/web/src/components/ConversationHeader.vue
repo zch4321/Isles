@@ -1,7 +1,23 @@
 <script setup lang="ts">
 import type { Agent, Channel } from '@isles/contracts';
-import { ArrowLeft, LoaderCircle, PanelRight, Pause, Play, Square } from '@lucide/vue';
+import {
+  ArrowLeft,
+  Download,
+  Ellipsis,
+  LoaderCircle,
+  PanelRight,
+  Pause,
+  Play,
+  Square,
+} from '@lucide/vue';
 import { computed } from 'vue';
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
+} from 'reka-ui';
 import { useHarnessName } from '@/api/queries';
 import GroupAvatar from './GroupAvatar.vue';
 import ParticipantAvatar from './ParticipantAvatar.vue';
@@ -16,6 +32,7 @@ const props = defineProps<{
   members: Agent[];
   inspectorOpen: boolean;
   controlPending: boolean;
+  exportPending: boolean;
 }>();
 defineEmits<{
   back: [];
@@ -24,6 +41,7 @@ defineEmits<{
   pause: [];
   continue: [];
   toggleInspector: [];
+  export: [];
 }>();
 
 const canResume = computed(
@@ -146,5 +164,32 @@ const harnessName = useHarnessName(() => props.agent?.harness ?? '');
     >
       <PanelRight />
     </Button>
+    <DropdownMenuRoot>
+      <DropdownMenuTrigger as-child>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="聊天操作"
+          title="聊天操作"
+          :disabled="exportPending"
+        >
+          <LoaderCircle v-if="exportPending" class="animate-spin" /><Ellipsis v-else />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuPortal>
+        <DropdownMenuContent
+          align="end"
+          :side-offset="6"
+          class="z-50 min-w-40 rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
+        >
+          <DropdownMenuItem
+            class="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none data-highlighted:bg-accent data-highlighted:text-accent-foreground"
+            @select="$emit('export')"
+          >
+            <Download class="size-4" />导出聊天记录
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenuPortal>
+    </DropdownMenuRoot>
   </header>
 </template>

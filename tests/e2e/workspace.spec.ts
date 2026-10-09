@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import type { Agent, Channel, HarnessDescriptor } from '@isles/contracts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 
 const composer = (page: Page) => page.getByRole('textbox', { name: '消息输入' });
 async function send(page: Page, body: string) {
@@ -31,6 +32,7 @@ async function createAgent(page: Page, name: string, steerEnabled = false) {
     .poll(async () => (await (await page.request.get(`/api/agents/${created.id}`)).json()).agent)
     .toMatchObject({ status: 'ready', threadId: expect.any(String) });
   await expect(page.getByTestId('agent-status')).toHaveText('可用');
+  return created;
 }
 const noHorizontalScroll = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
@@ -256,6 +258,114 @@ test('creates an Agent, publishes MCP replies, persists reload and handles stop/
   await page.screenshot({ path: testInfo.outputPath('chat-mobile.png'), fullPage: true });
   expect(await noHorizontalScroll(page)).toBe(false);
   expect(errors).toEqual([]);
+});
+
+test.describe('Markdown chat exports', () => {
+  test.use({ timezoneId: 'Asia/Shanghai' });
+
+  async function download(page: Page) {
+    await page.getByRole('button', { name: '聊天操作', exact: true }).click();
+    const pending = page.waitForEvent('download');
+    await page.getByRole('menuitem', { name: '导出聊天记录', exact: true }).click();
+    const file = await pending;
+    expect(await file.failure()).toBeNull();
+    return {
+      filename: file.suggestedFilename(),
+      markdown: await readFile((await file.path())!, 'utf8'),
+    };
+  }
+
+  test('downloads all private history on mobile, retries failures and exports a retired Agent', async ({
+    page,
+  }) => {
+    await page.goto('/');
+    const agent = await createAgent(page, 'Markdown 导出验证');
+    await page.getByRole('button', { name: '停止 Agent', exact: true }).click();
+    await expect(page.getByTestId('agent-status')).toHaveText('已停止');
+    const empty = await download(page);
+    expect(empty.markdown).toContain('- 消息数：0');
+    for (let seq = 1; seq <= 105; seq++) {
+      const response = await page.request.post(`/api/channels/${agent.channelId}/messages`, {
+        data: {
+          body: seq === 1 ? '最早隐藏消息\n\n```ts\nconst x = 1;' : `导出历史 ${seq}`,
+          clientId: `export-${seq}`,
+          ...(seq === 105 && { replyTo: 1, mentions: [agent.id] }),
+        },
+      });
+      expect(response.status()).toBe(201);
+    }
+    await page.reload();
+    await expect(page.getByRole('heading', { name: agent.name, level: 1 })).toBeVisible();
+    await expect(page.getByText('最早隐藏消息', { exact: true })).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    const exportUrl = `**/api/channels/${agent.channelId}/export*`;
+    await page.route(exportUrl, (route) =>
+      route.fulfill({ status: 503, json: { error: '导出服务暂时不可用，请重试' } }),
+    );
+    await page.getByRole('button', { name: '聊天操作', exact: true }).click();
+    await page.getByRole('menuitem', { name: '导出聊天记录', exact: true }).click();
+    await expect(page.getByRole('alert').filter({ hasText: '导出服务暂时不可用' })).toBeVisible();
+    await page.unroute(exportUrl);
+    const file = await download(page);
+    expect(file.filename).toMatch(/^私聊-Markdown 导出验证-\d{8}-\d{6}\.md$/);
+    expect(file.markdown).toContain('# 与 Markdown 导出验证 的聊天记录');
+    expect(file.markdown).toContain('- 消息数：105');
+    expect(file.markdown).toContain('> 最早隐藏消息\n>\n> ```ts\n> const x = 1;');
+    expect(file.markdown).toContain('回复：#1（用户）');
+    expect(file.markdown).toContain('提及：@Markdown 导出验证');
+    expect(file.markdown).toContain('+08:00');
+    expect(file.markdown.match(/^## #\d+/gm)).toHaveLength(105);
+    expect(file.markdown).not.toContain('原生详情');
+    const detail = await (await page.request.get(`/api/channels/${agent.channelId}`)).json();
+    expect(
+      detail.messages.every((message: { deliveries: { status: string }[] }) =>
+        message.deliveries.every((delivery) => delivery.status === 'queued'),
+      ),
+    ).toBe(true);
+    await expect(page.getByRole('alert').filter({ hasText: '导出服务暂时不可用' })).toHaveCount(0);
+    expect(await noHorizontalScroll(page)).toBe(false);
+
+    expect((await page.request.delete(`/api/agents/${agent.id}`)).status()).toBe(200);
+    await expect(page.getByTestId('agent-status')).toHaveText('已删除');
+    const retired = await download(page);
+    expect(retired.markdown).toContain('> 最早隐藏消息');
+    expect(retired.markdown).toContain('- 消息数：105');
+  });
+
+  test('downloads group messages and system history after group deletion', async ({ page }) => {
+    await page.goto('/');
+    const agent = await createAgent(page, '群导出验证 Agent');
+    await page.getByRole('button', { name: '新建群聊', exact: true }).click();
+    await page.getByLabel('群名').fill('导出/群聊:*?');
+    await page.getByRole('checkbox', { name: /群导出验证 Agent/ }).check();
+    const [created] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url().endsWith('/api/channels') && response.request().method() === 'POST',
+      ),
+      page.getByRole('button', { name: '创建群聊', exact: true }).click(),
+    ]);
+    const group = (await created.json()) as Channel;
+    await send(page, '完整导出的群聊正文');
+    await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+      'MCP 回复：完整导出的群聊正文',
+    );
+    expect((await page.request.delete(`/api/channels/${group.id}`)).status()).toBe(200);
+    await expect(page.getByTestId('group-status')).toHaveText('已删除');
+    const file = await download(page);
+    expect(file.filename).toMatch(/^群聊-导出-群聊----\d{8}-\d{6}\.md$/);
+    expect(file.markdown).toContain('# 导出/群聊:\\*?');
+    expect(file.markdown).toContain('- 类型：群聊');
+    expect(file.markdown).toContain('Isles（系统）');
+    expect(file.markdown).toContain(`${agent.name}（Agent）`);
+    expect(file.markdown).toContain('> 完整导出的群聊正文');
+    expect(file.markdown).toContain('> MCP 回复：完整导出的群聊正文');
+    expect(file.markdown).toContain('回复：#');
+    expect(file.markdown).toContain('用户删除了群聊');
+    // This suite shares its server; leave the live contact directory unchanged.
+    expect((await page.request.delete(`/api/agents/${agent.id}`)).status()).toBe(200);
+  });
 });
 
 test('navigates mobile chats, searches contacts and keeps drafts and IME input in the correct conversation', async ({
