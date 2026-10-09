@@ -2,26 +2,32 @@ import { HttpError } from '../errors.js';
 import { nameLabels } from '../runtime/names.js';
 import type { ChatExportSnapshot } from '../storage/store.js';
 
-/** Single-line metadata stays literal even when names contain Markdown or line breaks. */
+/**
+ * Single-line metadata stays literal even when names contain Markdown or line breaks.
+ * Values always follow a line prefix, so only inline syntax, entity references and a
+ * heading's closing `#` run need escaping; other punctuation stays readable as plain text.
+ */
 function inline(value: string) {
   return value
     .replace(/[\r\n\u2028\u2029]/g, ' ')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replace(/[\\`*_{}[\]()#+.!|-]/g, '\\$&');
+    .replace(/[\\`*_~[\]<>]|&(?=#?\w+;)/g, '\\$&')
+    .replace(/#+$/, '\\$&');
 }
 
+/** Truncates by grapheme cluster so emoji sequences and combining marks stay whole. */
 function fileName(name: string) {
-  const safe = Buffer.from(name, 'utf8')
-    .toString('utf8')
-    .replace(/[<>:"/\\|?*\u2028\u2029]/g, '-');
+  const safe = [...Buffer.from(name, 'utf8').toString('utf8')]
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127 || '<>:"/\\|?*\u2028\u2029'.includes(character)
+        ? '-'
+        : character;
+    })
+    .join('');
   let result = '';
-  for (const original of safe) {
-    const code = original.charCodeAt(0);
-    const character = code < 32 || code === 127 ? '-' : original;
-    if (Buffer.byteLength(result + character, 'utf8') > 180) break;
-    result += character;
+  for (const { segment } of new Intl.Segmenter().segment(safe)) {
+    if (Buffer.byteLength(result + segment, 'utf8') > 180) break;
+    result += segment;
   }
   return result.replace(/^[.\s]+|[.\s]+$/g, '') || '聊天记录';
 }
@@ -44,7 +50,7 @@ export function chatExportFormatter(timeZone: string) {
       timeZoneName: 'longOffset',
     });
   } catch {
-    throw new HttpError(400, '导出时区无效，请重新导出聊天记录');
+    throw new HttpError(400, `无法识别导出时区“${timeZone}”，请检查系统时区设置后重新导出`);
   }
   const dateTime = (value: string) => {
     const parts = Object.fromEntries(

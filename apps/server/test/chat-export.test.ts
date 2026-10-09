@@ -119,10 +119,19 @@ describe('Markdown chat export', () => {
     data.messages[0]!.mentions = [firstId, secondId];
     data.messages[1]!.senderId = secondId;
     const { markdown } = chatExportFormatter('UTC')(data);
-    expect(markdown).toContain('# 标题 \\#\\# 伪造标题 &lt;b&gt;\\*');
-    expect(markdown).toContain('@同名 \\[A\\]\\#123456781');
-    expect(markdown).toContain('@同名 \\[A\\]\\#123456782');
+    expect(markdown).toContain('# 标题 ## 伪造标题 \\<b\\>\\*\n');
+    expect(markdown).toContain('@同名 \\[A\\]#123456781');
+    expect(markdown).toContain('@同名 \\[A\\]#123456782');
     expect(markdown).toContain('> # 正文标题\n>\n> ```ts\n> const x = 1;\n\n---\n\n## #13');
+  });
+
+  it('keeps ordinary punctuation readable and neutralises entities and closing heading marks', () => {
+    const data = snapshot();
+    data.channel.name = 'GPT-5.1 (测试) R&D &copy; 1. + #';
+    data.agents = [{ id: 'kimi', name: 'Kimi_v2 ~beta~ #1' }];
+    const { markdown } = chatExportFormatter('UTC')(data);
+    expect(markdown).toContain('# GPT-5.1 (测试) R&D \\&copy; 1. + \\#\n');
+    expect(markdown).toContain('## #13 · Kimi\\_v2 \\~beta\\~ #1（Agent） · ');
   });
 
   it('generates a portable UTF-8 filename for long names and path characters', () => {
@@ -133,6 +142,14 @@ describe('Markdown chat export', () => {
     expect(filename).not.toMatch(/[<>:"/\\|?*\r\n]/);
     expect(Buffer.byteLength(filename, 'utf8')).toBeLessThan(255);
     expect(filename).not.toContain('\uFFFD');
+  });
+
+  it('truncates long filenames at grapheme boundaries', () => {
+    const data = snapshot();
+    const family = '👨‍👩‍👧‍👦';
+    data.channel.name = `a${family.repeat(20)}`;
+    const { filename } = chatExportFormatter('UTC')(data);
+    expect(filename).toBe(`群聊-a${family.repeat(7)}-20261009-030500.md`);
   });
 
   it('exports every message beyond the page limit with no receipt or execution side effects', async () => {
@@ -216,9 +233,10 @@ describe('Markdown chat export', () => {
     expect(response.body).not.toContain('- 记录范围：');
     expect(response.body).not.toContain('## #');
     expect((await app.inject('/api/channels/missing/export')).statusCode).toBe(404);
-    expect(
-      (await app.inject(`/api/channels/${agent.channelId}/export?timeZone=Wrong%2FZone`))
-        .statusCode,
-    ).toBe(400);
+    const invalid = await app.inject(
+      `/api/channels/${agent.channelId}/export?timeZone=Wrong%2FZone`,
+    );
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().error).toBe('无法识别导出时区“Wrong/Zone”，请检查系统时区设置后重新导出');
   });
 });

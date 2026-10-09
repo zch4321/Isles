@@ -49,20 +49,28 @@ export async function api<T>(
   return schema.parse(body);
 }
 
+/** Proxies may drop or rewrite the header; the download still gets a readable name. */
+function attachmentName(disposition: string | null) {
+  const encoded = disposition?.match(/filename\*=UTF-8''([^;\s]+)/i)?.[1];
+  try {
+    if (encoded) return decodeURIComponent(encoded);
+  } catch {
+    // Malformed percent-encoding falls through to the default name.
+  }
+  return '聊天记录.md';
+}
+
 export async function downloadChat(channelId: string) {
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const response = await request(
     `/channels/${encodeURIComponent(channelId)}/export?timeZone=${encodeURIComponent(timeZone)}`,
   );
-  const filename = response.headers
-    .get('Content-Disposition')!
-    .match(/filename\*=UTF-8''(.+)$/)![1]!;
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   try {
     const link = document.createElement('a');
     link.href = url;
-    link.download = decodeURIComponent(filename);
+    link.download = attachmentName(response.headers.get('Content-Disposition'));
     link.hidden = true;
     document.body.appendChild(link);
     link.click();
