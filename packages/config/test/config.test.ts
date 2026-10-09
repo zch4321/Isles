@@ -51,6 +51,7 @@ describe('ConfigManager startup configuration', () => {
           databasePath: join(homeDir, '.local', 'share', 'opencode', 'opencode.db'),
           binaryPath: null,
         },
+        dsh: { home: join(homeDir, '.dsh'), binaryPath: null },
       },
     });
     const contents = readFileSync(configFilePath, 'utf8');
@@ -62,6 +63,7 @@ describe('ConfigManager startup configuration', () => {
       claude: {},
       kimi: {},
       opencode: {},
+      dsh: {},
       dev: { port: 5173 },
     });
     create();
@@ -225,6 +227,32 @@ home = "~/profiles/codex"
       binaryPath: join(homeDir, '.Isles', 'bin', 'opencode'),
     });
     expect(manager.cliConfiguration('opencode').binaryPath).toBe('file-opencode');
+  });
+
+  it('reuses DSH_HOME with explicit Isles overrides and saves the CLI path separately', async () => {
+    const { create, homeDir } = fixture('[dsh]\nhome="~/selected-dsh"\nbinary_path="dsh-file"');
+    const manager = create({
+      DSH_HOME: '~/native-dsh',
+      ISLES_DSH_HOME: '~/isles-dsh',
+      ISLES_DSH_BIN: './bin/dsh',
+    });
+    expect(manager.current.cli.dsh).toEqual({
+      home: join(homeDir, 'isles-dsh'),
+      binaryPath: join(homeDir, '.Isles', 'bin', 'dsh'),
+    });
+    expect(create({ DSH_HOME: '~/native-dsh' }).current.cli.dsh.home).toBe(
+      join(homeDir, 'selected-dsh'),
+    );
+    await manager.configureCliBinary('dsh', 'saved-dsh');
+    expect(manager.cliConfiguration('dsh')).toMatchObject({
+      binaryPath: 'saved-dsh',
+      environmentBinaryPath: join(homeDir, '.Isles', 'bin', 'dsh'),
+    });
+    expect(create({}).current.cli.dsh.binaryPath).toBe('saved-dsh');
+    const native = fixture('');
+    expect(native.create({ DSH_HOME: '~/native-dsh' }).current.cli.dsh.home).toBe(
+      join(native.homeDir, 'native-dsh'),
+    );
   });
 
   it('accepts explicit and environment-selected config files', () => {

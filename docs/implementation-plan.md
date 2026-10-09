@@ -1,17 +1,17 @@
 # Isles 实现计划
 
-> 版本：0.22 · 日期：2026-10-09 · 状态：Kimi Code、Claude CLI 与 steer 已通过真实验收；Markdown 聊天导出已实现
+> 版本：0.23 · 日期：2026-10-09 · 状态：Kimi Code、Claude CLI、OpenCode 与 DSH 已接入，按能力配置 steer；Markdown 聊天导出已实现
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
 ## 1. 已确定的方向
 
 - 采用已讨论的 Vue 3、Vite、TypeScript、shadcn-vue、Tailwind CSS、Fastify、SQLite/Drizzle 和 pnpm workspace。
-- 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex、Claude CLI、Kimi Code（ACP）与 OpenCode，按能力配置 steer。
+- 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex、Claude CLI、Kimi Code（ACP）、OpenCode 与 DSH，按能力配置 steer。
 - Codex 是主要接入，首先用它跑通 Agent、固定 session、私聊和多 Agent 协作。
 - 2026-10-08 新增通用 ACP adapter，Kimi Code 为首个 ACP harness；新增 harness 复用业务层与 Runtime，通过 adapter 表达能力差异。
 - 2026-10-09 完成私聊、群聊及保留历史的 Markdown 导出，按已确认格式保存全部正式消息与系统消息，保持回复、提及和原消息编号。范围、实现及验证见 [聊天导出](chat-export-design.md)。
-- 2026-10-03 用户曾暂缓 Claude，2026-10-08 已恢复并授权本机 CLI 接入；新增 ClaudeAdapter，创建时发送中性用户消息使 session 落盘。DSH 与第三方 Claude ACP 留待后续，可复用 ACP adapter。
+- 2026-10-03 用户曾暂缓 Claude，2026-10-08 已恢复并授权本机 CLI 接入；新增 ClaudeAdapter，创建时发送中性用户消息使 session 落盘。第三方 Claude ACP 留待后续，可复用 ACP adapter；DSH 已于 2026-10-09 获授权以原生 SDK 桥接接入。
 - M0 已完成。M1 链路验收及 AGENTS.md 原生加载、真实压缩和恢复的补充验收已通过，最新证据见 [基础修复计划](foundation-repair-plan.md)。原 [实施计划](m1-implementation-plan.md)和[验收记录](m1-acceptance.md)保留为历史事实。
 - M2 规则于 2026-09-30 确认，2026-10-02 调整为即时唤醒与 MCP 主动收信；任务与验收标准见 [M2 实施计划](m2-implementation-plan.md)。
 - 产品中的 AI 参与者统一称为 **Agent**（M1 文档中的“对象”）；M1 实施计划和验收记录作为历史记录保留原用词。
@@ -43,7 +43,7 @@
 
 消息持久化、权限检查、停止和恢复从相应功能的第一阶段就实现；M5 扩展故障覆盖和体验，不用于推迟基础正确性。
 
-统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex、Claude CLI、Kimi Code 与 OpenCode；Codex、Claude 与 OpenCode 支持默认关闭的 steer，四者均支持忙碌排队和主动收信。
+统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex、Claude CLI、Kimi Code、OpenCode 与 DSH；Codex、Claude、OpenCode 与 DSH 支持默认关闭的 steer，五者均支持忙碌排队和主动收信。
 
 配置与目录拆分的验收覆盖优先级、路径解析、数据库/token 位置、Codex 发现及错误、UI 保存与实时检测、工作区稳定性、共享目录和原生规则加载。当前结果为 89 项测试、7 项浏览器测试与两个真实 Codex Agent 的读写/重启验证通过。旧目录清理仍有进程占用及工具审批限制，具体边界见 [验收记录](config-workspace-acceptance.md#4-旧目录清理遗留项)。
 
@@ -176,7 +176,7 @@
 
 ### 6.2 M3：Kimi Code 与通用 ACP adapter
 
-2026-10-08 用户确认接入 Kimi Code，并先实现通用 ACP adapter，后续 ACP agent（如 DSH）只需新增 harness 配置。
+2026-10-08 用户确认接入 Kimi Code，并先实现通用 ACP adapter，后续采用 ACP 的 agent 只需新增 harness 配置；DSH 的本轮接入采用原生桥接以保留 steer。
 
 - 准备性重构：CLI 路径配置按 harness ID 组织（`[codex]`、`[claude]`、`[kimi]`），路径接口统一为 `/api/harnesses/:id/config`；抽出共享的进程树关闭、目录缓存与 npm CLI 发现。
 - `acp/` 实现手写的 ACP v1 客户端、adapter 与模型目录；`kimi/` 提供发现、`KIMI_CODE_HOME`、`yolo` 模式、登录检测与凭据脱敏。
@@ -209,6 +209,16 @@ macOS 原生私聊、问答、停止/恢复、改名、Codex/Claude 混合群聊
 - 保留忙碌排队、默认关闭的 steer、MCP 主动收信、原生问题、子代理及工作目录规则。
 - 原生已提交的 inbox 交付与 execution 事件确认输入归属；覆盖回合结束、在途停止、确定拒绝及结果不明的竞态。
 - 自动化、浏览器及真实本机验证分层记录在 [OpenCode 验收](opencode-acceptance.md)。
+
+### 7.2 DeepSeek Harness（2026-10-09）
+
+OpenCode review 后用户授权接入 DSH，并确认复用已登录的桌面版及原生桥接插件方案。
+
+- 适配器位于 `harness/dsh/`，macOS 自动发现桌面版自带 CLI，也支持现有路径设置及 `[dsh]` 配置。
+- 按 Agent 启动独立 SDK profile，加载 Isles bridge、官方原生问答工具与 MCP；复用原生 home、认证和 session，默认模型选择来自桌面 profile。
+- 创建不调用模型，恢复使用原生同一 session 并核对目录；native turn、claim 和 durable admission 明确平台执行及输入归属。
+- 支持默认关闭的 steer，同步原生 turn CAS 校验后追加到下一 step；原生停止及退出清理自有 pending 输入，未知结果按平台规则保留。
+- 新增 adapter、REST、stdio 与浏览器验证；真实桌面 CLI 和账户模型验收见 [DSH 验收](dsh-acceptance.md)。
 
 ## 8. M5：完整体验与长期运行
 

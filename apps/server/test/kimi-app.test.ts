@@ -62,7 +62,13 @@ describe('Kimi Code application integration', () => {
       configuration: string | null;
       capabilities: Record<string, boolean>;
     }[];
-    expect(harnesses.map((harness) => harness.id)).toEqual(['codex', 'claude', 'kimi', 'opencode']);
+    expect(harnesses.map((harness) => harness.id)).toEqual([
+      'codex',
+      'claude',
+      'kimi',
+      'opencode',
+      'dsh',
+    ]);
     expect(harnesses[2]).toMatchObject({
       configuration: 'cli-path',
       capabilities: { steer: false, sessionResume: true, mcp: true, userQuestions: true },

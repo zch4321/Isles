@@ -1,0 +1,30 @@
+import {
+  findCliExecutable,
+  type CliCommand,
+  type CliDiscoveryOptions,
+  type CliExecutable,
+} from '../shared/executable.js';
+
+/** The Desktop carrier publishes the same CLI as the npm distribution. */
+export function findDshExecutable(
+  options: CliDiscoveryOptions = {},
+  probe?: (command: CliCommand) => Promise<string>,
+): Promise<CliExecutable> {
+  return findCliExecutable(
+    {
+      name: 'dsh',
+      displayName: 'DeepSeek Harness',
+      npmEntry: '@deepseek-ai/dsh/lib/bin.js',
+      versionPattern: /^0\.2\.\d+(?:[-+][\w.-]+)?$/,
+      installDirectories: (home) =>
+        (options.platform ?? process.platform) === 'darwin'
+          ? [
+              '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin',
+              `${home}/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin`,
+            ]
+          : [],
+    },
+    options,
+    probe,
+  );
+}

@@ -157,6 +157,7 @@ test('switches registered harness catalogs and cached selections without applyin
     'Claude Code',
     'Kimi Code',
     'OpenCode',
+    'DeepSeek Harness',
     'Semantic Test',
   ]);
   await expect(model).toHaveValue('test-model');
@@ -1471,6 +1472,141 @@ test('steers OpenCode busy input in its original native execution through the We
       ]);
     const detail = await (await page.request.get(`/api/agents/${agent.id}`)).json();
     expect(detail.runs).toHaveLength(1);
+    await page.reload();
+    expect(
+      (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.steerEnabled,
+    ).toBe(true);
+  } finally {
+    await page.request.delete(`/api/agents/${agent.id}`);
+  }
+});
+
+test('creates DSH with steer off, resumes its fixed session and answers a native multiselect question', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '新建 Agent' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
+  await dialog.getByLabel('Harness').selectOption('dsh');
+  await expect(dialog.getByLabel('模型', { exact: true })).toHaveValue('fixture/nested/model');
+  await expect(dialog.getByLabel('推理等级')).toHaveValue('high');
+  const steering = dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
+  await expect(steering).toBeEnabled();
+  await expect(steering).toHaveAttribute('aria-checked', 'false');
+  await dialog.getByLabel('名称').fill('DSH 浏览器验证');
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  const agent = (await created.json()) as Agent;
+  try {
+    expect(created.request().postDataJSON()).toMatchObject({
+      harness: 'dsh',
+      model: 'fixture/nested/model',
+      reasoningEffort: 'high',
+      steerEnabled: false,
+    });
+    await expect
+      .poll(
+        async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.status,
+      )
+      .toBe('ready');
+    const binding = (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent
+      .threadId as string;
+    expect(binding).toMatch(/^ses_isles_/);
+    await send(page, '浏览器 DSH 私聊');
+    await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+      'DSH MCP 回复：浏览器 DSH 私聊',
+    );
+    await expect(page.getByTestId('agent-status')).toHaveText('可用');
+    await page.getByRole('button', { name: '停止 Agent', exact: true }).click();
+    await expect(page.getByTestId('agent-status')).toHaveText('已停止');
+    await page.getByRole('button', { name: '恢复 Agent', exact: true }).click();
+    await expect(page.getByTestId('agent-status')).toHaveText('可用');
+    expect((await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.threadId).toBe(
+      binding,
+    );
+    await send(page, 'DSH 多选提问');
+    await expect(page.getByText('DSH 浏览器验证 需要你的回答')).toBeVisible();
+    await expect(page.getByRole('button', { name: '提交回答' })).toBeDisabled();
+    await page.getByRole('checkbox', { name: '代码', exact: true }).check();
+    await page.getByRole('checkbox', { name: '测试', exact: true }).check();
+    await page.getByRole('button', { name: '提交回答' }).click();
+    await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+      'DSH 多选回答：代码、测试',
+    );
+    await expect(page.getByText('DSH 浏览器验证 需要你的回答')).not.toBeVisible();
+    await expect
+      .poll(async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs)
+      .toMatchObject([
+        { threadId: binding, status: 'completed' },
+        { threadId: binding, status: 'completed' },
+      ]);
+    const detail = await (await page.request.get(`/api/agents/${agent.id}`)).json();
+    expect(detail.runs).toHaveLength(2);
+    expect(detail.runs[0].items).toEqual([expect.objectContaining({ text: 'DSH 原生执行详情' })]);
+    expect(detail.questions).toEqual([]);
+    await expect(
+      page.locator('[data-sender="agent"]').filter({ hasText: 'DSH 原生执行详情' }),
+    ).toHaveCount(0);
+  } finally {
+    await page.request.delete(`/api/agents/${agent.id}`);
+  }
+});
+
+test('steers DSH busy input in its original native execution through the Web', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '新建 Agent' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
+  await dialog.getByLabel('Harness').selectOption('dsh');
+  await dialog.getByLabel('名称').fill('DSH steer 浏览器验证');
+  await dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }).click();
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  const agent = (await created.json()) as Agent;
+  try {
+    expect(created.request().postDataJSON()).toMatchObject({ harness: 'dsh', steerEnabled: true });
+    expect(agent.steerEnabled).toBe(true);
+    await expect(page.getByTestId('agent-status')).toHaveText('可用');
+    await send(page, '保持执行以验证 DSH steer');
+    await expect(page.getByTestId('agent-status')).toHaveText('执行中');
+    await expect
+      .poll(
+        async () =>
+          (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs[0]?.turnId,
+      )
+      .toEqual(expect.stringMatching(/^turn_/));
+    const before = (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs[0] as {
+      id: string;
+      turnId: string;
+      threadId: string;
+    };
+    expect(before.turnId).toMatch(/^turn_/);
+    await send(page, 'DSH 忙碌追加消息');
+    await expect(
+      page.locator('[data-sender="user"]').filter({ hasText: 'DSH 忙碌追加消息' }),
+    ).toContainText('投递中');
+    await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+      'DSH MCP 回复：DSH 忙碌追加消息',
+    );
+    await expect
+      .poll(async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs)
+      .toMatchObject([
+        { id: before.id, turnId: before.turnId, threadId: before.threadId, status: 'completed' },
+      ]);
+    const detail = await (await page.request.get(`/api/agents/${agent.id}`)).json();
+    expect(detail.runs).toHaveLength(1);
+    expect(
+      detail.runs[0].inputs.flatMap((input: { messageSeqs: number[] }) => input.messageSeqs),
+    ).toHaveLength(2);
     await page.reload();
     expect(
       (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.steerEnabled,

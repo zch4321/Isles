@@ -2,11 +2,11 @@
 
 **让独立的 AI 一起工作。**
 
-面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server**、**Claude Code CLI**、**Kimi Code**（通过通用 ACP adapter）与 **OpenCode**（原生 v2 HTTP/SSE），各自参与私聊和混合群聊。Codex、Claude 与 OpenCode 支持默认关闭的实时收信开关：开启时追加到当前执行，关闭时忙碌排队；Kimi 忙碌时排队到下一轮。所有 Agent 都可通过 MCP 主动收信。
+面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server**、**Claude Code CLI**、**Kimi Code**（通过通用 ACP adapter）、**OpenCode**（原生 v2 HTTP/SSE）与 **DeepSeek Harness**（原生 SDK 桥接），各自参与私聊和混合群聊。Codex、Claude、OpenCode 与 DSH 支持默认关闭的实时收信开关：开启时追加到当前执行，关闭时忙碌排队；Kimi 忙碌时排队到下一轮。所有 Agent 都可通过 MCP 主动收信。
 
 Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到 `[channel: "评审", seq: 12, from: agent:"Alice"]` 这样的文本头部，自己的私聊显示为 `private`。普通消息用名称呈现群、发送者与提及对象，重名时在引号外附加 ID 短前缀；工具仍通过目录查询完整 UUID 寻址，消息仍以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，本轮验证见 [名称消息验收](docs/name-message-acceptance.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。
 
-当前已实现 M1 的 Codex 私聊闭环、M2 的 Codex 群聊与 Agent 基础管理。用户创建多个 Agent，与每个 Agent 私聊，或把几个 Agent 拉进群讨论；Agent 通过 Isles MCP 发布正式消息，原生输出只在执行详情展示。群内用户或 Agent 的发言立即唤醒其他空闲成员；忙碌成员默认独立积累未读，原生 turn 结束后立即合并剩余未读开始下一 turn。用户可按 Agent 开启“忙碌时实时接收（steer）”，把新消息追加到同一 thread 的当前 turn，不另开 turn。调度不做防抖、不等待其他成员结束。Agent 可以在当前 turn 内通过 `receive_messages` 主动收信，或通过 `read_messages` 读取历史，实际返回的消息不再自动投递；`@` 只公开标明特意对谁说。用户可以暂停群讨论、管理成员，并按 Agent 开启拉群权限。每个 Agent 在私聊和所有群中始终使用同一个原生 thread，消息与投递持久化，应用重启后继续。Agent 之间私聊、DSH 与用户登录留在后续阶段。
+当前已实现 M1 的 Codex 私聊闭环、M2 的 Codex 群聊与 Agent 基础管理。用户创建多个 Agent，与每个 Agent 私聊，或把几个 Agent 拉进群讨论；Agent 通过 Isles MCP 发布正式消息，原生输出只在执行详情展示。群内用户或 Agent 的发言立即唤醒其他空闲成员；忙碌成员默认独立积累未读，原生 turn 结束后立即合并剩余未读开始下一 turn。用户可按 Agent 开启“忙碌时实时接收（steer）”，把新消息追加到同一 thread 的当前 turn，不另开 turn。调度不做防抖、不等待其他成员结束。Agent 可以在当前 turn 内通过 `receive_messages` 主动收信，或通过 `read_messages` 读取历史，实际返回的消息不再自动投递；`@` 只公开标明特意对谁说。用户可以暂停群讨论、管理成员，并按 Agent 开启拉群权限。每个 Agent 在私聊和所有群中始终使用同一个原生 thread，消息与投递持久化，应用重启后继续。Agent 之间私聊与用户登录留在后续阶段。
 
 Web 界面采用工作台布局：左侧分为“群聊”和“Agents”，有已删除 Agent 或群聊时增加“历史对话”，支持按名称、成员或模型搜索并查看最近消息；中间是按发送者分组的对话，Agent 消息渲染 Markdown（不加载图片、不执行 HTML），用户消息按原文显示并高亮 `@`，系统消息居中显示。群聊输入框输入 `@` 可选择成员。右侧检查器在私聊中显示 Agent 配置、拉群权限和执行记录，在群聊中显示成员（可添加、移出或查看任一成员的执行详情）；宽屏常驻、较窄时浮层打开。窄屏下在聊天列表与单个对话之间切换。界面跟随系统的亮色/暗色设置。输入框支持 Enter 发送、Shift + Enter 换行（也兼容 Ctrl / ⌘ + Enter），切换聊天会保留各自尚未发送的草稿；草稿仅保存在当前页面，刷新后清空。
 
@@ -33,6 +33,8 @@ Claude Code 同样支持自动发现与“新建 Agent → Claude Code 路径设
 Kimi Code 使用“新建 Agent → Kimi Code 路径设置”，发现顺序为 `ISLES_KIMI_BIN`、界面保存的路径、PATH，以及 `~/.local/bin`、Homebrew 和 npm/pnpm 的常见目录；路径保存在 `[kimi].binary_path`。模型与推理等级来自原生 ACP 会话的配置项：Isles 在 `<data_dir>/acp-catalog/kimi` 建立一个不发送消息的临时会话，逐个模型读取支持的 thinking 等级后删除该会话。没有 thinking 选项的模型显示 `default`。
 
 OpenCode 使用“新建 Agent → OpenCode 路径设置”，路径保存到 `[opencode].binary_path`，环境覆盖为 `ISLES_OPENCODE_BIN`。当前实现采用本机 OpenCode v2 原生接口，验证基线为 `opencode v2.0.25`。模型目录来自原生已启用模型，推理等级映射为模型 variant；`default` 使用原生默认值。每位 Agent 启动独立的 `opencode serve --stdio`，复用用户原生配置和登录数据库，创建时不调用模型。实现与验证见 [OpenCode 验收](docs/opencode-acceptance.md)。
+
+DeepSeek Harness 使用“新建 Agent → DeepSeek Harness 路径设置”，路径保存在 `[dsh].binary_path`，环境覆盖为 `ISLES_DSH_BIN`。macOS 可自动发现系统或用户 Applications 中的桌面版自带 `dsh`；当前验证基线为 `0.2.0-rc.2`。每位 Agent 启动独立的 `dsh --profile sdk`，通过运行时 overlay 加载 Isles 桥接插件、官方问答工具和 MCP，复用原生登录与 session 存储。模型及推理等级来自原生目录，默认选择采用桌面版保存的配置。实现与验证见 [DSH 验收](docs/dsh-acceptance.md)。
 
 SQLite 驱动包含原生模块。项目已提供 `node-gyp`，本机还需要 Python 3 和 C/C++ 构建工具；macOS 使用 Xcode Command Line Tools。
 
@@ -79,13 +81,17 @@ level = 'info'
 # binary_path = '/opt/homebrew/bin/opencode'
 # home = '~/.config/opencode'
 
+[dsh]
+# binary_path = 'dsh'
+# home = '~/.dsh'
+
 [dev]
 port = 5173
 ```
 
 路径支持 `~` 和绝对路径；相对路径从配置文件所在目录解析，与安装目录及启动时的工作目录无关。默认数据目录为 `~/.Isles/data`，工作区根目录为 `~/.Isles/workspace`，日志目录为 `~/.Isles/logs`。未填写 Codex 路径时自动发现；未填写 Codex home 时先使用 `CODEX_HOME`，否则使用 `~/.codex`。平台规则模板、数据库基线文件和 Web 静态资源仍按安装目录定位。
 
-Claude 路径留空时自动发现；Claude home 依次采用 `ISLES_CLAUDE_HOME`、`[claude].home`、`CLAUDE_CONFIG_DIR`、`~/.claude`。Kimi 同理，home 依次采用 `ISLES_KIMI_HOME`、`[kimi].home`、`KIMI_CODE_HOME`、`~/.kimi-code`。OpenCode 的 home 指配置目录，依次采用 `ISLES_OPENCODE_HOME`、`[opencode].home`、`OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME/opencode`、`~/.config/opencode`；原生登录和 session 数据库使用 `OPENCODE_DB`，默认位于 `XDG_DATA_HOME/opencode/opencode.db`（未指定 XDG 时为 `~/.local/share/opencode/opencode.db`）。
+Claude 路径留空时自动发现；Claude home 依次采用 `ISLES_CLAUDE_HOME`、`[claude].home`、`CLAUDE_CONFIG_DIR`、`~/.claude`。Kimi 同理，home 依次采用 `ISLES_KIMI_HOME`、`[kimi].home`、`KIMI_CODE_HOME`、`~/.kimi-code`。OpenCode 的 home 指配置目录，依次采用 `ISLES_OPENCODE_HOME`、`[opencode].home`、`OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME/opencode`、`~/.config/opencode`；原生登录和 session 数据库使用 `OPENCODE_DB`，默认位于 `XDG_DATA_HOME/opencode/opencode.db`（未指定 XDG 时为 `~/.local/share/opencode/opencode.db`）。DSH home 依次采用 `ISLES_DSH_HOME`、`[dsh].home`、`DSH_HOME`、`~/.dsh`。
 
 配置优先级为 **环境变量 > TOML > 默认值**：
 

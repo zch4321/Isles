@@ -44,6 +44,12 @@ const cliHarnesses = {
     nativeHomeVariable: 'KIMI_CODE_HOME',
     defaultHome: '.kimi-code',
   },
+  dsh: {
+    binaryVariable: 'ISLES_DSH_BIN',
+    homeVariable: 'ISLES_DSH_HOME',
+    nativeHomeVariable: 'DSH_HOME',
+    defaultHome: '.dsh',
+  },
 } as const;
 export type CliHarness = keyof typeof cliHarnesses;
 export const cliHarnessIds = Object.keys(cliHarnesses) as CliHarness[];
@@ -67,6 +73,7 @@ const fileSchema = z.strictObject({
   claude: cliSectionSchema,
   kimi: cliSectionSchema,
   opencode: cliSectionSchema,
+  dsh: cliSectionSchema,
   dev: z.strictObject({ port: portSchema.optional() }).optional(),
 });
 const environmentSchema = z.object({
@@ -93,6 +100,9 @@ const environmentSchema = z.object({
       message: 'OpenCode requires a persistent database path',
     })
     .optional(),
+  ISLES_DSH_BIN: binarySchema.optional(),
+  ISLES_DSH_HOME: pathSchema.optional(),
+  DSH_HOME: pathSchema.optional(),
 });
 
 const defaultToml = `# Isles configuration. Paths are relative to this file's directory.
@@ -124,6 +134,10 @@ level = "info"
 [opencode]
 # binary_path = "opencode"
 # home = "~/.config/opencode"
+
+[dsh]
+# binary_path = "dsh"
+# home = "~/.dsh"
 
 [dev]
 port = 5173

@@ -12,7 +12,9 @@ import { kimiFixture } from '../../apps/server/test/acp-fixture.js';
 import { claudeBrowserAdapter } from './claude.js';
 import { kimiBrowserAdapter } from './kimi.js';
 import { opencodeBrowserAdapter } from './opencode.js';
+import { dshBrowserAdapter } from './dsh.js';
 import { opencodeConfig } from '../../apps/server/test/opencode-fixture.js';
+import { dshConfig } from '../../apps/server/test/dsh-fixture.js';
 import { agentRoot } from '../../apps/server/src/runtime/workspace.js';
 import {
   MockHarness,
@@ -31,7 +33,10 @@ if (!root.startsWith(join(tmpdir(), 'isles-')))
 const config = new ConfigManager({
   configFilePath: join(root, 'config.toml'),
   homeDir: root,
-  environment: { ISLES_SERVER_PORT: process.env.ISLES_SERVER_PORT ?? '54310' },
+  environment: {
+    ISLES_SERVER_PORT: process.env.ISLES_SERVER_PORT ?? '54310',
+    ISLES_DSH_HOME: join(root, 'native-home'),
+  },
 });
 const { dataDir } = config.current;
 const claude = await claudeFixture(root);
@@ -40,15 +45,17 @@ const kimi = await kimiFixture(root);
 await config.configureCliBinary('kimi', kimi.binary);
 const opencode = await opencodeConfig(root);
 await config.configureCliBinary('opencode', opencode.binary);
+const dsh = await dshConfig(root);
+await config.configureCliBinary('dsh', dsh.binary);
 const harness = new MockHarness();
 const tokens = new Map<string, string>();
 const factory = harness.factory;
-harness.factory = async (agent, handlers, baseUrl) => {
+harness.factory = async (agent, handlers, baseUrl, connecting) => {
   const token = tokens.get(agent.id) ?? randomBytes(32).toString('hex');
   tokens.set(agent.id, token);
   await mkdir(agentRoot(dataDir, agent), { recursive: true });
   await writeFile(join(agentRoot(dataDir, agent), 'isles-mcp-token'), token, { mode: 0o600 });
-  return factory(agent, handlers, baseUrl);
+  return factory(agent, handlers, baseUrl, connecting);
 };
 const app = await buildApp({
   config,
@@ -74,6 +81,7 @@ const app = await buildApp({
     claudeBrowserAdapter(workspace, configuration, () => browserStore),
     kimiBrowserAdapter(workspace, configuration, () => browserStore),
     opencodeBrowserAdapter(workspace, configuration, () => browserStore),
+    dshBrowserAdapter(workspace, configuration, () => browserStore),
   ],
 });
 const browserStore: Store = app.isles.store;
