@@ -29,11 +29,13 @@ OpenCode v2.0.25 CLI 的 Bus 默认 `persist=false`，`serve` 没有启用事件
 
 环境：macOS，本机 `opencode v2.0.25`。验证使用独立 Isles TOML、数据库和工作目录，监听随机本机端口，保留用户原生配置与认证数据库。
 
-已经确认真实模型目录、MCP 连接、无模型调用的 session 创建，以及 execution/inbox 事件和提供商错误的正确结算。原生目录返回 11 个免费模型；默认 `opencode/exo-free` 请求返回 `Model exo-free has been deprecated.`；显式选择 `opencode/step-5-preview-free` 返回 `OpenCode's free tier can only be used from within OpenCode`。两次执行均在 Isles 显示失败及原生原因，没有被误记为成功。
+已经确认真实模型目录、MCP 连接、无模型调用的 session 创建，以及 execution/inbox 事件和提供商错误的正确结算。订阅配置前，原生目录返回 11 个免费模型；默认 `opencode/exo-free` 请求返回 `Model exo-free has been deprecated.`；显式选择 `opencode/step-5-preview-free` 返回 `OpenCode's free tier can only be used from within OpenCode`。两次执行均在 Isles 显示失败及原生原因，没有被误记为成功。
 
 真实 CLI 配合本地脚本提供商的完整链路已通过：项目 `AGENTS.md` 原生加载、私聊/群聊 MCP 正式消息、原生 question 工具及答复、固定 session 停止恢复、终端等待期间追加到同一 execution/run 并完成原任务、服务重启后恢复原 session。提供商只脚本化模型返回；CLI、HTTP/SSE、MCP、终端工具、原生表单、存储与 Runtime 均为真实实现。最新验证共 22 次提供商请求，`report.json` 中全部检查通过。证据目录：`/var/folders/pn/j5nzy9z97cq0h_0df57g2kj80000gp/T/isles-native-opencode-ASV0c1/`，其中 `report.json` 为结论、`server.log` 为脱敏日志、`data/isles.sqlite` 为平台事实。
 
-OpenCode 原生 MCP 通过 CodeMode `execute` 提供，调用方式为 `tools.isles.send_message(...)`；工具索引在 MCP 建立后异步更新，原生 `search` 和规则更新可观察其变化，本轮保留原生机制。远端模型成功验收需使用可用的原生配置。验收脚本为 `apps/server/test/verify-native-opencode.ts`，本地模式通过 `ISLES_TEST_OPENCODE_LOCAL=1` 开启，不修改用户文件；远端模式可用 `ISLES_TEST_OPENCODE_MODEL=provider/model` 明确选择模型。
+2026-10-09 用户添加订阅后，原生目录返回 72 个已启用模型，默认模型为 `opencode-go/claude-haiku-5-5`。使用该真实远端模型及默认 variant 完整验收通过：私聊与群聊 MCP 正式消息、原生问题与答案、固定 session 停止恢复、终端 `sleep 12` 期间追加输入到同一 execution/run 并完成原任务、服务重启后恢复原 session，用户原生配置文件校验保持一致。本次没有脚本提供商，`report.json` 的模式为 `real-cli-with-native-provider`，`passed` 为 `true`；证据目录：`/var/folders/pn/j5nzy9z97cq0h_0df57g2kj80000gp/T/isles-native-opencode-Wk17GH/`，同样包含结论、脱敏日志与平台数据库。真实远端模型的成功验收已完成。
+
+OpenCode 原生 MCP 通过 CodeMode `execute` 提供，调用方式为 `tools.isles.send_message(...)`；工具索引在 MCP 建立后异步更新，原生 `search` 和规则更新可观察其变化，本轮保留原生机制。验收脚本为 `apps/server/test/verify-native-opencode.ts`，本地模式通过 `ISLES_TEST_OPENCODE_LOCAL=1` 开启，不修改用户文件；远端模式可用 `ISLES_TEST_OPENCODE_MODEL=provider/model` 明确选择模型。
 
 ## 来源
 
