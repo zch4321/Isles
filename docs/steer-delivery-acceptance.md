@@ -44,7 +44,7 @@ MCP `receive_messages` / `read_messages` 立即返回，实际返回的消息按
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `packages/contracts/src/index.ts`                    | steer 能力、默认关闭的创建偏好、编辑字段、Agent DTO 与 `steering` 投递状态。           |
 | `apps/server/src/harness/types.ts`                   | 使用固定 session、expected turn 与批次身份追加；不把 Codex RPC 作为通用 Runtime 契约。 |
-| `apps/server/src/codex/adapter.ts`                   | 原生追加与响应身份验证、确定拒绝代码分类及未知错误保留。                               |
+| `apps/server/src/harness/codex/adapter.ts`           | 原生追加与响应身份验证、确定拒绝代码分类及未知错误保留。                               |
 | `apps/server/src/runtime/runtime.ts`                 | 每个 Agent 的开关、同 turn 追加互斥、开关变化、终态和旧连接竞态。                      |
 | `apps/server/src/storage/` 与当前 `migrations/` 基线 | Agent 偏好、`steer_batches`、投递领取/接受/拒绝/未知结算、重启恢复。                   |
 | `apps/web/src/components/`                           | 创建/编辑/详情开关、能力限制、queued/steering 状态及接收事实说明。                     |

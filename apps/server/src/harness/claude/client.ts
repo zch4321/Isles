@@ -2,9 +2,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
-import type { Redactor } from '../errors.js';
-import { stopProcessTree } from '../harness/process.js';
-import type { Logger } from '../logging.js';
+import type { Redactor } from '../../errors.js';
+import { stopProcessTree } from '../shared/process.js';
+import type { Logger } from '../../logging.js';
 import type { ClaudeCommand } from './executable.js';
 
 export type ClaudeFrame = Record<string, unknown>;

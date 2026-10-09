@@ -5,10 +5,10 @@ import { join } from 'node:path';
 import { parse } from 'smol-toml';
 import { AcpRpcError, type AcpConnection } from '../acp/client.js';
 import type { AcpHarness } from '../acp/harness.js';
-import type { CliExecutable } from '../harness/executable.js';
-import type { Logger } from '../logging.js';
-import { agentRoot, type AgentWorkspace } from '../runtime/workspace.js';
-import type { AgentRecord } from '../storage/store.js';
+import type { CliExecutable } from '../shared/executable.js';
+import type { Logger } from '../../logging.js';
+import { agentRoot, type AgentWorkspace } from '../../runtime/workspace.js';
+import type { AgentRecord } from '../../storage/store.js';
 import { findKimiExecutable } from './executable.js';
 
 /** Kimi Code over ACP (`kimi acp`). Every Agent shares the human's Kimi home. */

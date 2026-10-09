@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { Logger } from '../logging.js';
-import type { AgentRecord } from '../storage/store.js';
-import { agentRoot, MCP_TOKEN_ENV, type AgentWorkspace } from '../runtime/workspace.js';
+import type { Logger } from '../../logging.js';
+import type { AgentRecord } from '../../storage/store.js';
+import { agentRoot, MCP_TOKEN_ENV, type AgentWorkspace } from '../../runtime/workspace.js';
 import { findClaudeExecutable, type ClaudeExecutable } from './executable.js';
 
 const exec = promisify(execFile);

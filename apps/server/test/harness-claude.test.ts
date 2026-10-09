@@ -4,9 +4,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ClaudeAdapter, CLAUDE_INITIALIZATION_MESSAGE } from '../src/claude/adapter.js';
-import { ClaudeEnvironment } from '../src/claude/environment.js';
-import { ClaudeClient, type ClaudeFrame } from '../src/claude/client.js';
+import { ClaudeAdapter, CLAUDE_INITIALIZATION_MESSAGE } from '../src/harness/claude/adapter.js';
+import { ClaudeEnvironment } from '../src/harness/claude/environment.js';
+import { ClaudeClient, type ClaudeFrame } from '../src/harness/claude/client.js';
 import {
   HarnessSubmissionRejected,
   type HarnessEvent,

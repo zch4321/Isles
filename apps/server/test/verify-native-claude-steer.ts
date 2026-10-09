@@ -8,9 +8,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { ConfigManager } from '@isles/config';
 import type { Agent, Message } from '@isles/contracts';
 import { buildApp } from '../src/app.js';
-import { ClaudeAdapter, CLAUDE_INITIALIZATION_MESSAGE } from '../src/claude/adapter.js';
-import { ClaudeClient } from '../src/claude/client.js';
-import { ClaudeEnvironment } from '../src/claude/environment.js';
+import { ClaudeAdapter, CLAUDE_INITIALIZATION_MESSAGE } from '../src/harness/claude/adapter.js';
+import { ClaudeClient } from '../src/harness/claude/client.js';
+import { ClaudeEnvironment } from '../src/harness/claude/environment.js';
 import { HttpError } from '../src/errors.js';
 import { agentRoot } from '../src/runtime/workspace.js';
 

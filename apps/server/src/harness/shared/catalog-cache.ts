@@ -1,5 +1,5 @@
 import type { HarnessStatus, Model } from '@isles/contracts';
-import type { HarnessCatalog } from './types.js';
+import type { HarnessCatalog } from '../types.js';
 
 export interface CatalogSnapshot {
   status: HarnessStatus;

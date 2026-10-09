@@ -1,7 +1,7 @@
 import type { Model } from '@isles/contracts';
 import { z } from 'zod';
 import { mkdir } from 'node:fs/promises';
-import { CachedCatalog, type CatalogSnapshot } from '../harness/catalog-cache.js';
+import { CachedCatalog, type CatalogSnapshot } from '../shared/catalog-cache.js';
 import { ClaudeClient } from './client.js';
 import type { ClaudeEnvironment } from './environment.js';
 

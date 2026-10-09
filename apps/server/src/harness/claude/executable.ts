@@ -4,7 +4,7 @@ import {
   type CliCommand,
   type CliDiscoveryOptions,
   type CliExecutable,
-} from '../harness/executable.js';
+} from '../shared/executable.js';
 
 export type ClaudeCommand = CliCommand;
 export type ClaudeExecutable = CliExecutable;

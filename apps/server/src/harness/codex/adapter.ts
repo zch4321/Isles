@@ -10,8 +10,8 @@ import {
   type HarnessSession,
   type HarnessSteerInput,
   type HarnessTurnInput,
-} from '../harness/types.js';
-import type { AgentRecord } from '../storage/store.js';
+} from '../types.js';
+import type { AgentRecord } from '../../storage/store.js';
 import { NativeCatalog } from './catalog.js';
 import { StdioClient } from './client.js';
 import type { NativeEnvironment } from './environment.js';

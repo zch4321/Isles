@@ -3,9 +3,9 @@ import { join } from 'node:path';
 import type { ConfigManager } from '@isles/config';
 import { parse } from 'smol-toml';
 import { findCodexExecutable, type CodexExecutable } from './executable.js';
-import type { Logger } from '../logging.js';
-import type { AgentRecord } from '../storage/store.js';
-import { AgentWorkspace, agentRoot, MCP_TOKEN_ENV } from '../runtime/workspace.js';
+import type { Logger } from '../../logging.js';
+import type { AgentRecord } from '../../storage/store.js';
+import { AgentWorkspace, agentRoot, MCP_TOKEN_ENV } from '../../runtime/workspace.js';
 
 export class NativeEnvironment {
   private discovery: Promise<CodexExecutable> | undefined;

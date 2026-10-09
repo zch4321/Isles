@@ -1,14 +1,14 @@
 import { ConfigManager } from '@isles/config';
 import type { HarnessCatalog } from '../src/harness/types.js';
-import { CodexAdapter, type CodexClientFactory } from '../src/codex/adapter.js';
-import { NativeEnvironment } from '../src/codex/environment.js';
+import { CodexAdapter, type CodexClientFactory } from '../src/harness/codex/adapter.js';
+import { NativeEnvironment } from '../src/harness/codex/environment.js';
 import type { AgentWorkspace } from '../src/runtime/workspace.js';
 import {
   NativeRpcError,
   type NativeClient,
   type NativeHandlers,
   type RequestId,
-} from '../src/codex/protocol.js';
+} from '../src/harness/codex/protocol.js';
 import type { AgentRecord, Store } from '../src/storage/store.js';
 import type { Agent, Channel } from '@isles/contracts';
 import { join } from 'node:path';

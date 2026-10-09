@@ -18,7 +18,7 @@
 | `apps/server/src/harness/registry.ts`  | 注册目录、重复 ID 与必需能力检查，按 Agent harness 选择 adapter。                                     |
 | `apps/server/src/runtime/runtime.ts`   | 平台输入派发、固定绑定、执行互斥、结果不明、停止/恢复与问题有效性；不发送或解析 Codex RPC。           |
 | `apps/server/src/runtime/workspace.ts` | 平台 data/shared 目录、MCP token、托管 AGENTS.md 和 redactor。                                        |
-| `apps/server/src/codex/`               | app-server 协议与通知转换、原生模型目录/环境、中性初始化、`instructionSources` 验证与子代理问题归属。 |
+| `apps/server/src/harness/codex/`       | app-server 协议与通知转换、原生模型目录/环境、中性初始化、`instructionSources` 验证与子代理问题归属。 |
 | `packages/contracts` / Web             | harness 目录、能力与状态契约；动态读取实际注册项及其原生模型/等级。                                   |
 
 `connect()` 在等待初始化之前发布可关闭的 session，确保启动途中停止与应用关闭也可释放所属进程。`createSession(onCreated)` 先保存原生 ID，再完成中性初始化和规则校验；恢复必须保持原绑定。Codex 的 `thread/inject_items` 与 `instructionSources` 只存在于 Codex adapter 的实现路径，不是所有 harness 的通用要求。

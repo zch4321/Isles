@@ -12,9 +12,9 @@ import {
   type HarnessSession,
   type HarnessSteerInput,
   type HarnessTurnInput,
-} from '../harness/types.js';
-import type { Logger } from '../logging.js';
-import type { AgentRecord } from '../storage/store.js';
+} from '../types.js';
+import type { Logger } from '../../logging.js';
+import type { AgentRecord } from '../../storage/store.js';
 import { ClaudeCatalog } from './catalog.js';
 import {
   ClaudeClient,

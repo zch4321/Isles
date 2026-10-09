@@ -4,15 +4,15 @@ import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AcpAdapter } from '../src/acp/adapter.js';
+import { AcpAdapter } from '../src/harness/acp/adapter.js';
 import {
   HarnessSubmissionRejected,
   type HarnessEvent,
   type HarnessHandlers,
   type HarnessQuestion,
 } from '../src/harness/types.js';
-import { findKimiExecutable } from '../src/kimi/executable.js';
-import { KimiEnvironment } from '../src/kimi/environment.js';
+import { findKimiExecutable } from '../src/harness/kimi/executable.js';
+import { KimiEnvironment } from '../src/harness/kimi/environment.js';
 import { AgentWorkspace } from '../src/runtime/workspace.js';
 import type { AgentRecord } from '../src/storage/store.js';
 import { kimiFixture } from './acp-fixture.js';

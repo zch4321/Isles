@@ -1,5 +1,5 @@
 import type { Model } from '@isles/contracts';
-import { CachedCatalog, type CatalogSnapshot } from '../harness/catalog-cache.js';
+import { CachedCatalog, type CatalogSnapshot } from '../shared/catalog-cache.js';
 import { z } from 'zod';
 import { StdioClient } from './client.js';
 import type { NativeEnvironment } from './environment.js';

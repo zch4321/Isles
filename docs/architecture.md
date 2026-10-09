@@ -118,11 +118,12 @@ apps/
       application/       # HTTP 与 MCP 共用的用例
       domain/            # Agent、频道、消息、权限规则
       runtime/           # Agent 控制器、排队、恢复、停止、规则文件维护与文本编码
-      harness/           # HarnessAdapter / HarnessSession 契约、注册目录与共享的发现/进程/目录缓存
-      codex/             # Codex adapter、app-server 协议、模型目录及环境
-      claude/            # Claude adapter、stream-json 协议、模型目录及环境
-      acp/               # 通用 ACP v1 客户端、adapter 与模型目录
-      kimi/              # Kimi Code 的 ACP harness 配置：发现、home、认证与凭据脱敏
+      harness/           # 通用契约、注册目录与所有原生适配器
+        shared/          # 可执行文件发现、进程管理与模型目录缓存
+        codex/           # Codex adapter、app-server 协议、模型目录及环境
+        claude/          # Claude adapter、stream-json 协议、模型目录及环境
+        acp/             # 通用 ACP v1 客户端、adapter 与模型目录
+        kimi/            # Kimi Code 的 ACP harness 配置：发现、home、认证与凭据脱敏
       logging.ts         # 服务日志输出、文件分段与保留
       storage/           # Drizzle schema、查询与事务
       artifacts/         # 目录与共享产物

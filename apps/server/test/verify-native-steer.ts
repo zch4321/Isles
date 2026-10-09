@@ -8,10 +8,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { ConfigManager } from '@isles/config';
 import type { Agent, Message } from '@isles/contracts';
 import { buildApp } from '../src/app.js';
-import { CodexAdapter } from '../src/codex/adapter.js';
-import { StdioClient } from '../src/codex/client.js';
-import { NativeEnvironment } from '../src/codex/environment.js';
-import { NativeRpcError, threadResponseSchema } from '../src/codex/protocol.js';
+import { CodexAdapter } from '../src/harness/codex/adapter.js';
+import { StdioClient } from '../src/harness/codex/client.js';
+import { NativeEnvironment } from '../src/harness/codex/environment.js';
+import { NativeRpcError, threadResponseSchema } from '../src/harness/codex/protocol.js';
 import { HttpError } from '../src/errors.js';
 import { agentRoot } from '../src/runtime/workspace.js';
 

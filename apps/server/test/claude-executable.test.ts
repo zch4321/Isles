@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { findClaudeExecutable } from '../src/claude/executable.js';
+import { findClaudeExecutable } from '../src/harness/claude/executable.js';
 
 const roots: string[] = [];
 afterEach(async () => {

@@ -5,9 +5,9 @@ import {
   ClaudeAdapter,
   CLAUDE_INITIALIZATION_MESSAGE,
   type ClaudeClientFactory,
-} from '../../apps/server/src/claude/adapter.js';
-import { ClaudeEnvironment } from '../../apps/server/src/claude/environment.js';
-import { ClaudeInputRejected } from '../../apps/server/src/claude/client.js';
+} from '../../apps/server/src/harness/claude/adapter.js';
+import { ClaudeEnvironment } from '../../apps/server/src/harness/claude/environment.js';
+import { ClaudeInputRejected } from '../../apps/server/src/harness/claude/client.js';
 import type { AgentWorkspace } from '../../apps/server/src/runtime/workspace.js';
 import type { Store } from '../../apps/server/src/storage/store.js';
 import { parseMessageText, testCatalog } from '../../apps/server/test/helpers.js';

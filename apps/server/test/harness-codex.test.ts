@@ -4,10 +4,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CodexAdapter } from '../src/codex/adapter.js';
-import { StdioClient } from '../src/codex/client.js';
-import { NativeEnvironment } from '../src/codex/environment.js';
-import { NativeRpcError, type NativeClient, type NativeHandlers } from '../src/codex/protocol.js';
+import { CodexAdapter } from '../src/harness/codex/adapter.js';
+import { StdioClient } from '../src/harness/codex/client.js';
+import { NativeEnvironment } from '../src/harness/codex/environment.js';
+import {
+  NativeRpcError,
+  type NativeClient,
+  type NativeHandlers,
+} from '../src/harness/codex/protocol.js';
 import {
   HarnessSubmissionRejected,
   type HarnessCatalog,

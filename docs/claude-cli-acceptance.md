@@ -4,14 +4,14 @@
 
 ## 1. 实现
 
-| 模块                                   | 职责                                                                                                                    |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `apps/server/src/claude/executable.ts` | 显式路径、PATH、原生本地安装与 Homebrew/npm/pnpm 发现；版本验证；Windows JS launcher 通过 Node 执行。                   |
-| `claude/client.ts`                     | 常驻双向 stream-json、控制响应、主线程输入确认与停止时的队列取消、问题回交与所属进程关闭；stderr 脱敏后按 debug 记录。  |
-| `claude/adapter.ts`                    | UUID 创建/恢复、中性初始化、实际规则来源与 MCP 连接校验、执行事件和 AskUserQuestion 转换；同执行 steer 与结束竞态处理。 |
-| `claude/environment.ts`、`catalog.ts`  | 共享原生 home/认证/配置；维护 CLAUDE.md 导入；原生模型与 effort 目录；缓存刷新和脱敏。                                  |
-| `packages/config`、HTTP API、Web       | 独立 Claude TOML/环境覆盖和路径设置，创建页面切换真实已注册 harness，模型与能力按目录显示。                             |
-| `app.ts`、`mcp/server.ts`              | preClose 清理原生进程和 MCP transport，避免长连接阻塞 HTTP 关闭；随后释放数据库及数据目录锁。                           |
+| 模块                                           | 职责                                                                                                                    |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `apps/server/src/harness/claude/executable.ts` | 显式路径、PATH、原生本地安装与 Homebrew/npm/pnpm 发现；版本验证；Windows JS launcher 通过 Node 执行。                   |
+| `claude/client.ts`                             | 常驻双向 stream-json、控制响应、主线程输入确认与停止时的队列取消、问题回交与所属进程关闭；stderr 脱敏后按 debug 记录。  |
+| `claude/adapter.ts`                            | UUID 创建/恢复、中性初始化、实际规则来源与 MCP 连接校验、执行事件和 AskUserQuestion 转换；同执行 steer 与结束竞态处理。 |
+| `claude/environment.ts`、`catalog.ts`          | 共享原生 home/认证/配置；维护 CLAUDE.md 导入；原生模型与 effort 目录；缓存刷新和脱敏。                                  |
+| `packages/config`、HTTP API、Web               | 独立 Claude TOML/环境覆盖和路径设置，创建页面切换真实已注册 harness，模型与能力按目录显示。                             |
+| `app.ts`、`mcp/server.ts`                      | preClose 清理原生进程和 MCP transport，避免长连接阻塞 HTTP 关闭；随后释放数据库及数据目录锁。                           |
 
 路径优先级：`ISLES_CLAUDE_BIN` > `[claude].binary_path` > 自动发现；home 优先级：`ISLES_CLAUDE_HOME` > `[claude].home` > `CLAUDE_CONFIG_DIR` > `~/.claude`。新增 `GET/PUT /api/claude/config`，只修改对应的 binary_path，与 Codex 保存共用文件写入队列，保留最新磁盘字段。模型目录从原生 initialize 响应读取；`default` effort 表示沿用原生设置，其他等级使用 CLI 返回的支持值。
 

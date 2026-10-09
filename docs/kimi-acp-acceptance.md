@@ -4,9 +4,9 @@
 
 ## 1. 实现
 
-- **准备性重构**（`7d42bc9`）：CLI 路径配置按 harness ID 组织为 `[codex]`、`[claude]`、`[kimi]`，环境覆盖为 `ISLES_<ID>_BIN` / `ISLES_<ID>_HOME`；路径接口统一为 `GET/PUT /api/harnesses/:id/config`，descriptor 的 `configuration` 统一为 `cli-path`。抽出共享的进程树关闭（`harness/process.ts`）、目录缓存（`harness/catalog-cache.ts`）与 npm CLI 发现（`harness/executable.ts`），Claude 发现改为调用通用实现。
-- **通用 ACP adapter**（`apps/server/src/acp/`）：手写、zod 校验的 JSON-RPC 2.0 stdio 客户端，不引入 ACP SDK。`AcpHarness` 描述一个 ACP agent 需要提供的内容：descriptor、发现、启动参数、原生 home 环境、会话模式、认证检测、工作区准备与凭据脱敏。
-- **Kimi 配置**（`apps/server/src/kimi/`）：`kimi acp` 启动，`KIMI_CODE_HOME` 指定 home，会话模式 `yolo`，`authenticate(login)` 检测已有登录；从 `config.toml`、`credentials/*.json` 与 `server.token` 学习需要脱敏的值。能力声明：恢复、中断、原生问答、原生子代理、MCP、工作区规则为是，steer 为否。
+- **准备性重构**（`7d42bc9`）：CLI 路径配置按 harness ID 组织为 `[codex]`、`[claude]`、`[kimi]`，环境覆盖为 `ISLES_<ID>_BIN` / `ISLES_<ID>_HOME`；路径接口统一为 `GET/PUT /api/harnesses/:id/config`，descriptor 的 `configuration` 统一为 `cli-path`。抽出共享的进程树关闭（`harness/shared/process.ts`）、目录缓存（`harness/shared/catalog-cache.ts`）与 npm CLI 发现（`harness/shared/executable.ts`），Claude 发现改为调用通用实现。
+- **通用 ACP adapter**（`apps/server/src/harness/acp/`）：手写、zod 校验的 JSON-RPC 2.0 stdio 客户端，不引入 ACP SDK。`AcpHarness` 描述一个 ACP agent 需要提供的内容：descriptor、发现、启动参数、原生 home 环境、会话模式、认证检测、工作区准备与凭据脱敏。
+- **Kimi 配置**（`apps/server/src/harness/kimi/`）：`kimi acp` 启动，`KIMI_CODE_HOME` 指定 home，会话模式 `yolo`，`authenticate(login)` 检测已有登录；从 `config.toml`、`credentials/*.json` 与 `server.token` 学习需要脱敏的值。能力声明：恢复、中断、原生问答、原生子代理、MCP、工作区规则为是，steer 为否。
 - **Web**：路径设置和模型目录按 harness ID 读取；执行详情新增“工具调用”“状态”条目类型。规则模板中的共享配置说明改为通用的原生 harness 表述。
 
 ## 2. Session 与消息

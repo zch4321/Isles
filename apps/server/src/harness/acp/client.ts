@@ -1,9 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import type { Redactor } from '../errors.js';
-import type { CliCommand } from '../harness/executable.js';
-import { stopProcessTree } from '../harness/process.js';
-import type { Logger } from '../logging.js';
+import type { Redactor } from '../../errors.js';
+import type { CliCommand } from '../shared/executable.js';
+import { stopProcessTree } from '../shared/process.js';
+import type { Logger } from '../../logging.js';
 import {
   ACP_PROTOCOL_VERSION,
   initializeResultSchema,

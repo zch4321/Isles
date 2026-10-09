@@ -1,7 +1,7 @@
 import type { Model } from '@isles/contracts';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CachedCatalog, type CatalogSnapshot } from '../harness/catalog-cache.js';
+import { CachedCatalog, type CatalogSnapshot } from '../shared/catalog-cache.js';
 import { AcpRpcError, initializeAcp, type AcpClientFactory, type AcpConnection } from './client.js';
 import type { AcpHarness } from './harness.js';
 import {

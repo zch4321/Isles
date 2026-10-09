@@ -3,7 +3,7 @@ import {
   type CliCommand,
   type CliDiscoveryOptions,
   type CliExecutable,
-} from '../harness/executable.js';
+} from '../shared/executable.js';
 
 export function findKimiExecutable(
   options: CliDiscoveryOptions = {},

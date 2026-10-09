@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
-import { NativeRpcError } from '../src/codex/protocol.js';
+import { NativeRpcError } from '../src/harness/codex/protocol.js';
 import { MockHarness, codexAdapters, testCatalog, testConfig } from './helpers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];

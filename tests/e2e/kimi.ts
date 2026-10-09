@@ -1,8 +1,8 @@
 import type { ConfigManager } from '@isles/config';
 import { randomUUID } from 'node:crypto';
-import { AcpAdapter } from '../../apps/server/src/acp/adapter.js';
-import { AcpRpcError, type AcpClientFactory } from '../../apps/server/src/acp/client.js';
-import { KimiEnvironment } from '../../apps/server/src/kimi/environment.js';
+import { AcpAdapter } from '../../apps/server/src/harness/acp/adapter.js';
+import { AcpRpcError, type AcpClientFactory } from '../../apps/server/src/harness/acp/client.js';
+import { KimiEnvironment } from '../../apps/server/src/harness/kimi/environment.js';
 import type { AgentWorkspace } from '../../apps/server/src/runtime/workspace.js';
 import type { Store } from '../../apps/server/src/storage/store.js';
 import { parseMessageText, testCatalog } from '../../apps/server/test/helpers.js';

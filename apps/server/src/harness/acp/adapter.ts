@@ -8,8 +8,8 @@ import {
   type HarnessRequestId,
   type HarnessSession,
   type HarnessTurnInput,
-} from '../harness/types.js';
-import type { AgentRecord } from '../storage/store.js';
+} from '../types.js';
+import type { AgentRecord } from '../../storage/store.js';
 import { AcpCatalog } from './catalog.js';
 import {
   AcpClient,

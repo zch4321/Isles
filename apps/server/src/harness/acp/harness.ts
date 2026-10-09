@@ -1,8 +1,8 @@
 import type { HarnessDescriptor } from '@isles/contracts';
-import type { Redactor } from '../errors.js';
-import type { CliExecutable } from '../harness/executable.js';
-import type { Logger } from '../logging.js';
-import type { AgentRecord } from '../storage/store.js';
+import type { Redactor } from '../../errors.js';
+import type { CliExecutable } from '../shared/executable.js';
+import type { Logger } from '../../logging.js';
+import type { AgentRecord } from '../../storage/store.js';
 import type { AcpConnection } from './client.js';
 
 /** What one ACP agent adds to the generic adapter: discovery, launch and native checks. */

@@ -7,9 +7,9 @@ import {
   type NativeHandlers,
   type RequestId,
 } from './protocol.js';
-import type { Redactor } from '../errors.js';
-import { stopProcessTree } from '../harness/process.js';
-import type { Logger } from '../logging.js';
+import type { Redactor } from '../../errors.js';
+import { stopProcessTree } from '../shared/process.js';
+import type { Logger } from '../../logging.js';
 import type { NativeCommand } from './executable.js';
 
 export class StdioClient implements NativeClient {

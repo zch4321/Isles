@@ -8,11 +8,11 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { ConfigManager } from '@isles/config';
 import type { Agent } from '@isles/contracts';
 import { buildApp } from '../src/app.js';
-import { StdioClient } from '../src/codex/client.js';
-import { CodexAdapter } from '../src/codex/adapter.js';
-import { NativeEnvironment } from '../src/codex/environment.js';
+import { StdioClient } from '../src/harness/codex/client.js';
+import { CodexAdapter } from '../src/harness/codex/adapter.js';
+import { NativeEnvironment } from '../src/harness/codex/environment.js';
 import { agentRoot } from '../src/runtime/workspace.js';
-import { threadResponseSchema } from '../src/codex/protocol.js';
+import { threadResponseSchema } from '../src/harness/codex/protocol.js';
 
 const root = await mkdtemp(join(tmpdir(), 'isles-native-names-'));
 const configFilePath = join(root, 'config.toml');
