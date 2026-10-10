@@ -8,6 +8,7 @@ import {
   Globe,
   Inbox,
   ListChecks,
+  LoaderCircle,
   MessageSquareText,
   SquareTerminal,
   Workflow,
@@ -56,11 +57,11 @@ const kindOf = (type: string) => itemKinds[type] ?? { label: type, icon: CircleD
   <details
     data-run
     :open="open"
-    class="group rounded-lg border bg-card"
+    class="group rounded-lg border border-line bg-surface open:border-line-strong open:shadow-1"
     @toggle="open = ($event.target as HTMLDetailsElement).open"
   >
     <summary
-      class="flex list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-muted/50 [&::-webkit-details-marker]:hidden"
+      class="flex list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-surface-hover [&::-webkit-details-marker]:hidden"
     >
       <span
         :class="
@@ -72,48 +73,63 @@ const kindOf = (type: string) => itemKinds[type] ?? { label: type, icon: CircleD
         "
       />
       <span class="font-medium">{{ runStatusLabels[run.status] }}</span>
-      <time :datetime="run.createdAt" class="text-muted-foreground tabular-nums">{{
+      <time :datetime="run.createdAt" class="text-ink-3 tabular-nums">{{
         formatTime(run.createdAt)
       }}</time>
-      <span v-if="duration" class="truncate text-muted-foreground">· {{ duration }}</span>
-      <span class="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums"
+      <span v-if="duration" class="truncate text-ink-3">· {{ duration }}</span>
+      <span class="ml-auto shrink-0 text-xs text-ink-3 tabular-nums"
         >{{ run.items.length }} 项</span
       >
       <ChevronRight
-        class="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90"
+        class="size-4 shrink-0 text-ink-3 transition-transform group-open:rotate-90"
         aria-hidden="true"
       />
     </summary>
-    <div class="space-y-3 border-t px-3 py-3">
-      <p v-if="inputs" class="text-xs text-muted-foreground">输入：{{ inputs }}</p>
-      <p class="font-mono text-[11px] break-all text-muted-foreground">
+    <div class="space-y-3 border-t border-line px-3 py-3">
+      <p v-if="inputs" class="text-xs text-ink-3">输入：{{ inputs }}</p>
+      <p class="font-mono text-[11px] break-all text-ink-4">
         turn {{ run.turnId ?? '等待原生接受' }}
       </p>
       <p
         v-if="run.error"
-        class="rounded-md bg-destructive/10 px-2.5 py-1.5 text-xs break-words text-destructive"
+        class="rounded-md bg-st-error-soft px-2.5 py-1.5 text-xs break-words text-st-error"
       >
         {{ run.error }}
       </p>
-      <ol v-if="run.items.length" class="space-y-3">
-        <li v-for="item in run.items" :key="item.id" class="flex gap-2">
-          <component
-            :is="kindOf(item.type).icon"
-            class="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
-            aria-hidden="true"
-          />
+      <ol
+        v-if="run.items.length"
+        class="relative space-y-3 before:absolute before:top-2 before:bottom-2 before:left-[11px] before:w-px before:bg-line"
+      >
+        <li v-for="item in run.items" :key="item.id" class="relative flex gap-3">
+          <span
+            :class="
+              cn(
+                'z-10 grid size-[23px] shrink-0 place-items-center rounded-full border',
+                item.status !== 'completed'
+                  ? 'border-transparent bg-st-running-soft text-st-running'
+                  : 'border-line bg-surface-2 text-ink-2',
+              )
+            "
+          >
+            <LoaderCircle
+              v-if="item.status !== 'completed'"
+              class="size-3.5 animate-spin"
+              aria-hidden="true"
+            />
+            <component :is="kindOf(item.type).icon" v-else class="size-3.5" aria-hidden="true" />
+          </span>
           <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2 text-xs">
+            <div class="flex min-h-[23px] items-center gap-2 text-xs">
               <span class="font-medium">{{ kindOf(item.type).label }}</span>
-              <span v-if="item.status !== 'completed'" class="ml-auto text-primary">进行中</span>
+              <span v-if="item.status !== 'completed'" class="ml-auto text-st-running">进行中</span>
             </div>
             <pre
-              class="mt-1 max-h-64 overflow-auto rounded-md bg-muted px-2.5 py-2 font-mono text-[11.5px] leading-relaxed break-words whitespace-pre-wrap"
+              class="mt-0.5 max-h-64 overflow-auto rounded-md border border-line bg-surface-2 px-2.5 py-2 font-mono text-[11.5px] leading-relaxed break-words whitespace-pre-wrap text-ink-2"
               >{{ item.text || '暂无文本输出' }}</pre>
           </div>
         </li>
       </ol>
-      <p v-else class="text-xs text-muted-foreground">暂无活动记录</p>
+      <p v-else class="text-xs text-ink-3">暂无活动记录</p>
     </div>
   </details>
 </template>

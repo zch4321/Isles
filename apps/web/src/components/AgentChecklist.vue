@@ -11,16 +11,21 @@ const harnessName = (id: string) =>
 </script>
 
 <template>
-  <ul class="max-h-64 space-y-1 overflow-y-auto rounded-md border p-1">
+  <ul class="grid max-h-[330px] gap-0.5 overflow-y-auto rounded-md border border-line p-1">
     <li v-for="agent in agents" :key="agent.id">
       <label
-        class="flex cursor-pointer items-center gap-3 rounded-sm px-2 py-1.5 transition-colors hover:bg-accent/70 has-checked:bg-accent"
+        class="flex cursor-pointer items-center gap-3 rounded-sm px-2 py-[7px] transition-colors hover:bg-surface-hover"
       >
-        <input v-model="selected" type="checkbox" :value="agent.id" class="accent-primary" />
+        <input
+          v-model="selected"
+          type="checkbox"
+          :value="agent.id"
+          class="size-[15px] shrink-0 accent-primary"
+        />
         <ParticipantAvatar :name="agent.name" :identity="agent.id" size="sm" />
         <span class="min-w-0 flex-1">
           <span class="block truncate text-[13px] font-medium">{{ agent.name }}</span>
-          <span class="block truncate text-xs text-muted-foreground"
+          <span class="block truncate text-xs text-ink-3"
             >{{ harnessName(agent.harness) }} · {{ agent.model }}</span
           >
         </span>

@@ -168,7 +168,7 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col">
+  <div class="flex h-full min-h-0 flex-col bg-surface">
     <template v-if="channel && ready">
       <ConversationHeader
         :channel="channel"
@@ -188,12 +188,12 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
       <div
         v-if="agent?.error"
         role="alert"
-        class="flex items-start gap-2.5 border-b border-destructive/20 bg-destructive/5 px-4 py-2.5 text-[13px] md:px-6"
+        class="flex items-start gap-2.5 border-b border-st-error/20 bg-st-error-soft px-4 py-3 text-[13px] lg:px-7"
       >
-        <CircleAlert class="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
+        <CircleAlert class="mt-0.5 size-4 shrink-0 text-st-error" aria-hidden="true" />
         <div class="min-w-0">
-          <p class="font-medium text-destructive">Agent 运行异常</p>
-          <p class="mt-0.5 break-words text-muted-foreground">{{ agent.error }}</p>
+          <p class="font-medium text-st-error">Agent 运行异常</p>
+          <p class="mt-0.5 break-words text-ink-3">{{ agent.error }}</p>
         </div>
       </div>
       <MessageFeed
@@ -208,18 +208,16 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
         :inspector-open="inspectorOpen"
         @open-inspector="emit('openInspector')"
       />
-      <div class="mx-auto w-full max-w-4xl space-y-2 px-3 pb-3 md:px-6 md:pb-4">
-        <div
-          v-if="actionError"
-          role="alert"
-          class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 py-2 pr-1.5 pl-3 text-[13px] text-destructive"
-        >
+      <div
+        class="mx-auto w-full max-w-[816px] shrink-0 space-y-3 px-3 pt-2 pb-4 sm:px-6 lg:px-7 lg:pb-5"
+      >
+        <div v-if="actionError" role="alert" class="notice notice-error pr-1.5">
           <CircleAlert class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
           <span class="min-w-0 flex-1 break-words">{{ actionError }}</span>
           <Button
             variant="ghost"
             size="icon-xs"
-            class="text-destructive hover:text-destructive"
+            class="text-st-error hover:text-st-error"
             aria-label="关闭提示"
             @click="actionError = ''"
           >
@@ -229,7 +227,7 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
         <section
           v-if="questions.length && !deletedGroup"
           aria-label="等待回答的问题"
-          class="space-y-2"
+          class="max-h-[45dvh] space-y-3 overflow-y-auto pr-1"
         >
           <QuestionForm
             v-for="question in questions"
@@ -243,7 +241,10 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
             "
           />
         </section>
-        <p v-if="notice" class="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+        <p
+          v-if="notice"
+          class="flex items-start gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-xs leading-relaxed text-ink-2"
+        >
           <Pause v-if="notice.held" class="size-3.5 shrink-0" aria-hidden="true" />
           <Clock3 v-else class="size-3.5 shrink-0" aria-hidden="true" />{{ notice.text }}
         </p>
@@ -260,11 +261,11 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
 
     <div
       v-else-if="detail.isError.value || agents.isError.value"
-      class="m-auto flex max-w-sm flex-col items-center px-6 text-center"
+      class="m-auto flex max-w-sm flex-col items-center px-6 py-8 text-center"
     >
-      <CircleAlert class="size-6 text-destructive" aria-hidden="true" />
+      <CircleAlert class="size-6 text-st-error" aria-hidden="true" />
       <h2 class="mt-3 font-medium">对话加载失败</h2>
-      <p role="alert" class="mt-1 text-[13px] text-muted-foreground">
+      <p role="alert" class="mt-1 text-[13px] text-ink-3">
         {{ (detail.error.value ?? agents.error.value)?.message }}
       </p>
       <div class="mt-4 flex gap-2">
@@ -275,7 +276,7 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
       </div>
     </div>
 
-    <div v-else class="m-auto flex items-center gap-2 text-[13px] text-muted-foreground">
+    <div v-else class="m-auto flex items-center gap-2 text-[13px] text-ink-3">
       <LoaderCircle class="size-4 animate-spin" />正在载入对话…
     </div>
   </div>

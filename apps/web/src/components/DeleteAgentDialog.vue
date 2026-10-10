@@ -50,14 +50,8 @@ function focusCancel(event: Event) {
           会停止运行、退出所有群聊并从联系人中移除，私聊保留为只读历史。
         </DialogDescription>
       </DialogHeader>
-      <p class="rounded-md border bg-muted/50 px-3 py-2.5 text-[13px] leading-relaxed">
-        私聊和群聊历史、个人工作目录及共享文件都会保留。
-      </p>
-      <p
-        v-if="remove.error.value"
-        role="alert"
-        class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[13px] break-words text-destructive"
-      >
+      <p class="info-box">私聊和群聊历史、个人工作目录及共享文件都会保留。</p>
+      <p v-if="remove.error.value" role="alert" class="notice notice-error break-words">
         {{ remove.error.value.message }}
       </p>
       <DialogFooter>

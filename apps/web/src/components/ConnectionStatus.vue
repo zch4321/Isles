@@ -13,9 +13,9 @@ const state = computed(() =>
 );
 const labels = { online: '服务已连接', offline: '服务连接异常', connecting: '正在连接服务' };
 const tones = {
-  online: 'bg-success',
-  offline: 'bg-destructive',
-  connecting: 'bg-warning animate-pulse',
+  online: 'bg-st-idle',
+  offline: 'bg-st-error',
+  connecting: 'bg-st-queued animate-pulse',
 };
 
 function reconnect() {
@@ -25,11 +25,9 @@ function reconnect() {
 </script>
 
 <template>
-  <div role="status" aria-live="polite" class="flex h-6 items-center gap-2 text-xs">
-    <span :class="cn('size-2 rounded-full', tones[state])" />
-    <span :class="state === 'offline' ? 'text-destructive' : 'text-muted-foreground'">{{
-      labels[state]
-    }}</span>
+  <div role="status" aria-live="polite" class="flex min-h-6 w-full items-center gap-2 text-[11px]">
+    <span :class="cn('size-1.5 shrink-0 rounded-full', tones[state])" />
+    <span :class="state === 'offline' ? 'text-st-error' : 'text-ink-3'">{{ labels[state] }}</span>
     <Button
       v-if="state === 'offline'"
       variant="ghost"
@@ -41,6 +39,6 @@ function reconnect() {
     >
       <RefreshCw />
     </Button>
-    <span v-else class="ml-auto text-muted-foreground/80">本机</span>
+    <span v-else class="ml-auto text-[10px] tracking-wider text-ink-3">本机</span>
   </div>
 </template>

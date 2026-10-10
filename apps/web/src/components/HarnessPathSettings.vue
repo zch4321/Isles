@@ -54,7 +54,7 @@ const save = useMutation({
     >
       <Settings2 />{{ name }} 路径设置
     </Button>
-    <div v-if="expanded" class="grid gap-3 rounded-md border bg-muted/30 p-3">
+    <div v-if="expanded" class="grid gap-3 rounded-md border border-line bg-surface-2 p-3">
       <div class="grid gap-2">
         <Label :for="`${harness}-binary-path`">{{ name }} 可执行文件路径</Label>
         <Input
@@ -89,7 +89,7 @@ const save = useMutation({
       <p
         v-if="save.error.value || configuration.error.value"
         role="alert"
-        class="text-xs text-destructive"
+        class="text-xs text-st-error"
       >
         {{ save.error.value?.message || configuration.error.value?.message }}
       </p>

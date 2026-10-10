@@ -33,16 +33,18 @@ const title = computed(() =>
   <div class="contents">
     <!-- Below xl the panel floats over the conversation. -->
     <div
-      class="fixed inset-0 z-30 bg-black/40 animate-in fade-in-0 xl:hidden"
+      class="fixed inset-0 z-30 bg-[var(--overlay)] backdrop-blur-[2px] animate-in fade-in-0 xl:hidden"
       aria-hidden="true"
       @click="$emit('close')"
     />
     <aside
       data-testid="inspector"
       :aria-label="title"
-      class="fixed inset-y-0 right-0 z-40 flex w-full flex-col border-l bg-background shadow-xl animate-in slide-in-from-right-8 fade-in-0 sm:w-[26rem] xl:static xl:z-auto xl:w-[24rem] xl:shadow-none xl:animate-none"
+      class="fixed inset-y-0 right-0 z-40 flex w-full shrink-0 flex-col border-l border-line bg-sidebar shadow-3 animate-in slide-in-from-right-8 fade-in-0 sm:w-80 xl:static xl:z-auto xl:w-80 xl:shadow-none xl:animate-none"
     >
-      <header class="flex h-14 shrink-0 items-center gap-1 border-b pr-2 pl-4">
+      <header
+        class="flex h-16 shrink-0 items-center gap-2 border-b border-line px-4 lg:h-20 lg:px-5"
+      >
         <Button
           v-if="channel.kind === 'group' && member"
           variant="ghost"
@@ -53,7 +55,15 @@ const title = computed(() =>
         >
           <ArrowLeft />
         </Button>
-        <h2 class="truncate text-[15px] font-semibold">{{ title }}</h2>
+        <div class="min-w-0">
+          <h2 class="truncate text-[13px] font-semibold">{{ title }}</h2>
+          <p
+            v-if="channel.kind === 'group' && !member && !channel.deletedAt"
+            class="mt-1 text-[11px] text-ink-3"
+          >
+            成员与执行
+          </p>
+        </div>
         <Button
           variant="ghost"
           size="icon-sm"
@@ -64,7 +74,7 @@ const title = computed(() =>
           <X />
         </Button>
       </header>
-      <div class="min-h-0 flex-1 overflow-y-auto">
+      <div class="min-h-0 flex-1 overflow-y-auto [--avatar-ring:var(--sidebar)]">
         <AgentDetails
           v-if="agent"
           :key="agent.id"

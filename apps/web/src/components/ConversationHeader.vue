@@ -55,7 +55,9 @@ const contextOpen = ref(false);
 </script>
 
 <template>
-  <header class="flex h-14 shrink-0 items-center gap-2.5 border-b pr-2 pl-2 md:pr-3 md:pl-4">
+  <header
+    class="flex h-16 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 lg:h-20 lg:px-6"
+  >
     <Button
       variant="ghost"
       size="icon-sm"
@@ -66,13 +68,15 @@ const contextOpen = ref(false);
       <ArrowLeft />
     </Button>
     <template v-if="agent">
-      <ParticipantAvatar :name="agent.name" :identity="agent.id" size="sm" />
+      <ParticipantAvatar :name="agent.name" :identity="agent.id" size="md" />
       <div class="min-w-0 flex-1">
         <div class="flex min-w-0 items-center gap-2">
-          <h1 class="truncate text-[15px] font-semibold">{{ agent.name }}</h1>
+          <h1 class="truncate text-base font-semibold tracking-tight lg:text-[17px]">
+            {{ agent.name }}
+          </h1>
           <StatusBadge data-testid="agent-status" :status="agent.status" />
         </div>
-        <p class="truncate text-xs text-muted-foreground">
+        <p class="mt-1 truncate font-mono text-[11px] text-ink-3">
           {{ harnessName }} · {{ agent.model }} · {{ agent.reasoningEffort }}
         </p>
       </div>
@@ -107,40 +111,46 @@ const contextOpen = ref(false);
       </Button>
     </template>
     <template v-else>
-      <GroupAvatar :identity="channel.id" size="sm" />
+      <GroupAvatar :identity="channel.id" size="md" />
       <div class="min-w-0 flex-1">
         <div class="flex min-w-0 items-center gap-2">
-          <h1 class="truncate text-[15px] font-semibold">{{ channel.name }}</h1>
+          <h1 class="truncate text-base font-semibold tracking-tight lg:text-[17px]">
+            {{ channel.name }}
+          </h1>
           <span
             v-if="channel.deletedAt"
             data-testid="group-status"
-            class="inline-flex shrink-0 items-center rounded-full border px-2 py-px text-[11px] leading-4 font-medium text-muted-foreground"
+            class="inline-flex shrink-0 items-center rounded-full bg-st-paused-soft px-2 py-0.5 text-[11px] leading-4 font-medium text-ink-2"
             >已删除</span
           >
           <span
             v-else-if="channel.paused"
             data-testid="group-status"
-            class="inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-px text-[11px] leading-4 font-medium text-muted-foreground"
+            class="inline-flex shrink-0 items-center gap-1 rounded-full bg-st-paused-soft px-2 py-0.5 text-[11px] leading-4 font-medium text-ink-2"
             ><Pause class="size-3" aria-hidden="true" />已暂停</span
           >
         </div>
-        <p class="truncate text-xs text-muted-foreground">
+        <p class="mt-1 flex items-center gap-1.5 truncate text-xs text-ink-3">
           <template v-if="channel.deletedAt">聊天历史仅供查看</template>
           <template v-else
-            >{{ members.length }} 位成员<template v-if="running">
+            ><span
+              v-if="!channel.paused"
+              aria-hidden="true"
+              class="size-1.5 shrink-0 rounded-full bg-st-idle"
+            />{{ members.length }} 位成员<template v-if="running">
               · {{ running }} 位执行中</template
             ></template
           >
         </p>
       </div>
-      <div class="flex -space-x-1.5 max-sm:hidden">
+      <div class="flex -space-x-1.5 max-lg:hidden">
         <ParticipantAvatar
           v-for="member in members.slice(0, 4)"
           :key="member.id"
           :name="member.name"
           :identity="member.id"
           size="sm"
-          class="ring-2 ring-background"
+          class="ring-2 ring-surface"
         />
       </div>
       <Button
@@ -171,7 +181,7 @@ const contextOpen = ref(false);
       :aria-label="agent ? 'Agent 详情' : '群聊详情'"
       :title="agent ? 'Agent 详情' : '群聊详情'"
       :aria-expanded="inspectorOpen"
-      :class="cn(inspectorOpen && 'bg-accent text-accent-foreground')"
+      :class="cn(inspectorOpen && 'bg-primary-soft text-primary-ink')"
       @click="$emit('toggleInspector')"
     >
       <PanelRight />
@@ -192,10 +202,10 @@ const contextOpen = ref(false);
         <DropdownMenuContent
           align="end"
           :side-offset="6"
-          class="z-50 min-w-40 rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
+          class="z-50 min-w-44 rounded-lg border border-line bg-popover p-1.5 text-popover-foreground shadow-3"
         >
           <DropdownMenuItem
-            class="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none data-highlighted:bg-accent data-highlighted:text-accent-foreground"
+            class="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-[13px] outline-none data-highlighted:bg-surface-hover data-highlighted:text-ink"
             @select="$emit('export')"
           >
             <Download class="size-4" />导出聊天记录

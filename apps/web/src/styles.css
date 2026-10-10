@@ -3,30 +3,78 @@
 
 :root {
   color-scheme: light;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.21 0.008 265);
-  --sidebar: oklch(0.982 0.002 265);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.21 0.008 265);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.21 0.008 265);
-  --primary: oklch(0.53 0.135 242);
-  --primary-foreground: oklch(0.985 0.002 242);
-  --primary-soft: oklch(0.97 0.018 242);
-  --secondary: oklch(0.965 0.003 265);
-  --secondary-foreground: oklch(0.27 0.01 265);
-  --muted: oklch(0.965 0.003 265);
-  --muted-foreground: oklch(0.53 0.014 265);
-  --accent: oklch(0.945 0.005 265);
-  --accent-foreground: oklch(0.21 0.008 265);
-  --destructive: oklch(0.56 0.2 27);
-  --success: oklch(0.64 0.14 155);
-  --warning: oklch(0.76 0.15 75);
-  --warning-strong: oklch(0.55 0.13 60);
-  --border: oklch(0.92 0.004 265);
-  --input: oklch(0.885 0.006 265);
-  --ring: oklch(0.6 0.12 242);
-  --radius: 0.5rem;
+  /* Surfaces, warm sand. Mirrors shared/isles-design/tokens.css (v2). */
+  --bg: #f7f5f0;
+  --sidebar: #efece4;
+  --surface: #fffefb;
+  --surface-2: #f9f7f2;
+  --surface-hover: #f1eee6;
+  --surface-active: #e8e4d9;
+  --ink: #17262a;
+  --ink-2: #4c5c60;
+  --ink-3: #5c6b6e;
+  --ink-4: #a9b1b2;
+  --line: #e4dfd3;
+  --line-strong: #d3ccbc;
+  --overlay: rgb(20 32 35 / 0.36);
+
+  --blue-300: #93b4f6;
+  --primary: #2459d6;
+  --primary-hover: #1c47b0;
+  --primary-foreground: #ffffff;
+  --primary-soft: #eef3fe;
+  --primary-ink: #1c47b0;
+
+  /* Attention: only for things the user should act on (@ you, needs checking, waiting for an answer). */
+  --attention: #d9772b;
+  --attention-soft: #fdf0e4;
+  --attention-ink: #a6551a;
+
+  --st-idle: #2d7a53;
+  --st-running: #0b7285;
+  --st-queued: #896516;
+  --st-steering: #7159c0;
+  --st-waiting: #d9772b;
+  --st-paused: #788386;
+  --st-error: #b83f35;
+  --st-idle-soft: #e6f3ec;
+  --st-running-soft: #e3f4f6;
+  --st-queued-soft: #f8f0dc;
+  --st-steering-soft: #efebfa;
+  --st-waiting-soft: #fdf0e4;
+  --st-paused-soft: #eceeee;
+  --st-error-soft: #f9e6e4;
+
+  --avatar-l: 0.9;
+  --avatar-c: 0.055;
+  --avatar-fl: 0.42;
+  --avatar-fc: 0.11;
+
+  --elev-1: 0 1px 2px rgb(60 48 20 / 0.06);
+  --elev-2: 0 2px 8px rgb(60 48 20 / 0.07), 0 1px 2px rgb(60 48 20 / 0.05);
+  --elev-3: 0 12px 32px rgb(40 36 20 / 0.14), 0 2px 6px rgb(40 36 20 / 0.06);
+
+  /* shadcn-vue names used by components/ui and existing utilities. */
+  --background: var(--surface);
+  --foreground: var(--ink);
+  --card: var(--surface);
+  --card-foreground: var(--ink);
+  --popover: var(--surface);
+  --popover-foreground: var(--ink);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--ink);
+  --muted: var(--surface-2);
+  --muted-foreground: var(--ink-3);
+  --accent: var(--surface-hover);
+  --accent-foreground: var(--ink);
+  --destructive: var(--st-error);
+  --success: var(--st-idle);
+  --warning: var(--st-queued);
+  --warning-strong: var(--st-queued);
+  --border: var(--line);
+  --input: var(--line-strong);
+  --ring: var(--primary);
+  --radius: 0.625rem;
   /* Status dots cut into avatars with the colour of whatever surface they sit on. */
   --avatar-ring: var(--background);
 }
@@ -34,29 +82,55 @@
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
-    --background: oklch(0.185 0.006 265);
-    --foreground: oklch(0.93 0.004 265);
-    --sidebar: oklch(0.165 0.006 265);
-    --card: oklch(0.21 0.006 265);
-    --card-foreground: oklch(0.93 0.004 265);
-    --popover: oklch(0.225 0.006 265);
-    --popover-foreground: oklch(0.93 0.004 265);
-    --primary: oklch(0.7 0.13 242);
-    --primary-foreground: oklch(0.18 0.03 242);
-    --primary-soft: oklch(0.24 0.035 242);
-    --secondary: oklch(0.25 0.006 265);
-    --secondary-foreground: oklch(0.93 0.004 265);
-    --muted: oklch(0.235 0.006 265);
-    --muted-foreground: oklch(0.68 0.012 265);
-    --accent: oklch(0.265 0.007 265);
-    --accent-foreground: oklch(0.95 0.004 265);
-    --destructive: oklch(0.66 0.19 25);
-    --success: oklch(0.7 0.14 155);
-    --warning: oklch(0.78 0.14 75);
-    --warning-strong: oklch(0.8 0.13 75);
-    --border: oklch(1 0 0 / 9%);
-    --input: oklch(1 0 0 / 14%);
-    --ring: oklch(0.65 0.12 242);
+    /* Graphite: neutral greys, blue reserved for actions, selection and mentions. */
+    --bg: #141416;
+    --sidebar: #111113;
+    --surface: #18181b;
+    --surface-2: #1f1f23;
+    --surface-hover: #232327;
+    --surface-active: #2a2a2f;
+    --ink: #ececee;
+    --ink-2: #a8a8b0;
+    --ink-3: #868690;
+    --ink-4: #56565d;
+    --line: rgb(255 255 255 / 0.07);
+    --line-strong: rgb(255 255 255 / 0.12);
+    --overlay: rgb(0 0 0 / 0.6);
+
+    --blue-300: #4f74c4;
+    --primary: #7ea6ff;
+    --primary-hover: #a9c3ff;
+    --primary-foreground: #0b1733;
+    --primary-soft: rgb(111 155 255 / 0.14);
+    --primary-ink: #a9c3ff;
+
+    --attention: #f0a160;
+    --attention-soft: rgb(240 161 96 / 0.13);
+    --attention-ink: #f5bd8a;
+
+    --st-idle: #5cc48c;
+    --st-running: #4cc4d6;
+    --st-queued: #e3b44a;
+    --st-steering: #a48ff0;
+    --st-waiting: #f0a160;
+    --st-paused: #8a9396;
+    --st-error: #ec6f63;
+    --st-idle-soft: rgb(92 196 140 / 0.14);
+    --st-running-soft: rgb(76 196 214 / 0.14);
+    --st-queued-soft: rgb(227 180 74 / 0.14);
+    --st-steering-soft: rgb(164 143 240 / 0.15);
+    --st-waiting-soft: rgb(240 161 96 / 0.13);
+    --st-paused-soft: rgb(160 170 180 / 0.12);
+    --st-error-soft: rgb(236 111 99 / 0.14);
+
+    --avatar-l: 0.31;
+    --avatar-c: 0.035;
+    --avatar-fl: 0.86;
+    --avatar-fc: 0.09;
+
+    --elev-1: 0 1px 2px rgb(0 0 0 / 0.4);
+    --elev-2: 0 4px 14px rgb(0 0 0 / 0.4);
+    --elev-3: 0 18px 44px rgb(0 0 0 / 0.55), 0 0 0 1px rgb(255 255 255 / 0.06);
   }
 }
 
@@ -89,6 +163,39 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-active: var(--surface-active);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-ink-4: var(--ink-4);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-ink: var(--primary-ink);
+  --color-attention: var(--attention);
+  --color-attention-soft: var(--attention-soft);
+  --color-attention-ink: var(--attention-ink);
+  --color-st-idle: var(--st-idle);
+  --color-st-running: var(--st-running);
+  --color-st-queued: var(--st-queued);
+  --color-st-steering: var(--st-steering);
+  --color-st-waiting: var(--st-waiting);
+  --color-st-paused: var(--st-paused);
+  --color-st-error: var(--st-error);
+  --color-st-idle-soft: var(--st-idle-soft);
+  --color-st-running-soft: var(--st-running-soft);
+  --color-st-queued-soft: var(--st-queued-soft);
+  --color-st-steering-soft: var(--st-steering-soft);
+  --color-st-waiting-soft: var(--st-waiting-soft);
+  --color-st-paused-soft: var(--st-paused-soft);
+  --color-st-error-soft: var(--st-error-soft);
+  --shadow-1: var(--elev-1);
+  --shadow-2: var(--elev-2);
+  --shadow-3: var(--elev-3);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -117,24 +224,83 @@
 }
 
 @layer components {
-  /* Per-Agent tint; --hue is derived from the Agent ID. */
+  /* Per-Agent tint; --hue is derived from the Agent ID. Lightness/chroma come from the theme. */
   .avatar-tint {
-    background-color: oklch(0.93 0.045 var(--hue));
-    color: oklch(0.44 0.11 var(--hue));
+    background-color: oklch(var(--avatar-l) var(--avatar-c) var(--hue));
+    color: oklch(var(--avatar-fl) var(--avatar-fc) var(--hue));
   }
-  @media (prefers-color-scheme: dark) {
-    .avatar-tint {
-      background-color: oklch(0.34 0.06 var(--hue));
-      color: oklch(0.88 0.08 var(--hue));
-    }
+
+  /* Inline notices: only for states the user should act on. Neutral explanations use .info-box. */
+  .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    border-radius: var(--radius-lg);
+    padding: 0.55rem 0.75rem;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .notice > svg {
+    margin-top: 0.15em;
+    width: 1rem;
+    height: 1rem;
+    flex: none;
+  }
+  .notice-error {
+    background: var(--st-error-soft);
+    color: var(--st-error);
+  }
+  .notice-waiting {
+    background: var(--attention-soft);
+    color: var(--attention-ink);
+  }
+  .notice-paused {
+    background: var(--st-paused-soft);
+    color: var(--ink-2);
+  }
+  .notice-info {
+    background: var(--primary-soft);
+    color: var(--primary-ink);
+  }
+  .info-box {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--surface-2);
+    padding: 0.6rem 0.75rem;
+    color: var(--ink-2);
+    font-size: 13px;
+    line-height: 1.55;
   }
 
   .mention {
     border-radius: 4px;
-    padding: 0 2px;
-    background-color: color-mix(in oklch, var(--primary) 12%, transparent);
-    color: var(--primary);
+    padding: 0 3px;
+    background-color: var(--primary-soft);
+    color: var(--primary-ink);
     font-weight: 500;
+  }
+
+  /* Running dot: a soft ring that expands, instead of blinking the whole dot. */
+  .status-breathe {
+    animation: status-breathe 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) infinite;
+  }
+  @keyframes status-breathe {
+    0%,
+    100% {
+      box-shadow:
+        0 0 0 2px var(--avatar-ring),
+        0 0 0 2px color-mix(in oklab, var(--st-running) 45%, transparent);
+    }
+    50% {
+      box-shadow:
+        0 0 0 2px var(--avatar-ring),
+        0 0 0 6px transparent;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .status-breathe {
+      animation: none;
+    }
   }
 
   .typing-dots {
@@ -171,139 +337,5 @@
       animation: none;
       opacity: 0.6;
     }
-  }
-
-  /* Rendered Agent messages. Preflight strips element styles, so they are restored here. */
-  .markdown {
-    line-height: 1.7;
-    overflow-wrap: anywhere;
-  }
-  .markdown > :first-child {
-    margin-top: 0;
-  }
-  .markdown > :last-child {
-    margin-bottom: 0;
-  }
-  .markdown :where(p, ul, ol, blockquote, pre, table, hr, .md-code) {
-    margin: 0.5em 0;
-  }
-  .markdown :where(h1, h2, h3, h4, h5, h6) {
-    margin: 0.9em 0 0.4em;
-    font-weight: 600;
-    line-height: 1.4;
-  }
-  .markdown h1 {
-    font-size: 1.25em;
-  }
-  .markdown h2 {
-    font-size: 1.15em;
-  }
-  .markdown h3 {
-    font-size: 1.05em;
-  }
-  .markdown :where(ul, ol) {
-    padding-left: 1.5em;
-  }
-  .markdown ul {
-    list-style: disc;
-  }
-  .markdown ol {
-    list-style: decimal;
-  }
-  .markdown li + li {
-    margin-top: 0.15em;
-  }
-  .markdown li > :where(ul, ol) {
-    margin: 0.15em 0;
-  }
-  .markdown li::marker {
-    color: var(--muted-foreground);
-  }
-  .markdown strong {
-    font-weight: 600;
-  }
-  .markdown a {
-    color: var(--primary);
-    text-decoration: underline;
-    text-decoration-color: color-mix(in oklch, var(--primary) 40%, transparent);
-    text-underline-offset: 2px;
-  }
-  .markdown a:hover {
-    text-decoration-color: currentColor;
-  }
-  .markdown blockquote {
-    border-left: 3px solid var(--border);
-    padding-left: 0.9em;
-    color: var(--muted-foreground);
-  }
-  .markdown hr {
-    border: 0;
-    border-top: 1px solid var(--border);
-  }
-  .markdown :not(pre) > code {
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--muted);
-    padding: 0.1em 0.35em;
-    font-family: var(--font-mono);
-    font-size: 0.86em;
-  }
-  .markdown table {
-    display: block;
-    max-width: 100%;
-    overflow-x: auto;
-    border-collapse: collapse;
-    font-size: 0.93em;
-  }
-  .markdown :where(th, td) {
-    border: 1px solid var(--border);
-    padding: 0.35em 0.7em;
-    text-align: left;
-  }
-  .markdown th {
-    background: var(--muted);
-    font-weight: 600;
-  }
-  .markdown pre {
-    overflow-x: auto;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--muted);
-    padding: 0.75em 0.9em;
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    line-height: 1.6;
-    white-space: pre;
-    overflow-wrap: normal;
-  }
-  .markdown .md-code {
-    overflow: hidden;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--muted);
-  }
-  .markdown .md-code pre {
-    margin: 0;
-    border: 0;
-    border-radius: 0;
-  }
-  .md-code-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid var(--border);
-    padding: 0.2em 0.35em 0.2em 0.9em;
-    color: var(--muted-foreground);
-    font-family: var(--font-mono);
-    font-size: 11px;
-  }
-  .md-code-bar button {
-    border-radius: 4px;
-    padding: 0.15em 0.55em;
-    font-family: var(--font-sans);
-  }
-  .md-code-bar button:hover {
-    background: var(--accent);
-    color: var(--foreground);
   }
 }

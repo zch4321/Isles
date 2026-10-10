@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AgentStatus } from '@isles/contracts';
-import { agentStatusLabels, agentStatusTone } from '@/lib/format';
+import { agentStatusBadge, agentStatusLabels, agentStatusTone } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 defineProps<{ status: AgentStatus }>();
@@ -10,9 +10,8 @@ defineProps<{ status: AgentStatus }>();
   <span
     :class="
       cn(
-        'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-px text-[11px] leading-4 font-medium text-muted-foreground',
-        status === 'running' && 'border-primary/30 text-primary',
-        status === 'error' && 'border-destructive/30 text-destructive',
+        'inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-px text-[11px] leading-4 font-medium',
+        agentStatusBadge[status],
       )
     "
     ><span

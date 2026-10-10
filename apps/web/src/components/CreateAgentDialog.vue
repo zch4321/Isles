@@ -160,13 +160,13 @@ function focusName(event: Event) {
       </DialogHeader>
 
       <div
-        class="flex items-center gap-2 rounded-md border bg-muted/50 py-1.5 pr-1.5 pl-3 text-[13px]"
+        class="flex items-center gap-2 rounded-md border border-line bg-surface-2 py-1.5 pr-1.5 pl-3 text-[13px]"
       >
         <LoaderCircle
           v-if="checking && !status.data.value"
-          class="size-3.5 animate-spin text-muted-foreground"
+          class="size-3.5 animate-spin text-ink-3"
         />
-        <span v-else :class="cn('size-2 rounded-full', ready ? 'bg-success' : 'bg-destructive')" />
+        <span v-else :class="cn('size-2 rounded-full', ready ? 'bg-st-idle' : 'bg-st-error')" />
         <span class="min-w-0 flex-1 truncate">{{ statusText }}</span>
         <Button
           type="button"
@@ -180,11 +180,7 @@ function focusName(event: Event) {
           <RefreshCw :class="checking && 'animate-spin'" />
         </Button>
       </div>
-      <p
-        v-if="problem"
-        role="alert"
-        class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[13px] break-words text-destructive"
-      >
+      <p v-if="problem" role="alert" class="notice notice-error break-words">
         {{ problem }}
       </p>
 

@@ -140,7 +140,7 @@ function focusName(event: Event) {
       <p
         v-if="validationError || save.error.value"
         role="alert"
-        class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[13px] break-words text-destructive"
+        class="notice notice-error break-words"
       >
         {{ validationError || save.error.value?.message }}
       </p>

@@ -35,23 +35,44 @@ export const runStatusLabels: Record<RunStatus, string> = {
 
 /** Background utilities for the status dots on avatars, badges and runs. */
 export const agentStatusTone: Record<AgentStatus, string> = {
-  creating: 'bg-warning',
-  recovering: 'bg-warning',
-  ready: 'bg-success',
-  running: 'bg-primary',
-  stopped: 'bg-muted-foreground/50',
-  deleted: 'bg-muted-foreground/30',
-  error: 'bg-destructive',
+  creating: 'bg-st-queued',
+  recovering: 'bg-st-queued',
+  ready: 'bg-st-idle',
+  running: 'bg-st-running',
+  stopped: 'bg-st-paused',
+  deleted: 'bg-st-paused/50',
+  error: 'bg-st-error',
 };
 
 export const runStatusTone: Record<RunStatus, string> = {
-  starting: 'bg-primary',
-  running: 'bg-primary',
-  waiting: 'bg-warning',
-  completed: 'bg-success',
-  interrupted: 'bg-muted-foreground/50',
-  failed: 'bg-destructive',
-  uncertain: 'bg-warning',
+  starting: 'bg-st-queued',
+  running: 'bg-st-running',
+  waiting: 'bg-st-waiting',
+  completed: 'bg-st-idle',
+  interrupted: 'bg-st-paused',
+  failed: 'bg-st-error',
+  uncertain: 'bg-st-waiting',
+};
+
+/** Text + soft background pairs for status badges. */
+export const agentStatusBadge: Record<AgentStatus, string> = {
+  creating: 'bg-st-queued-soft text-st-queued',
+  recovering: 'bg-st-queued-soft text-st-queued',
+  ready: 'bg-st-idle-soft text-st-idle',
+  running: 'bg-st-running-soft text-st-running',
+  stopped: 'bg-st-paused-soft text-ink-2',
+  deleted: 'bg-st-paused-soft text-ink-3',
+  error: 'bg-st-error-soft text-st-error',
+};
+
+export const runStatusBadge: Record<RunStatus, string> = {
+  starting: 'bg-st-queued-soft text-st-queued',
+  running: 'bg-st-running-soft text-st-running',
+  waiting: 'bg-attention-soft text-attention-ink',
+  completed: 'bg-st-idle-soft text-st-idle',
+  interrupted: 'bg-st-paused-soft text-ink-2',
+  failed: 'bg-st-error-soft text-st-error',
+  uncertain: 'bg-attention-soft text-attention-ink',
 };
 
 export const isActiveRun = (status: RunStatus) =>

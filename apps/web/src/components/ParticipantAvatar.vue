@@ -21,7 +21,7 @@ const initial = computed(() => {
   const base = props.name.replace(/^(codex|kimi(code)?|claude(code)?)[-_\s]+/i, '') || props.name;
   return ([...base][0] ?? '?').toUpperCase();
 });
-const sizes = { sm: 'size-7 text-xs', md: 'size-8 text-[13px]', lg: 'size-12 rounded-lg text-lg' };
+const sizes = { sm: 'size-7 text-xs', md: 'size-8 text-[13px]', lg: 'size-12 text-lg' };
 </script>
 
 <template>
@@ -29,9 +29,10 @@ const sizes = { sm: 'size-7 text-xs', md: 'size-8 text-[13px]', lg: 'size-12 rou
     aria-hidden="true"
     :class="
       cn(
-        'relative inline-flex shrink-0 items-center justify-center rounded-md font-semibold select-none',
+        'relative inline-flex shrink-0 items-center justify-center font-semibold tracking-tight select-none',
         sizes[size],
-        hue === undefined ? 'bg-muted text-muted-foreground' : 'avatar-tint',
+        // Agents are rounded squares with their own tint; the human is a dark circle.
+        hue === undefined ? 'rounded-full bg-ink text-bg' : 'avatar-tint rounded-[30%]',
       )
     "
     :style="hue === undefined ? undefined : { '--hue': hue }"
@@ -43,7 +44,7 @@ const sizes = { sm: 'size-7 text-xs', md: 'size-8 text-[13px]', lg: 'size-12 rou
         cn(
           'absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full ring-2 ring-(--avatar-ring)',
           agentStatusTone[status],
-          status === 'running' && 'animate-pulse',
+          status === 'running' && 'status-breathe',
         )
       "
     />

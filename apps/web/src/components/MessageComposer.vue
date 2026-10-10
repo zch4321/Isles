@@ -4,6 +4,7 @@ import { ArrowUp, AtSign, LoaderCircle } from '@lucide/vue';
 import { computed, nextTick, onMounted, ref, useId, watch } from 'vue';
 import ParticipantAvatar from './ParticipantAvatar.vue';
 import { Button } from '@/components/ui/button';
+import { agentStatusLabels, agentStatusTone } from '@/lib/format';
 import { mentionBoundary, mentionQuery } from '@/lib/mentions';
 import { cn } from '@/lib/utils';
 
@@ -105,7 +106,7 @@ function onKeydown(event: KeyboardEvent) {
 
 <template>
   <form
-    class="relative rounded-lg border border-input bg-background shadow-xs transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/20 dark:bg-input/20"
+    class="relative rounded-xl border border-line-strong bg-surface shadow-1 transition-[border-color,box-shadow] focus-within:border-(--line-focus) focus-within:ring-3 focus-within:ring-ring/25"
     @submit.prevent="emit('submit')"
   >
     <ul
@@ -113,7 +114,7 @@ function onKeydown(event: KeyboardEvent) {
       :id="listId"
       role="listbox"
       aria-label="提及成员"
-      class="absolute bottom-full left-2 z-10 mb-1.5 w-64 max-w-[calc(100%-1rem)] rounded-md border bg-popover p-1 text-popover-foreground shadow-md [--avatar-ring:var(--popover)]"
+      class="absolute bottom-full left-2 z-10 mb-1.5 w-72 max-w-[calc(100%-1rem)] rounded-xl border border-line bg-popover p-1 text-popover-foreground shadow-3 [--avatar-ring:var(--popover)]"
     >
       <li
         v-for="(member, index) in options"
@@ -123,16 +124,23 @@ function onKeydown(event: KeyboardEvent) {
         :aria-selected="index === active"
         :class="
           cn(
-            'flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-[13px]',
-            index === active && 'bg-accent text-accent-foreground',
+            'flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px]',
+            index === active && 'bg-surface-hover',
           )
         "
         @mousedown.prevent="pick(member)"
         @mousemove="active = index"
       >
         <ParticipantAvatar :name="member.name" :identity="member.id" size="sm" />
-        <span class="min-w-0 flex-1 truncate font-medium">{{ member.name }}</span>
-        <span class="shrink-0 truncate text-xs text-muted-foreground">{{ member.model }}</span>
+        <span class="min-w-0 flex-1">
+          <span class="block truncate font-medium">{{ member.name }}</span>
+          <span class="block truncate font-mono text-[11px] text-ink-3">{{ member.model }}</span>
+        </span>
+        <span class="flex shrink-0 items-center gap-1.5 text-xs text-ink-3">
+          <span :class="cn('size-1.5 rounded-full', agentStatusTone[member.status])" />{{
+            agentStatusLabels[member.status]
+          }}
+        </span>
       </li>
     </ul>
     <textarea
@@ -145,7 +153,7 @@ function onKeydown(event: KeyboardEvent) {
       :aria-controls="options.length ? listId : undefined"
       :aria-activedescendant="options.length ? `${listId}-${active}` : undefined"
       :placeholder="placeholder"
-      class="block max-h-60 w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-base leading-relaxed outline-none placeholder:text-muted-foreground md:text-sm"
+      class="block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-base leading-relaxed outline-none placeholder:text-ink-4 md:text-[15px]"
       @keydown="onKeydown"
       @input="track"
       @click="track"
@@ -160,14 +168,16 @@ function onKeydown(event: KeyboardEvent) {
         size="icon-sm"
         aria-label="提及成员"
         title="提及成员"
-        class="text-muted-foreground"
+        class="text-ink-3"
         @mousedown.prevent
         @click="startMention"
       >
         <AtSign />
       </Button>
-      <span class="pl-1.5 text-[11px] text-muted-foreground max-sm:hidden"
-        >Enter 发送 · Shift + Enter 换行</span
+      <span class="pl-1.5 text-[11px] text-ink-3 max-sm:hidden"
+        >Enter 发送 · Shift + Enter 换行<template v-if="members.length">
+          · 消息对全体成员可见</template
+        ></span
       >
       <Button
         type="submit"

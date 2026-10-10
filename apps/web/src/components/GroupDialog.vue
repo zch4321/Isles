@@ -81,11 +81,11 @@ function focusFirst(event: Event) {
           />
         </div>
         <fieldset class="grid gap-2">
-          <legend class="mb-2 text-[13px] font-medium">成员</legend>
+          <legend class="mb-2 text-sm font-medium">成员</legend>
           <AgentChecklist v-if="candidates.length" v-model="selected" :agents="candidates" />
           <p
             v-else
-            class="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground"
+            class="rounded-md border border-dashed border-line px-3 py-4 text-center text-xs text-ink-3"
           >
             {{ channel ? '所有 Agent 都已在群中。' : '还没有 Agent，请先新建 Agent。' }}
           </p>

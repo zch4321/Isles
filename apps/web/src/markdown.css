@@ -1,0 +1,136 @@
+/* Rendered Agent messages. Preflight strips element styles, so they are restored here. */
+@layer components {
+  .markdown {
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+  }
+  .markdown > :first-child {
+    margin-top: 0;
+  }
+  .markdown > :last-child {
+    margin-bottom: 0;
+  }
+  .markdown :where(p, ul, ol, blockquote, pre, table, hr, .md-code) {
+    margin: 0.55em 0;
+  }
+  .markdown :where(h1, h2, h3, h4, h5, h6) {
+    margin: 1em 0 0.35em;
+    font-weight: 620;
+    line-height: 1.4;
+  }
+  .markdown h1 {
+    font-size: 1.25em;
+  }
+  .markdown h2 {
+    font-size: 1.15em;
+  }
+  .markdown h3 {
+    font-size: 1.05em;
+  }
+  .markdown :where(ul, ol) {
+    padding-left: 1.4em;
+  }
+  .markdown ul {
+    list-style: disc;
+  }
+  .markdown ol {
+    list-style: decimal;
+  }
+  .markdown li + li {
+    margin-top: 0.2em;
+  }
+  .markdown li > :where(ul, ol) {
+    margin: 0.2em 0;
+  }
+  .markdown li::marker {
+    color: var(--ink-3);
+  }
+  .markdown strong {
+    font-weight: 620;
+  }
+  .markdown a {
+    color: var(--primary-ink);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in oklch, var(--primary) 40%, transparent);
+    text-underline-offset: 2px;
+  }
+  .markdown a:hover {
+    text-decoration-color: currentColor;
+  }
+  /* Quotes use a thin blue rule and quiet text; they carry no background. */
+  .markdown blockquote {
+    border-left: 2px solid var(--blue-300);
+    padding-left: 0.9em;
+    color: var(--ink-3);
+  }
+  .markdown hr {
+    border: 0;
+    border-top: 1px solid var(--line);
+  }
+  .markdown :not(pre) > code {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--surface-2);
+    padding: 0.1em 0.35em;
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+  }
+  .markdown table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    font-size: 0.93em;
+  }
+  .markdown :where(th, td) {
+    border: 1px solid var(--line);
+    padding: 0.4em 0.75em;
+    text-align: left;
+  }
+  .markdown th {
+    background: var(--surface-2);
+    font-weight: 620;
+  }
+  .markdown pre {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--surface-2);
+    padding: 0.8em 1em;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.6;
+    white-space: pre;
+    overflow-wrap: normal;
+  }
+  .markdown .md-code {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--surface-2);
+  }
+  .markdown .md-code pre {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+  .md-code-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--line);
+    padding: 0.25em 0.35em 0.25em 1em;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  .md-code-bar button {
+    border-radius: 4px;
+    padding: 0.15em 0.55em;
+    font-family: var(--font-sans);
+  }
+  .md-code-bar button:hover {
+    background: var(--surface-hover);
+    color: var(--ink);
+  }
+}

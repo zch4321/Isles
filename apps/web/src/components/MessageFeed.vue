@@ -21,7 +21,7 @@ const props = defineProps<{
   working: Agent[];
   inspectorOpen: boolean;
 }>();
-defineEmits<{ openInspector: [] }>();
+const emit = defineEmits<{ openInspector: [] }>();
 
 const GROUP_WINDOW = 5 * 60_000;
 
@@ -178,7 +178,7 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
           <Button
             variant="ghost"
             size="xs"
-            class="text-muted-foreground"
+            class="text-ink-3"
             :disabled="loadingOlder"
             @click="older"
           >
@@ -192,7 +192,7 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
         >
           <ParticipantAvatar :name="agent.name" :identity="agent.id" size="lg" />
           <h2 class="mt-4 text-base font-semibold">与 {{ agent.name }} 开始对话</h2>
-          <p class="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
+          <p class="mt-1.5 text-[13px] leading-relaxed text-ink-3">
             {{ agent.name }}
             拥有固定的原生会话、独立的上下文和工作目录。正式回复显示在这里，执行过程可以在 Agent
             详情中查看。
@@ -204,7 +204,7 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
         >
           <GroupAvatar :identity="channel.id" size="lg" />
           <h2 class="mt-4 text-base font-semibold">{{ channel.name }}</h2>
-          <p class="mt-1.5 max-w-md text-[13px] leading-relaxed text-muted-foreground">
+          <p class="mt-1.5 max-w-md text-[13px] leading-relaxed text-ink-3">
             群里的每条消息都对全体成员可见，并唤醒其他成员参与讨论。用 @ 标明你特意对谁说，与单个
             Agent 的交流可以通过私聊进行。
           </p>
@@ -213,16 +213,16 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
         <template v-for="entry in entries" :key="entry.key">
           <div
             v-if="entry.kind === 'date'"
-            class="mt-4 mb-1 flex items-center gap-3 text-[11px] font-medium text-muted-foreground"
+            class="mt-5 mb-2 flex items-center gap-3 text-xs text-ink-3"
           >
-            <span class="h-px flex-1 bg-border" />{{ entry.label
-            }}<span class="h-px flex-1 bg-border" />
+            <span class="h-px flex-1 bg-line" />{{ entry.label
+            }}<span class="h-px flex-1 bg-line" />
           </div>
           <p
             v-else-if="entry.kind === 'system'"
             :id="`message-${messageKey(entry.message)}`"
             data-sender="system"
-            class="mx-auto my-2 max-w-md text-center text-xs leading-relaxed text-balance text-muted-foreground"
+            class="mx-auto my-2 max-w-md text-center text-xs leading-relaxed text-balance text-ink-3"
           >
             {{ entry.message.body }}
             <time :datetime="entry.message.createdAt" class="ml-1 tabular-nums opacity-70">{{
@@ -240,35 +240,39 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
             :delivery="deliveryOf(entry.message)"
             :highlighted="highlighted === messageKey(entry.message)"
             @jump="jumpTo"
+            @inspect="emit('openInspector')"
           />
         </template>
 
-        <div v-if="working.length" class="mt-3 flex items-center gap-3" aria-live="polite">
+        <div
+          v-if="working.length"
+          class="mt-3 flex items-center gap-3 rounded-lg border border-line bg-surface-2 px-3 py-2"
+          aria-live="polite"
+        >
           <div class="flex -space-x-2">
             <ParticipantAvatar
               v-for="member in working.slice(0, 3)"
               :key="member.id"
               :name="member.name"
               :identity="member.id"
-              class="ring-2 ring-background"
+              size="sm"
+              class="ring-2 ring-surface-2"
             />
           </div>
-          <div
-            class="flex min-w-0 flex-wrap items-center gap-x-2 text-[13px] text-muted-foreground"
-          >
-            <span class="font-semibold text-foreground">{{ workingNames }}</span>
-            <span class="inline-flex items-center gap-1.5"
+          <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 text-[13px] text-ink-2">
+            <span class="font-medium text-ink">{{ workingNames }}</span>
+            <span class="inline-flex items-center gap-1.5 text-st-running"
               >正在处理<span class="typing-dots" aria-hidden="true"><i /><i /><i /></span
             ></span>
-            <button
-              v-if="!inspectorOpen"
-              type="button"
-              class="text-primary hover:underline"
-              @click="$emit('openInspector')"
-            >
-              查看执行过程
-            </button>
           </div>
+          <button
+            v-if="!inspectorOpen"
+            type="button"
+            class="shrink-0 text-[13px] text-primary-ink hover:underline"
+            @click="$emit('openInspector')"
+          >
+            查看执行过程
+          </button>
         </div>
       </div>
     </div>
@@ -276,7 +280,7 @@ const workingNames = computed(() => props.working.map((a) => a.name).join('、')
       v-if="!atBottom"
       variant="outline"
       size="icon-sm"
-      class="absolute right-4 bottom-3 rounded-full bg-background shadow-md"
+      class="absolute right-4 bottom-3 rounded-full bg-surface shadow-2"
       aria-label="滚动到最新消息"
       @click="scrollToBottom"
     >

@@ -67,14 +67,14 @@ const groupDialog = dialogOpen('group');
 </script>
 
 <template>
-  <div class="flex h-dvh overflow-hidden bg-background text-sm text-foreground">
+  <div class="flex h-dvh overflow-hidden bg-bg text-sm text-ink">
     <AppSidebar
-      :class="cn('w-full shrink-0 md:w-72', pane === 'chat' && 'max-md:hidden')"
+      :class="cn('w-full shrink-0 md:w-[280px]', pane === 'chat' && 'max-md:hidden')"
       :selected-id="selected"
       @select="choose"
       @create="creating = $event"
     />
-    <main :class="cn('min-w-0 flex-1', pane === 'list' && 'max-md:hidden')">
+    <main :class="cn('min-h-0 min-w-0 flex-1', pane === 'list' && 'max-md:hidden')">
       <ConversationView
         v-if="current"
         :key="current.id"

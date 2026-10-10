@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { formatDateTime, isActiveRun } from '@/lib/format';
+import { cn } from '@/lib/utils';
 
 const props = defineProps<{ agent: Agent }>();
 const open = defineModel<boolean>('open', { required: true });
@@ -76,11 +77,11 @@ function startConfirmation() {
           {{ agent.name }} 的私聊和所有群聊共用此上下文。
         </DialogDescription>
       </DialogHeader>
-      <div v-if="detail.isPending.value" class="flex items-center gap-2 text-muted-foreground">
+      <div v-if="detail.isPending.value" class="flex items-center gap-2 text-ink-3">
         <LoaderCircle class="size-4 animate-spin" />正在加载上下文…
       </div>
       <div v-else-if="detail.isError.value" class="space-y-2">
-        <p role="alert" class="text-[13px] break-words text-destructive">
+        <p role="alert" class="text-[13px] break-words text-st-error">
           {{ detail.error.value?.message }}
         </p>
         <Button variant="outline" size="sm" @click="detail.refetch()"><RefreshCw />重试</Button>
@@ -93,9 +94,16 @@ function startConfirmation() {
               }}<template v-if="usage.maxTokens !== null">
                 / {{ number(usage.maxTokens) }}</template
               >
-              <span class="text-xs font-normal text-muted-foreground"> tokens</span>
+              <span class="text-xs font-normal text-ink-3"> tokens</span>
             </p>
-            <p v-if="percentage !== null" class="text-sm tabular-nums">{{ percentage }}%</p>
+            <p
+              v-if="percentage !== null"
+              :class="
+                cn('text-sm tabular-nums', percentage >= 80 ? 'text-attention-ink' : 'text-ink-2')
+              "
+            >
+              {{ percentage }}%
+            </p>
           </div>
           <div
             v-if="percentage !== null"
@@ -105,36 +113,34 @@ function startConfirmation() {
             :aria-valuemin="0"
             :aria-valuemax="usage.maxTokens!"
             :aria-valuetext="`${percentage}%`"
-            class="h-2 overflow-hidden rounded-full bg-muted"
+            class="h-2 overflow-hidden rounded-full bg-surface-active"
           >
             <div
-              class="h-full rounded-full bg-primary"
+              :class="cn('h-full rounded-full', percentage >= 80 ? 'bg-attention' : 'bg-primary')"
               :style="{ width: `${Math.min(percentage, 100)}%` }"
             />
           </div>
-          <p v-else class="text-xs text-muted-foreground">等待窗口大小更新</p>
-          <p class="text-xs text-muted-foreground">
+          <p v-else class="text-xs text-ink-3">等待窗口大小更新</p>
+          <p class="text-xs text-ink-3">
             <span v-if="usage.estimated">估算 · </span>更新于 {{ formatDateTime(usage.updatedAt) }}
           </p>
         </template>
-        <p v-else class="rounded-md border bg-muted/50 px-3 py-3 text-[13px] text-muted-foreground">
-          等待用量更新
-        </p>
+        <p v-else class="info-box">等待用量更新</p>
       </section>
-      <section v-if="confirming" class="space-y-2 rounded-md border bg-muted/50 px-3 py-3">
+      <section v-if="confirming" class="info-box space-y-1">
         <h3 class="text-[13px] font-semibold">新建会话</h3>
         <p class="text-[13px] leading-relaxed">
           新会话将从新的上下文开始。聊天记录、群成员和工作文件保留。
         </p>
       </section>
-      <p v-else class="text-xs leading-relaxed text-muted-foreground">
+      <p v-else class="text-xs leading-relaxed text-ink-3">
         新建会话可重新开始上下文，保留聊天记录、群成员和工作文件。
       </p>
-      <p v-if="unavailable" class="text-xs leading-relaxed text-muted-foreground">
+      <p v-if="unavailable" class="text-xs leading-relaxed text-ink-3">
         {{ unavailable }}
       </p>
       <p v-if="completed" role="status" class="text-[13px]">新会话已建立。</p>
-      <p v-if="create.error.value" role="alert" class="text-[13px] break-words text-destructive">
+      <p v-if="create.error.value" role="alert" class="text-[13px] break-words text-st-error">
         {{ create.error.value.message }}
       </p>
       <DialogFooter>
