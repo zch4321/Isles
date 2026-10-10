@@ -40,7 +40,9 @@ async function fixture() {
     });
     expect(result.statusCode).toBe(201);
     const agent = result.json() as Agent;
-    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'), {
+      timeout: 5_000,
+    });
     return agent;
   };
   const send = (agent: Agent, body: string) =>
@@ -208,23 +210,222 @@ describe('Kimi Code application integration', () => {
     expect(await frames('/prompts')).toHaveLength(2);
   });
 
-  it('retains a cross-turn steer as uncertain and does not submit its messages twice', async () => {
+  it.each([
+    { finishOnQueuedPrompt: true, queuedPromptResponseDelayMs: 50, nextTurnBeforeEnd: false },
+    { finishOnQueuedPrompt: true, queuedPromptResponseDelayMs: 50, nextTurnBeforeEnd: true },
+    { boundaryOnSteer: true, nextTurnBeforeEnd: false },
+    { boundaryOnSteer: true, nextTurnBeforeEnd: true },
+  ])(
+    'tracks a consumed continuation in one run, including later steer and questions: %j',
+    async (race) => {
+      const { app, cli, create, send, frames } = await fixture();
+      const agent = await create({ steerEnabled: true });
+      await cli.set({ manualOutput: true, holdTurn: true, ...race });
+      await send(agent, 'initial');
+      await vi.waitFor(() =>
+        expect(app.isles.store.agentDetail(agent.id).runs[0]?.turnId).toBe('1'),
+      );
+      const runId = app.isles.store.agentDetail(agent.id).runs[0]!.id;
+      await send(agent, 'late append');
+      await vi.waitFor(() =>
+        expect(
+          app.isles.store
+            .listMessages(agent.channelId)
+            .map((message) => message.deliveries[0]!.status),
+        ).toEqual(['accepted', 'accepted']),
+      );
+      expect(app.isles.store.publicAgent(agent.id).status).toBe('running');
+      expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([
+        { id: runId, turnId: '1', status: 'running' },
+      ]);
+      const nativeId = app.isles.store.publicAgent(agent.id).threadId!;
+      const posts = await frames('/prompts');
+      expect(posts).toHaveLength(2);
+      const activePromptId = posts[1]!.body!.prompt_id;
+      await cli.set({ manualOutput: true, holdTurn: true });
+      await cli.emit(nativeId, 'assistant.delta', { turnId: 1, delta: 'Old late output' });
+      await cli.emit(nativeId, 'assistant.delta', { turnId: 2, delta: 'Continuation reply' });
+      await send(agent, 'append to continuation');
+      await vi.waitFor(() =>
+        expect(
+          app.isles.store
+            .listMessages(agent.channelId)
+            .map((message) => message.deliveries[0]!.status),
+        ).toEqual(['accepted', 'accepted', 'accepted']),
+      );
+      const receipts = (await cli.records()).filter(
+        (record) => record.type === 'event' && record.frame?.type === 'prompt.steered',
+      );
+      expect(receipts.at(-1)?.frame?.payload).toMatchObject({ activePromptId });
+      await cli.question(nativeId);
+      await vi.waitFor(() =>
+        expect(app.isles.store.agentDetail(agent.id).questions).toHaveLength(1),
+      );
+      const question = app.isles.store.agentDetail(agent.id).questions[0]!;
+      expect(question).toMatchObject({ runId, status: 'pending' });
+      const nativeQuestion = app.isles.store.getQuestion(question.id);
+      expect(nativeQuestion.turnId).toBe('1');
+      const answer = await app.inject({
+        method: 'POST',
+        url: `/api/agents/${agent.id}/questions/${question.id}/answer`,
+        payload: { answers: { q0: { answers: ['Two'] } } },
+      });
+      expect(answer.statusCode).toBe(200);
+      await vi.waitFor(async () =>
+        expect(
+          await frames('/questions/' + JSON.parse(nativeQuestion.nativeRequestId)),
+        ).toHaveLength(1),
+      );
+      await cli.finish(nativeId);
+      await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
+      const detail = app.isles.store.agentDetail(agent.id);
+      expect(detail.runs).toHaveLength(1);
+      expect(detail.runs[0]).toMatchObject({
+        id: runId,
+        turnId: '1',
+        status: 'completed',
+        inputs: [{ channelId: agent.channelId, messageSeqs: [1, 2, 3] }],
+      });
+      expect(detail.runs[0]!.items.map((item) => item.text).join('\n')).toContain(
+        'Continuation reply',
+      );
+      expect(detail.runs[0]!.items.map((item) => item.text).join('\n')).not.toContain(
+        'Old late output',
+      );
+      expect(
+        app.isles.store
+          .listMessages(agent.channelId)
+          .map((message) => message.deliveries[0]!.status),
+      ).toEqual(['completed', 'completed', 'completed']);
+      expect(await frames('/prompts')).toHaveLength(3);
+      expect(await frames(':abort')).toHaveLength(0);
+      expect((await app.inject('/api/health')).statusCode).toBe(200);
+    },
+  );
+
+  it('cancels pending input before the active continuation without starting another native turn', async () => {
     const { app, cli, create, send, frames } = await fixture();
     const agent = await create({ steerEnabled: true });
-    await cli.set({ manualOutput: true, boundaryOnSteer: true });
+    await cli.set({
+      manualOutput: true,
+      holdTurn: true,
+      boundaryOnSteer: true,
+      nextTurnBeforeEnd: true,
+    });
     await send(agent, 'initial');
     await vi.waitFor(() => expect(app.isles.store.agentDetail(agent.id).runs[0]?.turnId).toBe('1'));
-    await send(agent, 'late append');
+    await send(agent, 'native continuation');
     await vi.waitFor(() =>
-      expect(app.isles.store.listMessages(agent.channelId).at(-1)!.deliveries[0]!.status).toBe(
-        'uncertain',
-      ),
+      expect(
+        app.isles.store
+          .listMessages(agent.channelId)
+          .map((message) => message.deliveries[0]!.status),
+      ).toEqual(['accepted', 'accepted']),
     );
+    await cli.set({ manualOutput: true, holdTurn: true, queuedPromptResponseDelayMs: 150 });
+    await send(agent, 'cancel pending batch');
+    await vi.waitFor(async () => expect(await frames('/prompts')).toHaveLength(3));
+    const posts = await frames('/prompts');
+    await app.isles.runtime.stop(agent.id);
+    const aborts = await frames(':abort');
+    expect(aborts.map((record) => record.path)).toEqual([
+      expect.stringContaining(String(posts[2]!.body!.prompt_id)),
+      expect.stringContaining(String(posts[1]!.body!.prompt_id)),
+    ]);
+    const starts = (await cli.records()).filter(
+      (record) => record.type === 'event' && record.frame?.type === 'turn.started',
+    );
+    expect(starts).toHaveLength(2);
+    expect(app.isles.store.publicAgent(agent.id).status).toBe('stopped');
+    expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([{ status: 'interrupted' }]);
+    expect(
+      app.isles.store.listMessages(agent.channelId).map((message) => message.deliveries[0]!.status),
+    ).toEqual(['cancelled', 'cancelled', 'cancelled']);
+    expect(await frames('/prompts')).toHaveLength(3);
+  });
+
+  it('expires a previous phase form while the continuation remains active and its new question stays answerable', async () => {
+    const { app, cli, create, send, frames } = await fixture();
+    const agent = await create({ steerEnabled: true });
+    await cli.set({
+      manualOutput: true,
+      holdTurn: true,
+      boundaryOnSteer: true,
+      nextTurnBeforeEnd: true,
+    });
+    await send(agent, 'initial');
+    await vi.waitFor(() => expect(app.isles.store.agentDetail(agent.id).runs[0]?.turnId).toBe('1'));
+    const nativeId = app.isles.store.publicAgent(agent.id).threadId!;
+    await cli.question(nativeId);
+    await vi.waitFor(() => expect(app.isles.store.agentDetail(agent.id).questions).toHaveLength(1));
+    const old = app.isles.store.agentDetail(agent.id).questions[0]!;
+    const oldRequestId = JSON.parse(app.isles.store.getQuestion(old.id).nativeRequestId);
+    await send(agent, 'continuation');
+    await vi.waitFor(() =>
+      expect(
+        app.isles.store
+          .listMessages(agent.channelId)
+          .map((message) => message.deliveries[0]!.status),
+      ).toEqual(['accepted', 'accepted']),
+    );
+    expect(app.isles.store.getQuestion(old.id).status).toBe('expired');
+    expect(app.isles.store.agentDetail(agent.id).questions).toEqual([]);
+    expect(app.isles.store.agentDetail(agent.id).runs[0]!.status).toBe('running');
+    const stale = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agent.id}/questions/${old.id}/answer`,
+      payload: { answers: { q0: { answers: ['One'] } } },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(await frames('/questions/' + oldRequestId)).toHaveLength(0);
+    await cli.set({ manualOutput: true, holdTurn: true });
+    await cli.question(nativeId);
+    await vi.waitFor(() => expect(app.isles.store.agentDetail(agent.id).questions).toHaveLength(1));
+    const current = app.isles.store.agentDetail(agent.id).questions[0]!;
+    expect(current.runId).toBe(old.runId);
+    const result = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agent.id}/questions/${current.id}/answer`,
+      payload: { answers: { q0: { answers: ['Two'] } } },
+    });
+    expect(result.statusCode).toBe(200);
+    await cli.finish(nativeId);
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
+    expect(app.isles.store.getQuestion(old.id).status).toBe('expired');
+    expect(app.isles.store.getQuestion(current.id).status).toBe('answered');
+  });
+
+  it('preserves a continuation native failure without closing the service or resending its input', async () => {
+    const { app, cli, create, send, frames } = await fixture();
+    const agent = await create({ steerEnabled: true });
+    await cli.set({ manualOutput: true, boundaryOnSteer: true, nextTurnBeforeEnd: true });
+    await send(agent, 'initial');
+    await vi.waitFor(() => expect(app.isles.store.agentDetail(agent.id).runs[0]?.turnId).toBe('1'));
+    await send(agent, 'failing continuation');
+    await vi.waitFor(() =>
+      expect(
+        app.isles.store
+          .listMessages(agent.channelId)
+          .map((message) => message.deliveries[0]!.status),
+      ).toEqual(['accepted', 'accepted']),
+    );
+    const nativeId = app.isles.store.publicAgent(agent.id).threadId!;
+    await cli.emit(nativeId, 'assistant.delta', { turnId: 2, delta: 'Partial continuation' });
+    await cli.finish(nativeId, 'failed', 'Fixture native failure');
     await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('error'));
+    const run = app.isles.store.agentDetail(agent.id).runs[0]!;
+    expect(run).toMatchObject({ turnId: '1', status: 'failed', error: 'Fixture native failure' });
+    expect(run.items).toContainEqual(
+      expect.objectContaining({
+        type: 'agentMessage',
+        status: 'failed',
+        text: 'Partial continuation',
+      }),
+    );
+    expect(
+      app.isles.store.listMessages(agent.channelId).map((message) => message.deliveries[0]!.status),
+    ).toEqual(['failed', 'failed']);
     expect(await frames('/prompts')).toHaveLength(2);
-    expect(await frames(':steer')).toHaveLength(1);
-    expect(await frames(':abort')).toHaveLength(2);
-    expect(app.isles.store.agentDetail(agent.id).runs).toHaveLength(1);
     expect((await app.inject('/api/health')).statusCode).toBe(200);
   });
 

@@ -604,6 +604,44 @@ describe('runtime with independent semantic harness adapters', () => {
     },
   );
 
+  it('expires only the matching native interaction while keeping other pending and answered forms intact', async () => {
+    const { app, a, create, send, delivery } = await fixture();
+    const agent = await create(a);
+    send(agent, 'Native interaction release');
+    await expect.poll(() => delivery(agent)).toEqual(['accepted']);
+    const session = a.latest(agent.id);
+    session.question('expired-request');
+    session.question('answered-request');
+    const questions = app.isles.store.agentDetail(agent.id).questions;
+    const expire = (requestId: string, turnId = session.turnId, sessionId = nativeId) =>
+      session.emit({
+        type: 'question_expired',
+        sessionId,
+        turnId,
+        requestId,
+      });
+    expire('expired-request', 'obsolete-turn');
+    expire('expired-request', session.turnId, 'obsolete-session');
+    expect(app.isles.store.agentDetail(agent.id).questions).toHaveLength(2);
+    expect(app.isles.store.agentDetail(agent.id).runs[0]!.status).toBe('waiting');
+    expire('expired-request');
+    expect(app.isles.store.getQuestion(questions[0]!.id).status).toBe('expired');
+    expect(app.isles.store.agentDetail(agent.id).questions).toHaveLength(1);
+    expect(app.isles.store.agentDetail(agent.id).runs[0]!.status).toBe('waiting');
+    app.isles.runtime.answer(agent.id, questions[1]!.id, {
+      answers: { choice: { answers: ['Continue'] } },
+    });
+    const cursor = app.isles.store.cursor();
+    expire('answered-request');
+    expire('expired-request');
+    expect(app.isles.store.cursor()).toBe(cursor);
+    expect(app.isles.store.getQuestion(questions[1]!.id).status).toBe('answered');
+    expect(app.isles.store.agentDetail(agent.id).runs[0]!.status).toBe('running');
+    expect(app.isles.store.agentDetail(agent.id).questions).toEqual([]);
+    expect(session.answers).toHaveLength(1);
+    session.complete();
+  });
+
   it('stops both adapters by closing, uses optional interruption, and persists uncertain active work on shutdown', async () => {
     const { app, a, b, create, send, delivery, open } = await fixture();
     const first = await create(a);

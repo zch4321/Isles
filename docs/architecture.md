@@ -486,9 +486,9 @@ Agent 记录创建时所用的 Codex 目录；当前目录与之不同时拒绝�
 
 每个 Agent 的 Isles MCP 入口写入其工作目录下 `.kimi-code/mcp.json` 的 `isles` 项，token 使用 `bearerTokenEnvVar` 从独立进程环境读取；其他工作区 MCP 项保留，用户全局配置保持原生所有权。adapter 通过原生 workspace trust 接口加载该工作区 MCP。规则继续由 Kimi 原生发现 `AGENTS.md`，不额外拼接到用户消息中。
 
-原生主 turn 的开始和结束控制 Isles run；子代理思考、工具及生命周期仅补充执行详情，子代理结束不会结束主 run，子代理用量不会覆盖主会话。上下文占用来自正式 snapshot 的原生报告；接口未公开测量标识，按估算展示，窗口来自原生模型目录。
+原生主阶段的开始和结束控制 Isles run；一个 run 可以包含连续多个原生阶段，公开 turn ID 保持最初阶段 ID。adapter 保存各阶段的原生 ID、prompt 归属与终态，接受下一阶段先开始、上一阶段后结束的事件顺序，待全部阶段、输入及投递操作结算后发布一次公开完成事件。子代理思考、工具及生命周期仅补充执行详情，子代理结束不会结束主 run，子代理用量不会覆盖主会话。上下文占用来自独立状态事件和合并后的轻量 status 查询；接口未公开测量标识，按估算展示，窗口来自原生模型目录。
 
-输入使用稳定的 `prompt_id`。steer 先提交原生排队输入，再追加到活动 turn；原生接口没有 `expectedTurnId` 字段，adapter 核对投递前后目标与实际消费归属，跨执行边界的结果保留待核对。停止和恢复处理遗留的自有未消费输入，失败与待核对消息保持原投递记录。完整协议与验收见 [Kimi Web 接入](kimi-web-acceptance.md)，此前 ACP 的验收记录保留为历史事实。
+输入使用稳定的 `prompt_id`。steer 先提交原生排队输入，再追加到当前原生阶段；原生接口没有 `expectedTurnId` 字段，adapter 以 `prompt.steered` 或自有批次的 `turn.started` 确认实际消费。同阶段追加和自动进入后续阶段都计入原 run，入队后的 `40402` 或状态变化等待回执，已消费批次不重投。输出、偏移及工具按阶段区分；`question_expired` 使 Runtime 同步过期原生阶段释放的问题与审批，保留已回答记录，后续阶段继续使用原 run 的问题关联。停止等待投递操作结束，先取消未消费输入，再取消当前原生 prompt。失败、断连和缺失回执保留原有待核对语义。完整协议与验收见 [Kimi Web 接入](kimi-web-acceptance.md)，此前 ACP 的验收记录保留为历史事实。
 
 ### 9.4 OpenCode 原生 v2 adapter
 

@@ -1302,6 +1302,36 @@ export class Store {
       this.event('question', { agentId: q.agentId }, { questionId: id });
     });
   }
+  /** A native phase can release an interaction while its public execution continues. */
+  expireQuestion(id: string) {
+    const question = this.getQuestion(id);
+    if (question.status !== 'pending') return;
+    this.change(() => {
+      this.db.update(questions).set({ status: 'expired' }).where(eq(questions.id, id)).run();
+      const pending = this.db
+        .select({ id: questions.id })
+        .from(questions)
+        .where(and(eq(questions.runId, question.runId), eq(questions.status, 'pending')))
+        .limit(1)
+        .get();
+      if (!pending) {
+        const changed = this.db
+          .update(runs)
+          .set({ status: 'running' })
+          .where(
+            and(
+              eq(runs.id, question.runId),
+              eq(runs.status, 'waiting'),
+              sql`${runs.finishedAt} is null`,
+            ),
+          )
+          .returning({ id: runs.id })
+          .get();
+        if (changed) this.event('run', { agentId: question.agentId }, { runId: question.runId });
+      }
+      this.event('question', { agentId: question.agentId }, { questionId: id, status: 'expired' });
+    });
+  }
   private pendingQuestions(agentIds: string[]): UserQuestion[] {
     if (!agentIds.length) return [];
     return this.db

@@ -24,6 +24,12 @@ export interface HarnessCatalog {
 
 export type HarnessEvent =
   | { type: 'context_usage'; sessionId: string; usage: HarnessContextUsage | null }
+  | {
+      type: 'question_expired';
+      sessionId: string;
+      turnId: string;
+      requestId: HarnessRequestId;
+    }
   | { type: 'turn_started'; sessionId: string; turnId: string }
   | {
       type: 'turn_completed';

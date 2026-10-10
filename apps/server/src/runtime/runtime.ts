@@ -600,6 +600,14 @@ export class Runtime {
       return;
     }
     if (event.turnId && active.turnId && event.turnId !== active.turnId) return;
+    if (event.type === 'question_expired') {
+      for (const [questionId, requestId] of active.requests)
+        if (requestId === event.requestId) {
+          this.store.expireQuestion(questionId);
+          active.requests.delete(questionId);
+        }
+      return;
+    }
     if (event.turnId && !active.turnId) {
       let buffered = active.unboundOutput.get(event.turnId);
       if (!buffered) {

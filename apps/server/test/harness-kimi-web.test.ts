@@ -855,31 +855,527 @@ describe('Kimi Code local Web adapter', () => {
     expect(await f.requests('/prompts')).toHaveLength(2);
   });
 
-  it('withdraws an admitted batch on boundary uncertainty and never redelivers it', async () => {
+  it.each([
+    { nextTurnBeforeEnd: false, finishOnQueuedPrompt: true, queuedPromptResponseDelayMs: 80 },
+    { nextTurnBeforeEnd: true, finishOnQueuedPrompt: true, queuedPromptResponseDelayMs: 80 },
+    { nextTurnBeforeEnd: false, boundaryOnSteer: true },
+    { nextTurnBeforeEnd: true, boundaryOnSteer: true },
+  ])('keeps a batch consumed across a native boundary in the same run (%j)', async (race) => {
     const f = await fixture();
+    await f.cli.set({ manualOutput: true, ...race });
     const { session, id } = await f.created();
-    await f.cli.set({ manualOutput: true, boundaryOnSteer: true });
     const { turnId } = await session.submit(f.input('active', id));
     const batchId = randomUUID();
-    await expect(
-      session.steer!({ sessionId: id, expectedTurnId: turnId, batchId, text: 'late batch' }),
-    ).rejects.not.toBeInstanceOf(HarnessSubmissionRejected);
-    await session.close();
-    expect(f.handlers.exit).toHaveBeenCalledTimes(1);
-    expect(await f.requests(`/${f.nativeId(batchId)}:abort`)).toHaveLength(1);
+    expect(
+      await session.steer!({ sessionId: id, expectedTurnId: turnId, batchId, text: 'late batch' }),
+    ).toEqual({ turnId });
+    await vi.waitFor(async () =>
+      expect(
+        (await f.cli.records()).filter(
+          (record) => record.type === 'event' && record.frame?.type === 'turn.started',
+        ),
+      ).toHaveLength(2),
+    );
+    expect(f.events.filter((event) => event.type === 'turn_started')).toEqual([
+      { type: 'turn_started', sessionId: id, turnId },
+    ]);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([]);
+    expect(await f.requests(`/${f.nativeId(batchId)}:abort`)).toEqual([]);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
     expect(
       (await f.requests('/prompts')).filter(
         (record) => record.body?.prompt_id === f.nativeId(batchId),
       ),
     ).toHaveLength(1);
+    const wire = (await f.cli.records())
+      .filter((record) => record.type === 'event')
+      .map((record) => record.frame!);
+    const start = wire.findIndex(
+      (frame) =>
+        frame.type === 'turn.started' && (frame.payload as Record<string, unknown>).turnId === 2,
+    );
+    const end = wire.findIndex(
+      (frame) =>
+        frame.type === 'turn.ended' && (frame.payload as Record<string, unknown>).turnId === 1,
+    );
+    expect(start < end).toBe(race.nextTurnBeforeEnd);
+    if ('boundaryOnSteer' in race)
+      expect(await f.requests(`/${f.nativeId(batchId)}:steer`)).toHaveLength(1);
     await f.cli.set({ manualOutput: true });
-    const resumed = await f.connect();
-    expect(await resumed.resumeSession(id)).toBe(id);
-    const after = await resumed.submit(f.input('next run', id));
+    const nextBatch = randomUUID();
+    expect(
+      await session.steer!({
+        sessionId: id,
+        expectedTurnId: turnId,
+        batchId: nextBatch,
+        text: 'append in phase two',
+      }),
+    ).toEqual({ turnId });
+    const receipt = (await f.cli.records()).find(
+      (record) => record.type === 'event' && record.frame?.type === 'prompt.steered',
+    );
+    expect(receipt?.frame?.payload).toMatchObject({
+      activePromptId: f.nativeId(batchId),
+      promptIds: [f.nativeId(nextBatch)],
+    });
     await f.cli.finish(id);
-    await f.completed(after.turnId);
-    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(2);
+    expect(await f.completed(turnId)).toMatchObject({ status: 'completed' });
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
   });
+
+  it('projects chained native phases, late frames and native questions under the original turn ID', async () => {
+    const f = await fixture();
+    await f.cli.set({
+      manualOutput: true,
+      boundaryOnSteer: true,
+      nextTurnBeforeEnd: true,
+      holdTurn: true,
+    });
+    const { session, id } = await f.created();
+    const { turnId } = await session.submit(f.input('phase one', id));
+    await f.cli.emitBatch(id, [
+      { type: 'thinking.delta', fields: { turnId: 1, delta: 'Thought one' } },
+      { type: 'assistant.delta', fields: { turnId: 1, delta: 'Answer one' } },
+    ]);
+    const batch = async (text: string) => {
+      const batchId = randomUUID();
+      expect(
+        await session.steer!({ sessionId: id, expectedTurnId: turnId, batchId, text }),
+      ).toEqual({ turnId });
+      return batchId;
+    };
+    await batch('phase two');
+    await f.cli.emitBatch(id, [
+      { type: 'thinking.delta', fields: { turnId: 2, delta: 'Thought two' } },
+      { type: 'assistant.delta', fields: { turnId: 2, delta: 'Answer two' } },
+      { type: 'assistant.delta', fields: { turnId: 1, delta: ' old late output' } },
+      { type: 'turn.ended', fields: { turnId: 1, reason: 'failed' } },
+      { type: 'assistant.delta', fields: { turnId: 2, delta: ' continued' } },
+    ]);
+    await f.cli.question(id, true);
+    await vi.waitFor(() => expect(f.questions).toHaveLength(1));
+    expect(f.questions[0]).toMatchObject({
+      sessionId: id,
+      turnId,
+      questions: [{ multiSelect: false }, { multiSelect: true }],
+    });
+    const nativeMain = (await f.cli.records()).find(
+      (record) => record.type === 'event' && record.frame?.type === 'event.question.requested',
+    );
+    expect(nativeMain?.frame?.payload).toMatchObject({ agent_id: 'main', turn_id: 2 });
+    session.answer(f.questions[0]!.requestId, {
+      answers: { q0: { answers: ['One'] }, q1: { answers: ['One', 'Two'] } },
+    });
+    await vi.waitFor(async () =>
+      expect(await f.requests(`/questions/${f.questions[0]!.requestId}`)).toHaveLength(1),
+    );
+    expect((await f.requests(`/questions/${f.questions[0]!.requestId}`))[0]!.body).toEqual({
+      method: 'click',
+      answers: {
+        q0: { kind: 'single', option_id: 'one' },
+        q1: { kind: 'multi', option_ids: ['one', 'two'] },
+      },
+    });
+    await batch('phase three');
+    await f.cli.emitBatch(id, [
+      { type: 'thinking.delta', fields: { turnId: 3, delta: 'Thought three' } },
+      { type: 'assistant.delta', fields: { turnId: 3, delta: 'Answer three' } },
+      {
+        type: 'subagent.spawned',
+        fields: {
+          turnId: 3,
+          subagentId: 'child-three',
+          subagentName: 'Research',
+          parentToolCallId: 'dispatch-three',
+          runInBackground: false,
+        },
+      },
+      {
+        type: 'turn.started',
+        fields: {
+          agentId: 'child-three',
+          turnId: 99,
+          promptId: 'child-prompt',
+          origin: { kind: 'user' },
+        },
+      },
+    ]);
+    await f.cli.question(id, false, {
+      agentId: 'child-three',
+      agent_id: 'child-three',
+      turn_id: 99,
+    });
+    await vi.waitFor(() => expect(f.questions).toHaveLength(2));
+    expect(f.questions[1]).toMatchObject({ sessionId: id, turnId });
+    const nativeChild = (await f.cli.records())
+      .filter(
+        (record) => record.type === 'event' && record.frame?.type === 'event.question.requested',
+      )
+      .at(-1);
+    expect(nativeChild?.frame?.payload).toMatchObject({ agent_id: 'child-three', turn_id: 99 });
+    session.answer(f.questions[1]!.requestId, { answers: { q0: { answers: ['Two'] } } });
+    await vi.waitFor(async () =>
+      expect(await f.requests(`/questions/${f.questions[1]!.requestId}`)).toHaveLength(1),
+    );
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([]);
+    await f.cli.emit(id, 'turn.ended', { agentId: 'child-three', turnId: 99, reason: 'completed' });
+    await f.cli.finish(id);
+    await f.completed(turnId);
+    expect(f.items()).toEqual(
+      expect.arrayContaining([
+        { type: 'reasoning', status: 'completed', text: 'Thought one' },
+        { type: 'agentMessage', status: 'completed', text: 'Answer one' },
+        { type: 'reasoning', status: 'completed', text: 'Thought two' },
+        { type: 'reasoning', status: 'completed', text: 'Thought three' },
+        { type: 'agentMessage', status: 'completed', text: 'Answer three' },
+      ]),
+    );
+    expect(f.items().some((item) => item.text.includes('Answer two continued'))).toBe(true);
+    expect(f.items().some((item) => item.text.includes('old late output'))).toBe(false);
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(
+      f.events.every((event) => {
+        if (event.type !== 'item' && event.type !== 'item_delta') return true;
+        return event.turnId === turnId;
+      }),
+    ).toBe(true);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'finishes a consumed continuation before its delayed HTTP receipt arrives (start before end: %s)',
+    async (nextTurnBeforeEnd) => {
+      const f = await fixture();
+      await f.cli.set({ manualOutput: true });
+      const { session, id } = await f.created();
+      const { turnId } = await session.submit(f.input('initial', id));
+      await f.cli.set({
+        finishOnQueuedPrompt: true,
+        queuedPromptResponseDelayMs: 100,
+        nextTurnBeforeEnd,
+      });
+      const batchId = randomUUID();
+      expect(
+        await session.steer!({
+          sessionId: id,
+          expectedTurnId: turnId,
+          batchId,
+          text: 'automatic continuation',
+        }),
+      ).toEqual({ turnId });
+      expect(await f.completed(turnId)).toMatchObject({ status: 'completed' });
+      expect(f.items()).toEqual([
+        { type: 'agentMessage', status: 'completed', text: 'Reply: automatic continuation' },
+      ]);
+      expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+      expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+      expect(await f.requests('/prompts')).toHaveLength(2);
+      expect(await f.requests(`/${f.nativeId(batchId)}:steer`)).toEqual([]);
+      expect(await f.requests(`/${f.nativeId(batchId)}:abort`)).toEqual([]);
+      expect(f.handlers.exit).not.toHaveBeenCalled();
+    },
+  );
+
+  it('cancels a pending batch before the active continuation prompt when stopped', async () => {
+    const f = await fixture();
+    await f.cli.set({ manualOutput: true, boundaryOnSteer: true });
+    const { session, id } = await f.created();
+    const { turnId } = await session.submit(f.input('initial', id));
+    const activeBatch = randomUUID();
+    await session.steer!({
+      sessionId: id,
+      expectedTurnId: turnId,
+      batchId: activeBatch,
+      text: 'active continuation',
+    });
+    await f.cli.set({ manualOutput: true, queuedPromptResponseDelayMs: 200 });
+    const pendingBatch = randomUUID();
+    const pending = session.steer!({
+      sessionId: id,
+      expectedTurnId: turnId,
+      batchId: pendingBatch,
+      text: 'pending batch',
+    });
+    void pending.catch(() => {});
+    await vi.waitFor(async () => expect(await f.requests('/prompts')).toHaveLength(3));
+    await session.close();
+    await expect(pending).rejects.not.toBeInstanceOf(HarnessSubmissionRejected);
+    const aborted = (await f.cli.records()).filter(
+      (record) => record.type === 'http' && record.path?.endsWith(':abort'),
+    );
+    expect(aborted.map((record) => record.path)).toEqual([
+      `/api/v1/sessions/${id}/prompts/${f.nativeId(pendingBatch)}:abort`,
+      `/api/v1/sessions/${id}/prompts/${f.nativeId(activeBatch)}:abort`,
+    ]);
+    expect(
+      (await f.cli.records()).filter(
+        (record) => record.type === 'event' && record.frame?.type === 'turn.started',
+      ),
+    ).toHaveLength(2);
+    expect(await f.requests(`/${f.nativeId(pendingBatch)}:steer`)).toEqual([]);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('keeps a native continuation failure and its error on the original public run', async () => {
+    const f = await fixture();
+    await f.cli.set({ manualOutput: true, boundaryOnSteer: true });
+    const { session, id } = await f.created();
+    const { turnId } = await session.submit(f.input('initial', id));
+    const batchId = randomUUID();
+    expect(
+      await session.steer!({
+        sessionId: id,
+        expectedTurnId: turnId,
+        batchId,
+        text: 'continuation',
+      }),
+    ).toEqual({ turnId });
+    await f.cli.emit(id, 'assistant.delta', { turnId: 2, delta: 'Partial continuation' });
+    const error = 'Native model request failed: HTTP 502, request fixture-continuation';
+    await f.cli.finish(id, 'failed', error);
+    expect(await f.completed(turnId)).toEqual({
+      type: 'turn_completed',
+      sessionId: id,
+      turnId,
+      status: 'failed',
+      error,
+    });
+    expect(f.items()).toEqual([
+      { type: 'agentMessage', status: 'failed', text: 'Partial continuation' },
+    ]);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(await f.requests('/prompts')).toHaveLength(2);
+    expect(await f.requests(`/${f.nativeId(batchId)}:abort`)).toEqual([]);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('interrupts the active continuation using the original public turn ID', async () => {
+    const f = await fixture();
+    await f.cli.set({ manualOutput: true, boundaryOnSteer: true });
+    const { session, id } = await f.created();
+    const { turnId } = await session.submit(f.input('initial', id));
+    const batchId = randomUUID();
+    const steering = session.steer!({
+      sessionId: id,
+      expectedTurnId: turnId,
+      batchId,
+      text: 'continuation',
+    });
+    expect(await steering).toEqual({ turnId });
+    await f.cli.emit(id, 'assistant.delta', { turnId: 2, delta: 'Partial continuation' });
+    await session.interrupt(id, turnId);
+    expect(await f.completed(turnId)).toMatchObject({ status: 'interrupted', error: null });
+    expect(await steering).toEqual({ turnId });
+    expect(f.items()).toEqual([
+      { type: 'agentMessage', status: 'interrupted', text: 'Partial continuation' },
+    ]);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(
+      (await f.cli.records()).filter(
+        (record) => record.type === 'http' && record.path?.endsWith(':abort'),
+      ),
+    ).toMatchObject([{ path: `/api/v1/sessions/${id}/prompts/${f.nativeId(batchId)}:abort` }]);
+    expect(await f.requests('/prompts')).toHaveLength(2);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('expires cached interactions on handoff and keeps fresh questions when an old phase ends late', async () => {
+    const f = await fixture();
+    await f.cli.set({
+      manualOutput: true,
+      holdTurn: true,
+      boundaryOnSteer: true,
+      nextTurnBeforeEnd: true,
+      oldTurnEndDelayMs: 200,
+    });
+    const { session, id } = await f.created();
+    const storedPath = join(f.cli.home, 'sessions', `${id}.json`);
+    const stored = JSON.parse(await readFile(storedPath, 'utf8')) as { turn: number };
+    stored.turn = 6;
+    await writeFile(storedPath, JSON.stringify(stored));
+    const { turnId } = await session.submit(f.input('phase seven', id));
+    expect(turnId).toBe('7');
+    await f.cli.question(id);
+    const approval = (approvalId: string, phaseId: number, plan: boolean) =>
+      f.cli.emit(id, 'event.approval.requested', {
+        turnId: phaseId,
+        approval_id: approvalId,
+        tool_name: plan ? 'ExitPlanMode' : 'Shell',
+        action: 'Review fixture action',
+        tool_input_display: plan
+          ? { kind: 'plan_review', plan: 'Fixture plan', options: [{ label: 'Approve' }] }
+          : { command: 'echo fixture' },
+      });
+    await approval('cached-plan', 7, true);
+    await vi.waitFor(() => expect(f.questions).toHaveLength(2));
+    const oldQuestion = f.questions[0]!;
+    const oldApproval = f.questions[1]!;
+    expect(oldApproval.requestId).toBe('approval:cached-plan');
+    expect(
+      await session.steer!({
+        sessionId: id,
+        expectedTurnId: turnId,
+        batchId: randomUUID(),
+        text: 'phase eight',
+      }),
+    ).toEqual({ turnId });
+    const expired = () => f.events.filter((event) => event.type === 'question_expired');
+    await vi.waitFor(() =>
+      expect(expired()).toEqual([
+        { type: 'question_expired', sessionId: id, turnId, requestId: oldQuestion.requestId },
+        { type: 'question_expired', sessionId: id, turnId, requestId: oldApproval.requestId },
+      ]),
+    );
+    expect(() =>
+      session.answer(oldQuestion.requestId, { answers: { q0: { answers: ['One'] } } }),
+    ).toThrow();
+    expect(() =>
+      session.answer(oldApproval.requestId, { answers: { approval: { answers: ['Approve'] } } }),
+    ).toThrow();
+    await f.cli.question(id, false, { turn_id: 7 });
+    await approval('stale-plan', 7, true);
+    await approval('stale-tool', 7, false);
+    await f.cli.question(id);
+    await vi.waitFor(() => expect(f.questions).toHaveLength(3));
+    const fresh = f.questions[2]!;
+    await vi.waitFor(async () =>
+      expect(
+        (await f.cli.records()).some(
+          (record) =>
+            record.type === 'event' &&
+            record.frame?.type === 'turn.ended' &&
+            (record.frame.payload as Record<string, unknown>).turnId === 7,
+        ),
+      ).toBe(true),
+    );
+    expect(expired()).toHaveLength(2);
+    expect(await f.requests('/approvals/stale-plan')).toEqual([]);
+    expect(await f.requests('/approvals/stale-tool')).toEqual([]);
+    expect(await f.requests(`/questions/${oldQuestion.requestId}`)).toEqual([]);
+    expect(await f.requests('/approvals/cached-plan')).toEqual([]);
+    session.answer(fresh.requestId, { answers: { q0: { answers: ['Two'] } } });
+    await vi.waitFor(async () =>
+      expect(await f.requests(`/questions/${fresh.requestId}`)).toHaveLength(1),
+    );
+    expect(expired()).toHaveLength(2);
+    await f.cli.finish(id);
+    expect(await f.completed(turnId)).toMatchObject({ status: 'completed' });
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it.each(['event.question.answered', 'event.question.dismissed'])(
+    'expires externally resolved forms and suppresses expiry callbacks during close (%s)',
+    async (questionEvent) => {
+      const f = await fixture();
+      await f.cli.set({ manualOutput: true });
+      const { session, id } = await f.created();
+      const { turnId } = await session.submit(f.input('forms', id));
+      const approval = (approvalId: string) =>
+        f.cli.emit(id, 'event.approval.requested', {
+          turnId: 1,
+          approval_id: approvalId,
+          tool_name: 'ExitPlanMode',
+          action: 'Review fixture plan',
+          tool_input_display: { kind: 'plan_review', plan: 'Fixture plan' },
+        });
+      await f.cli.question(id);
+      await approval('external-plan');
+      await vi.waitFor(() => expect(f.questions).toHaveLength(2));
+      const externalQuestion = f.questions[0]!;
+      const externalApproval = f.questions[1]!;
+      await f.cli.emitBatch(id, [
+        { type: questionEvent, fields: { turnId: 1, question_id: externalQuestion.requestId } },
+        {
+          type: 'event.approval.resolved',
+          fields: { turnId: 1, approval_id: 'external-plan', decision: 'approved' },
+        },
+      ]);
+      const expired = () => f.events.filter((event) => event.type === 'question_expired');
+      await vi.waitFor(() =>
+        expect(expired()).toEqual([
+          {
+            type: 'question_expired',
+            sessionId: id,
+            turnId,
+            requestId: externalQuestion.requestId,
+          },
+          {
+            type: 'question_expired',
+            sessionId: id,
+            turnId,
+            requestId: externalApproval.requestId,
+          },
+        ]),
+      );
+      expect(() =>
+        session.answer(externalQuestion.requestId, { answers: { q0: { answers: ['One'] } } }),
+      ).toThrow();
+      expect(() =>
+        session.answer(externalApproval.requestId, {
+          answers: { approval: { answers: ['Approve'] } },
+        }),
+      ).toThrow();
+      await f.cli.question(id);
+      await approval('close-plan');
+      await vi.waitFor(() => expect(f.questions).toHaveLength(4));
+      const closeQuestion = f.questions[2]!;
+      const closeApproval = f.questions[3]!;
+      await session.close();
+      expect(expired()).toHaveLength(2);
+      expect(await f.requests(`/questions/${closeQuestion.requestId}:dismiss`)).toHaveLength(1);
+      expect((await f.requests('/approvals/close-plan'))[0]).toMatchObject({
+        body: { decision: 'cancelled' },
+      });
+      expect(await f.requests(`/questions/${externalQuestion.requestId}`)).toEqual([]);
+      expect(await f.requests('/approvals/external-plan')).toEqual([]);
+      expect(() =>
+        session.answer(closeQuestion.requestId, { answers: { q0: { answers: ['One'] } } }),
+      ).toThrow();
+      expect(() =>
+        session.answer(closeApproval.requestId, {
+          answers: { approval: { answers: ['Approve'] } },
+        }),
+      ).toThrow();
+      expect(f.handlers.exit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['invalidReceipt', 'loseQueuedReceipt', 'suppressSteerReceipt'] as const)(
+    'keeps admitted steering uncertain when confirmation is missing (%s)',
+    async (failure) => {
+      const f = await fixture();
+      await f.cli.set({ manualOutput: true });
+      const { session, id } = await f.created();
+      const { turnId } = await session.submit(f.input('active', id));
+      await f.cli.set({ manualOutput: true, [failure]: true });
+      const batchId = randomUUID();
+      const pending = session.steer!({
+        sessionId: id,
+        expectedTurnId: turnId,
+        batchId,
+        text: 'uncertain',
+      });
+      void pending.catch(() => {});
+      if (failure === 'suppressSteerReceipt') {
+        await vi.waitFor(async () =>
+          expect(await f.requests(`/${f.nativeId(batchId)}:steer`)).toHaveLength(1),
+        );
+        await f.cli.drop();
+      }
+      await expect(pending).rejects.not.toBeInstanceOf(HarnessSubmissionRejected);
+      await session.close();
+      expect(f.handlers.exit).toHaveBeenCalledTimes(1);
+      expect(
+        (await f.requests('/prompts')).filter(
+          (record) => record.body?.prompt_id === f.nativeId(batchId),
+        ),
+      ).toHaveLength(1);
+      expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+    },
+  );
 
   it('maps native single and multiple choices to option IDs, with dismiss and interrupt cancellation', async () => {
     const f = await fixture();

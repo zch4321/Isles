@@ -53,11 +53,13 @@ const frame = (s, type, fields = {}, transport = {}) => {
   if (!volatile) s.seq++;
   let offset;
   if ((fields.agentId ?? 'main') === 'main') {
-    if (type === 'turn.started' || type === 'turn.step.started') { s.assistant_offset = 0; s.thinking_offset = 0; }
+    s.offsets ??= {};
+    const offsets = s.offsets[fields.turnId ?? s.turn] ??= {};
+    if (type === 'turn.started' || type === 'turn.step.started') { offsets.assistant = 0; offsets.thinking = 0; }
     if (type === 'assistant.delta' || type === 'thinking.delta') {
-      const key = type === 'assistant.delta' ? 'assistant_offset' : 'thinking_offset';
-      offset = transport.offset ?? s[key] ?? 0;
-      s[key] = Math.max(s[key] ?? 0, offset + fields.delta.length);
+      const key = type === 'assistant.delta' ? 'assistant' : 'thinking';
+      offset = transport.offset ?? offsets[key] ?? 0;
+      offsets[key] = Math.max(offsets[key] ?? 0, offset + fields.delta.length);
     }
   }
   const payload = { type, sessionId: s.id, agentId: 'main', ...fields };
@@ -82,18 +84,33 @@ const begin = (s, p) => {
   s.turn++;
   emit(s, 'turn.started', { turnId: s.turn, promptId: p.prompt_id, origin: { kind: 'user' }, prompt: p.content.map(part => part.text ?? '').join('') });
 };
-const finish = (s, reason = 'completed') => {
+const scheduleOutput = (s, p) => setTimeout(() => {
+  const current = read(s.id);
+  if (current?.active?.prompt_id === p.prompt_id) output(current,p.content.map(part => part.text ?? '').join(''));
+}, 15);
+const finish = (s, reason = 'completed', error) => {
   if (!s.active) return;
   const promptId = s.active.prompt_id;
-  emit(s, 'turn.ended', { turnId: s.turn, reason });
+  const turnId = s.turn;
   s.active = null;
   s.questions = [];
-  emit(s, 'prompt.completed', { promptId, finishedAt: now(), reason });
+  const next = s.queue[0];
+  if (next && settings().nextTurnBeforeEnd) begin(s,next);
+  const terminal = current => {
+    emit(current, 'turn.ended', { turnId, reason, ...(error === undefined ? {} : { error }) });
+    if (reason === 'cancelled') emit(current, 'prompt.aborted', { promptId, abortedAt: now() });
+    else emit(current, 'prompt.completed', { promptId, finishedAt: now(), reason });
+  };
+  if (next && settings().nextTurnBeforeEnd && settings().oldTurnEndDelayMs)
+    setTimeout(() => terminal(read(s.id)),settings().oldTurnEndDelayMs);
+  else terminal(s);
+  if (next && !s.active) begin(s,next);
   save(s);
+  if (next) scheduleOutput(s,next);
 };
-const question = (s, many) => {
+const question = (s, many, fields = {}) => {
   const options = [{ id: 'one', label: 'One', description: 'First' }, { id: 'two', label: 'Two', description: 'Second' }];
-  const value = { question_id: 'question-' + crypto.randomUUID(), session_id: s.id, agent_id: 'main', turn_id: s.turn, tool_call_id: 'ask-1', created_at: now(), questions: [{ id: 'q0', header: 'Result', question: 'Which result?', options, multi_select: false, allow_other: true }, ...(many ? [{ id: 'q1', header: 'Extras', question: 'Which extras?', options, multi_select: true, allow_other: true }] : [])] };
+  const value = { question_id: 'question-' + crypto.randomUUID(), session_id: s.id, agent_id: 'main', turn_id: s.turn, tool_call_id: 'ask-1', created_at: now(), questions: [{ id: 'q0', header: 'Result', question: 'Which result?', options, multi_select: false, allow_other: true }, ...(many ? [{ id: 'q1', header: 'Extras', question: 'Which extras?', options, multi_select: true, allow_other: true }] : [])], ...fields };
   s.questions.push(value);
   emit(s, 'event.question.requested', value);
 };
@@ -124,7 +141,8 @@ const server = http.createServer(async (req,res) => {
     if (body.op === 'drop') { for (const peer of peers) peer.socket.destroy(); return envelope(res); }
     if (!s) return envelope(res, {}, 40401, 'Unknown session');
     if (body.op === 'begin') { const p = s.queue.find(p => p.prompt_id === body.promptId); if (p) begin(s,p); }
-    if (body.op === 'finish') finish(s,body.reason);
+    if (body.op === 'finish') finish(s,body.reason,body.error);
+    if (body.op === 'question') question(s,body.many,body.fields);
     if (body.op === 'emit') emit(s,body.event,body.fields,body.transport);
     if (body.op === 'emitBatch') for (const event of body.events) emit(s,event.type,event.fields,event.transport);
     if (body.op === 'queue') { s.queue.push(body.prompt); save(s); }
@@ -174,12 +192,17 @@ const server = http.createServer(async (req,res) => {
     if (s.active?.prompt_id === p.prompt_id || s.queue.some(q => q.prompt_id === p.prompt_id)) return envelope(res,{},40927,'prompt_id conflict');
     s.queue.push(p);
     emit(s,'prompt.submitted',{ promptId: p.prompt_id, userMessageId: p.user_message_id, status: 'queued', content: p.content, createdAt: p.created_at });
+    const wasQueued = Boolean(s.active);
     if (!s.active && !cfg.holdAdmission) {
       begin(s,p);
       if (cfg.loseAfterAcceptance) { req.socket.destroy(); for (const peer of peers) peer.socket.destroy(); return; }
-      setTimeout(() => { const current = read(s.id); if (current?.active?.prompt_id === p.prompt_id) output(current,p.content.map(part => part.text ?? '').join('')); }, 15);
+      scheduleOutput(s,p);
     }
-    envelope(res,cfg.invalidReceipt ? { ...p, prompt_id: 'wrong-prompt' } : { ...p, status: s.active?.prompt_id === p.prompt_id ? 'running' : 'queued' });
+    const receipt = cfg.invalidReceipt ? { ...p, prompt_id: 'wrong-prompt' } : { ...p, status: s.active?.prompt_id === p.prompt_id ? 'running' : 'queued' };
+    if (wasQueued && cfg.loseQueuedReceipt) { req.socket.destroy(); for (const peer of peers) peer.socket.destroy(); return; }
+    if (wasQueued && cfg.finishOnQueuedPrompt) finish(s);
+    if (wasQueued && cfg.queuedPromptResponseDelayMs) setTimeout(() => envelope(res,receipt),cfg.queuedPromptResponseDelayMs);
+    else envelope(res,receipt);
     return;
   }
   const action = tail.match(/^\/prompts\/([^/:]+):(abort|steer)$/);
@@ -188,28 +211,30 @@ const server = http.createServer(async (req,res) => {
     if (action[2] === 'abort') {
       const active = s.active?.prompt_id === id;
       s.queue = s.queue.filter(p => p.prompt_id !== id);
-      emit(s,'prompt.aborted',{ promptId: id, abortedAt: now() });
       if (active) finish(s,'cancelled');
+      else emit(s,'prompt.aborted',{ promptId: id, abortedAt: now() });
       save(s);
       return envelope(res,{ aborted: true, at_seq: s.seq });
     }
-    if (settings().boundaryOnSteer) { finish(s); return envelope(res,{},40001,'Turn ended before steer'); }
-    if (!s.active) return envelope(res,{},40001,'No active turn');
+    if (settings().boundaryOnSteer) { finish(s); return envelope(res,{},40402,'Prompt is not pending'); }
+    if (!s.active) return envelope(res,{},40402,'Prompt is not pending');
     const p = s.queue.find(q => q.prompt_id === id);
-    if (!p) return envelope(res,{},40401,'Unknown prompt');
+    if (!p) return envelope(res,{},40402,'Prompt is not pending');
+    if (settings().suppressSteerReceipt) return envelope(res,{},40402,'Prompt is not pending');
     s.queue = s.queue.filter(q => q.prompt_id !== id);
-    emit(s,'prompt.steered',{ activePromptId: s.active.prompt_id, promptIds: [id], content: p.content, steeredAt: now() });
+    emit(s,'prompt.steered',{ activePromptId: s.active.prompt_id, promptIds: [id], messageId: p.user_message_id, content: p.content, steeredAt: now() });
     return envelope(res,{ steered: true, prompt_ids: [id] });
   }
   if (tail === '/questions') return envelope(res,{ items: s.questions });
   const questionAction = tail.match(/^\/questions\/([^/:]+)(?::(dismiss|resolve))?$/);
   if (questionAction) {
     const id = questionAction[1];
+    const pendingQuestion = s.questions.find(q => q.question_id === id);
     s.questions = s.questions.filter(q => q.question_id !== id);
     emit(s,'event.question.' + (questionAction[2] === 'dismiss' ? 'dismissed' : 'answered'),{ question_id: id });
     if (questionAction[2] === 'dismiss') return envelope(res,{ dismissed: true, dismissed_at: now() },40909,'Question dismissed');
-    emit(s,'assistant.delta',{ turnId: s.turn, delta: 'Answer: ' + JSON.stringify(body) });
-    if (!settings().holdTurn) finish(s);
+    emit(s,'assistant.delta',{ agentId: pendingQuestion?.agent_id ?? 'main', turnId: pendingQuestion?.turn_id ?? s.turn, delta: 'Answer: ' + JSON.stringify(body) });
+    if (!settings().holdTurn && (pendingQuestion?.agent_id ?? 'main') === 'main') finish(s);
     return envelope(res,{ resolved: true, resolved_at: now() });
   }
   return envelope(res,{},40401,'Unknown route ' + route);
@@ -315,8 +340,10 @@ process.on('SIGTERM',() => { for (const peer of peers) peer.socket.destroy(); se
         transport?: { volatile?: boolean; offset?: number };
       }[],
     ) => control({ op: 'emitBatch', sessionId, events }),
-    finish: (sessionId: string, reason = 'completed') =>
-      control({ op: 'finish', sessionId, reason }),
+    finish: (sessionId: string, reason = 'completed', error?: unknown) =>
+      control({ op: 'finish', sessionId, reason, error }),
+    question: (sessionId: string, many = false, fields: Record<string, unknown> = {}) =>
+      control({ op: 'question', sessionId, many, fields }),
     drop: () => control({ op: 'drop' }),
     queue: (sessionId: string, prompt: Record<string, unknown>) =>
       control({ op: 'queue', sessionId, prompt }),
