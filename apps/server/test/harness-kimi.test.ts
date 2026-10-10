@@ -12,7 +12,7 @@ import {
   type HarnessQuestion,
 } from '../src/harness/types.js';
 import { findKimiExecutable } from '../src/harness/kimi/executable.js';
-import { KimiEnvironment } from '../src/harness/kimi/environment.js';
+import { KimiAcpHarness } from './kimi-acp-harness.js';
 import { AgentWorkspace } from '../src/runtime/workspace.js';
 import type { AgentRecord } from '../src/storage/store.js';
 import { kimiFixture } from './acp-fixture.js';
@@ -32,7 +32,7 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
     environment: { ISLES_KIMI_BIN: cli.binary, ISLES_KIMI_HOME: cli.home },
   });
   const workspace = new AgentWorkspace(config);
-  const adapter = new AcpAdapter(new KimiEnvironment(config, workspace));
+  const adapter = new AcpAdapter(new KimiAcpHarness(config, workspace));
   const agent: AgentRecord = {
     id: randomUUID(),
     channelId: randomUUID(),
@@ -319,7 +319,7 @@ describe('Kimi Code ACP adapter', () => {
     const f = await fixture();
     const session = await f.connect();
     await expect(session.resumeSession('session_missing')).rejects.toThrow(
-      'Kimi Code 无法恢复原 session',
+      'ACP fixture 无法恢复原 session',
     );
     expect(f.output.exit).toHaveBeenCalledTimes(1);
     expect(await f.frames('session/new')).toEqual([]);
@@ -383,18 +383,18 @@ describe('Kimi Code ACP adapter', () => {
     await session.submit(refused);
     expect(await f.completed(refused.runId)).toMatchObject({
       status: 'failed',
-      error: 'Kimi Code 拒绝继续执行',
+      error: 'ACP fixture 拒绝继续执行',
     });
     const limited = f.input('limit', id);
     await session.submit(limited);
     expect(await f.completed(limited.runId)).toMatchObject({
       status: 'completed',
-      error: 'Kimi Code 已达到单轮上限（max_turn_requests）',
+      error: 'ACP fixture 已达到单轮上限（max_turn_requests）',
     });
     await f.cli.set({ exitOnPrompt: true });
     const lost = await session.submit(f.input('hello', id)).catch((error: unknown) => error);
     expect(lost).not.toBeInstanceOf(HarnessSubmissionRejected);
-    expect((lost as Error).message).toContain('Kimi Code 已退出');
+    expect((lost as Error).message).toContain('ACP fixture 已退出');
     expect(f.output.exit).toHaveBeenCalledTimes(1);
   });
 

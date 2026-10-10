@@ -1,36 +1,14 @@
-import type { HarnessDescriptor } from '@isles/contracts';
 import type { ConfigManager } from '@isles/config';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
-import { AcpRpcError, type AcpConnection } from '../acp/client.js';
-import type { AcpHarness } from '../acp/harness.js';
 import type { CliExecutable } from '../shared/executable.js';
 import type { Logger } from '../../logging.js';
-import { agentRoot, type AgentWorkspace } from '../../runtime/workspace.js';
-import type { AgentRecord } from '../../storage/store.js';
+import type { AgentWorkspace } from '../../runtime/workspace.js';
 import { findKimiExecutable } from './executable.js';
 
-/** Kimi Code over ACP (`kimi acp`). Every Agent shares the human's Kimi home. */
-export class KimiEnvironment implements AcpHarness {
-  readonly descriptor: HarnessDescriptor = {
-    id: 'kimi',
-    displayName: 'Kimi Code',
-    configuration: 'cli-path',
-    capabilities: {
-      sessionResume: true,
-      interrupt: true,
-      // ACP prompts run one at a time; busy input waits for the next turn.
-      steer: false,
-      userQuestions: true,
-      nativeSubagents: true,
-      mcp: true,
-      workspaceInstructions: true,
-    },
-  };
-  readonly args = ['acp'];
-  /** Runs tools without approval prompts and keeps AskUserQuestion available. */
-  readonly sessionMode = 'yolo';
+/** Native discovery and secret redaction shared by Kimi's local interfaces. */
+export class KimiEnvironment {
   readonly home: string;
   readonly log: Logger;
   private selected: CliExecutable | undefined;
@@ -95,20 +73,6 @@ export class KimiEnvironment implements AcpHarness {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
           throw new Error(`无法读取 Kimi Code 配置：${path}`, { cause: error });
       }
-    }
-  }
-  async prepare(agent: AgentRecord) {
-    await this.workspace.prepareWorkspace(agent);
-    return this.workspace.token(agentRoot(this.workspace.dataDir, agent));
-  }
-  /** `authenticate` with the login method succeeds only when a stored login exists. */
-  async authenticated(client: AcpConnection) {
-    try {
-      await client.request('authenticate', { methodId: 'login' });
-      return true;
-    } catch (error) {
-      if (error instanceof AcpRpcError && error.code === -32000) return false;
-      throw error;
     }
   }
 }

@@ -22,8 +22,8 @@ Isles 是面向人类与多个 Agent 的聊天协作产品。用户像使用聊�
 - **前端采用 Vue 3、Vite 和 TypeScript**，组件采用 shadcn-vue，样式采用 Tailwind CSS，服务端状态使用 TanStack Vue Query。
 - **后端采用 Node.js 与 Fastify**，通过 pnpm workspace 管理前端、后端及共享协议；浏览器接口采用 REST + SSE。
 - **数据库采用 SQLite，启用 WAL；数据访问采用 Drizzle ORM**，使用配套 Drizzle Kit 管理当前 schema 基线。
-- **当前接入 Codex、Claude Code CLI、Kimi Code、OpenCode 与 DSH，通用 harness 适配层已完成**；保持私聊、混合群聊与固定 session。Codex、Claude、OpenCode 与 DSH 支持默认关闭的 Agent steer 偏好，关闭时忙碌排队；Kimi 忙碌时排队。MCP 主动收信均可用。
-- **以原生接口为主**。Codex 使用 app-server，Claude Code 使用本机 CLI 的双向 stream-json；2026-10-08 用户恢复并授权 Claude CLI 接入，创建时发送一条中性用户消息使 session 落盘。Kimi Code 使用 `kimi acp`，经通用 ACP adapter 接入（2026-10-08 确认）。2026-10-09 授权先集中适配器目录，再接 OpenCode 原生 v2 接口；同日用户完成 review 后授权 DeepSeek Harness（DSH），并确认使用原生桥接插件保留 steer、复用桌面登录。
+- **当前接入 Codex、Claude Code CLI、Kimi Code、OpenCode 与 DSH，通用 harness 适配层已完成**；保持私聊、混合群聊与固定 session。五种 harness 均支持默认关闭的 Agent steer 偏好，关闭时忙碌排队。MCP 主动收信均可用。
+- **以原生接口为主**。Codex 使用 app-server，Claude Code 使用本机 CLI 的双向 stream-json；2026-10-08 用户恢复并授权 Claude CLI 接入，创建时发送一条中性用户消息使 session 落盘。Kimi Code 于 2026-10-08 通过通用 ACP adapter 接入，2026-10-10 用户确认改为本地 `kimi web` 的 REST/WebSocket 接口，保留原 session、模型与共享登录，增加 steer 和原生子代理进度。2026-10-09 授权先集中适配器目录，再接 OpenCode 原生 v2 接口；同日用户完成 review 后授权 DeepSeek Harness（DSH），并确认使用原生桥接插件保留 steer、复用桌面登录。
 - Electron 桌面端和 IM 接入留待后续考虑，不纳入首版交付范围。
 - **首版采用单用户、单机部署**：Web 服务与所有 harness 在同一台电脑或服务器上运行，不要求跨机器调度执行。
 - M1 只监听本机，管理页面和 HTTP API 暂不做登录鉴权；Codex 使用 `danger-full-access` 与 `approvalPolicy: never`。远程访问与后续用户鉴权另行设计。
@@ -442,7 +442,7 @@ Agent 发布待审查产物或明确提交，邀请使用不同模型的 Agent �
 
 ## 12. 当前范围边界
 
-- 首版为 Web，当前注册 Codex、Claude Code CLI、Kimi Code、OpenCode 与 DSH；Codex、Claude、OpenCode 与 DSH 的 Agent steer 开关默认关闭，开启时向原 session 的当前执行追加输入。Kimi Code 经 ACP 接入，忙碌时排队；Electron 与 IM 留待后续。
+- 首版为 Web，当前注册 Codex、Claude Code CLI、Kimi Code、OpenCode 与 DSH；五种 harness 的 Agent steer 开关默认关闭，开启时向原 session 的当前执行追加输入。Kimi Code 使用本地 `kimi web` 服务；Electron 与 IM 留待后续。
 - 首版为单用户、单机部署，Web 服务与 harness 在同一台电脑或服务器上运行；多用户和跨机器执行不纳入首版。
 - 当前阶段仅用户能创建 Agent；Agent 之间的拉群和私聊能力按 Agent 权限开放。
 - 不把固定角色扮演作为基础交互。

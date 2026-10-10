@@ -7,7 +7,7 @@
 ## 1. 已确定的方向
 
 - 采用已讨论的 Vue 3、Vite、TypeScript、shadcn-vue、Tailwind CSS、Fastify、SQLite/Drizzle 和 pnpm workspace。
-- 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex、Claude CLI、Kimi Code（ACP）、OpenCode 与 DSH，按能力配置 steer。
+- 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex、Claude CLI、Kimi Code（本地 Web）、OpenCode 与 DSH，按能力配置 steer。
 - Codex 是主要接入，首先用它跑通 Agent、固定 session、私聊和多 Agent 协作。
 - 2026-10-08 新增通用 ACP adapter，Kimi Code 为首个 ACP harness；新增 harness 复用业务层与 Runtime，通过 adapter 表达能力差异。
 - 2026-10-09 完成私聊、群聊及保留历史的 Markdown 导出，按已确认格式保存全部正式消息与系统消息，保持回复、提及和原消息编号。范围、实现及验证见 [聊天导出](chat-export-design.md)。
@@ -26,25 +26,25 @@
 
 ## 2. 阶段总览
 
-| 阶段                   | 交付结果                                                                   | 状态                                                                                                            |
-| ---------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| M0 工程初始化          | 可启动的 Web/API、共享协议、SQLite/Drizzle、检查和构建入口。               | 已完成并验证。                                                                                                  |
-| M1 Codex 单 Agent 闭环 | 用户创建 Agent，私聊、观察执行、回答原生问题、停止并恢复同一 session。     | 链路及基础规则加载、压缩与恢复补充验收通过。                                                                    |
-| 基础修复               | AGENTS.md 原生加载、简洁文本协议、频道序号、压缩和恢复验证。               | 历史验收已通过；当时的旧库迁移现已撤销。                                                                        |
-| M2 Codex 群聊协作      | 多个独立 Codex Agent 通过 MCP 参与群聊，权限与消息投递一致。               | 自动化与两个真实 Agent 的重新验收通过。                                                                         |
-| 配置与目录拆分         | TOML 配置、数据与工作区分离、共享目录规则、当前 schema 全新基线。          | 89 项测试、7 项浏览器测试与真实 Codex 验证通过；见 [验收记录](config-workspace-acceptance.md)。                 |
-| Agent 基础管理         | 编辑名称/模型/推理等级/权限，保留历史和文件的删除与只读历史入口。          | 105 项测试、10 项浏览器测试与真实 Codex 修改/删除/重启验证通过；见 [验收记录](agent-management-acceptance.md)。 |
-| 名称消息呈现           | 自动输入、收信与历史共用安全名称标签；目录保留完整 ID 寻址，更新持久规则。 | 108 项测试、10 项浏览器测试与真实 Codex 同名寻址/重启验证通过；见 [验收记录](name-message-acceptance.md)。      |
-| 群聊基础管理           | 创建/查询/改名/成员管理及保留历史的删除，成员继续使用同一 session。        | 本轮检查与真实 Codex 验证见 [群聊管理验收](group-management-acceptance.md)。                                    |
-| Harness 适配层         | 通用契约、注册目录、规范化生命周期与事件；完整抽出既有 Codex 行为。        | 128 项测试、13 项浏览器测试与两套真实 Codex 回归通过，见 [独立验收](harness-adapter-acceptance.md)。            |
-| Agent 实时收信开关     | 默认关闭的 steer 偏好、同 turn 追加、批次结算与 Web 创建/编辑入口。        | 实现完成；完整检查、浏览器与真实原生证据待汇总，见 [Steer 投递验收](steer-delivery-acceptance.md)。             |
-| M3 Kimi Code（ACP）    | 通用 ACP adapter，Kimi Code 加入既有私聊、群聊与固定 session 协作。        | 自动化、浏览器与真实 Kimi 2.1.1 验收通过，见 [记录](kimi-acp-acceptance.md)。                                   |
-| M4 Claude CLI 接入     | 独立 adapter、固定 session、MCP、原生问答与 Codex 混合协作。               | 已接入；自动化和真实原生验收见 [记录](claude-cli-acceptance.md)。                                               |
-| M5 完整体验与长期运行  | 完善文件共享、生命周期、历史检索、备份和长时间运行体验。                   | 细分范围待讨论。                                                                                                |
+| 阶段                     | 交付结果                                                                   | 状态                                                                                                            |
+| ------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| M0 工程初始化            | 可启动的 Web/API、共享协议、SQLite/Drizzle、检查和构建入口。               | 已完成并验证。                                                                                                  |
+| M1 Codex 单 Agent 闭环   | 用户创建 Agent，私聊、观察执行、回答原生问题、停止并恢复同一 session。     | 链路及基础规则加载、压缩与恢复补充验收通过。                                                                    |
+| 基础修复                 | AGENTS.md 原生加载、简洁文本协议、频道序号、压缩和恢复验证。               | 历史验收已通过；当时的旧库迁移现已撤销。                                                                        |
+| M2 Codex 群聊协作        | 多个独立 Codex Agent 通过 MCP 参与群聊，权限与消息投递一致。               | 自动化与两个真实 Agent 的重新验收通过。                                                                         |
+| 配置与目录拆分           | TOML 配置、数据与工作区分离、共享目录规则、当前 schema 全新基线。          | 89 项测试、7 项浏览器测试与真实 Codex 验证通过；见 [验收记录](config-workspace-acceptance.md)。                 |
+| Agent 基础管理           | 编辑名称/模型/推理等级/权限，保留历史和文件的删除与只读历史入口。          | 105 项测试、10 项浏览器测试与真实 Codex 修改/删除/重启验证通过；见 [验收记录](agent-management-acceptance.md)。 |
+| 名称消息呈现             | 自动输入、收信与历史共用安全名称标签；目录保留完整 ID 寻址，更新持久规则。 | 108 项测试、10 项浏览器测试与真实 Codex 同名寻址/重启验证通过；见 [验收记录](name-message-acceptance.md)。      |
+| 群聊基础管理             | 创建/查询/改名/成员管理及保留历史的删除，成员继续使用同一 session。        | 本轮检查与真实 Codex 验证见 [群聊管理验收](group-management-acceptance.md)。                                    |
+| Harness 适配层           | 通用契约、注册目录、规范化生命周期与事件；完整抽出既有 Codex 行为。        | 128 项测试、13 项浏览器测试与两套真实 Codex 回归通过，见 [独立验收](harness-adapter-acceptance.md)。            |
+| Agent 实时收信开关       | 默认关闭的 steer 偏好、同 turn 追加、批次结算与 Web 创建/编辑入口。        | 实现完成；完整检查、浏览器与真实原生证据待汇总，见 [Steer 投递验收](steer-delivery-acceptance.md)。             |
+| M3 Kimi Code（本地 Web） | Kimi 原生 Web adapter、steer、子代理进度与固定 session 协作。              | 协议与浏览器回归、本机无模型协议验证见 [记录](kimi-web-acceptance.md)；此前 ACP 验收保留。                      |
+| M4 Claude CLI 接入       | 独立 adapter、固定 session、MCP、原生问答与 Codex 混合协作。               | 已接入；自动化和真实原生验收见 [记录](claude-cli-acceptance.md)。                                               |
+| M5 完整体验与长期运行    | 完善文件共享、生命周期、历史检索、备份和长时间运行体验。                   | 细分范围待讨论。                                                                                                |
 
 消息持久化、权限检查、停止和恢复从相应功能的第一阶段就实现；M5 扩展故障覆盖和体验，不用于推迟基础正确性。
 
-统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex、Claude CLI、Kimi Code、OpenCode 与 DSH；Codex、Claude、OpenCode 与 DSH 支持默认关闭的 steer，五者均支持忙碌排队和主动收信。
+统一协议与规则文件、原生加载、真实压缩与恢复及 M2 重新验收的历史结果见 [基础修复验收记录](foundation-repair-plan.md#8-验收记录)，其中的旧库迁移已按首发前政策移除。TOML、数据/工作区拆分及共享目录规则已实现并通过 [独立验收](config-workspace-acceptance.md)。按用户要求，Agent 编辑和删除从 M5 提前完成，见 [基础管理验收](agent-management-acceptance.md)。适配层已完成，当前注册 Codex、Claude CLI、Kimi Code、OpenCode 与 DSH；五种 harness 均支持默认关闭的 steer、忙碌排队和主动收信。
 
 配置与目录拆分的验收覆盖优先级、路径解析、数据库/token 位置、Codex 发现及错误、UI 保存与实时检测、工作区稳定性、共享目录和原生规则加载。当前结果为 89 项测试、7 项浏览器测试与两个真实 Codex Agent 的读写/重启验证通过。旧目录清理仍有进程占用及工具审批限制，具体边界见 [验收记录](config-workspace-acceptance.md#4-旧目录清理遗留项)。
 
@@ -176,6 +176,8 @@
 2026-10-04 验收通过：`pnpm check` 的 166 项测试、完整构建、16 项 Chrome 浏览器测试，以及真实 `codex-cli 0.160.0` / `gpt-6.1-sol` 的三来源 steer 验证。私聊、用户群消息与 Agent 群消息均进入原 thread/turn；reader 只有一次 turn/start，无收件箱或历史读取；重启保留开关和原 thread。数据库脚本使用独立配置，确认 10 表新基线无差异并成功初始化。完整证据与边界见 [独立验收](steer-delivery-acceptance.md)。
 
 ### 6.2 M3：Kimi Code 与通用 ACP adapter
+
+2026-10-10 用户确认改用 CLI 本地 `kimi web` 的 REST/WebSocket 接口，保持原 session 与模型，增加 steer 和主执行中的原生子代理进度。当前实现与协议验收见 [Kimi Web 接入](kimi-web-acceptance.md)，以下保留此前 ACP 接入事实。
 
 2026-10-08 用户确认接入 Kimi Code，并先实现通用 ACP adapter，后续采用 ACP 的 agent 只需新增 harness 配置；DSH 的本轮接入采用原生桥接以保留 steer。
 

@@ -1295,7 +1295,10 @@ test('creates Kimi Code, queues busy input and answers a native multi-select que
   await expect(dialog.getByLabel('推理等级')).toHaveValue('high');
   await expect(
     dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
+  await expect(
+    dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }),
+  ).toHaveAttribute('aria-checked', 'false');
   await dialog.getByRole('button', { name: 'Kimi Code 路径设置', exact: true }).click();
   await expect(dialog.getByLabel('Kimi Code 可执行文件路径')).toHaveValue(kimiPath);
   await dialog.getByLabel('名称').fill('Kimi 浏览器验证');
@@ -1360,6 +1363,79 @@ test('creates Kimi Code, queues busy input and answers a native multi-select que
   );
   await expect(page.getByText('Kimi 浏览器验证 需要你的回答')).not.toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test('steers Kimi within its original run and displays child progress and questions', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '新建 Agent' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '新建 Agent', exact: true });
+  await dialog.getByLabel('Harness').selectOption('kimi');
+  await dialog.getByLabel('名称').fill('Kimi steer 子代理验证');
+  await dialog.getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true }).click();
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+    ),
+    dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
+  ]);
+  const agent = (await created.json()) as Agent;
+  try {
+    expect(agent.steerEnabled).toBe(true);
+    await expect(page.getByTestId('agent-status')).toHaveText('可用');
+    await send(page, '保持执行以验证 Kimi steer');
+    await expect(page.getByTestId('agent-status')).toHaveText('执行中');
+    const before = (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs[0] as {
+      id: string;
+      turnId: string;
+      threadId: string;
+    };
+    await send(page, 'Kimi 忙碌追加消息');
+    await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+      'Kimi MCP 回复：Kimi 忙碌追加消息',
+    );
+    await expect
+      .poll(async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs)
+      .toMatchObject([
+        { id: before.id, turnId: before.turnId, threadId: before.threadId, status: 'completed' },
+      ]);
+    const detail = await (await page.request.get(`/api/agents/${agent.id}`)).json();
+    expect(detail.runs).toHaveLength(1);
+    expect(detail.runs[0].inputs).toEqual([{ channelId: agent.channelId, messageSeqs: [1, 2] }]);
+
+    await page.reload();
+    expect(
+      (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.steerEnabled,
+    ).toBe(true);
+    await send(page, 'Kimi 子代理提问');
+    await expect(page.getByText('Kimi steer 子代理验证 需要你的回答')).toBeVisible();
+    await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+    const inspector = page.getByTestId('inspector');
+    await expect(inspector).toContainText('子代理 页面助手 (agent-browser) · test-kimi-model');
+    await expect(inspector).toContainText('正在检查页面结构');
+    await expect(inspector).toContainText('已读取页面，等待范围确认');
+    await page.getByRole('checkbox', { name: '文档', exact: true }).check();
+    await page.getByRole('checkbox', { name: '测试', exact: true }).check();
+    const [answered] = await Promise.all([
+      page.waitForResponse((response) => response.url().endsWith('/answer')),
+      page.getByRole('button', { name: '提交回答' }).click(),
+    ]);
+    expect(answered.request().postDataJSON()).toEqual({
+      answers: { scope: { answers: ['文档', '测试'] } },
+    });
+    await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+      'Kimi 子代理回答：文档、测试',
+    );
+    await expect(page.getByText('Kimi steer 子代理验证 需要你的回答')).not.toBeVisible();
+    await expect(inspector).toContainText('页面检查完成');
+    await expect
+      .poll(async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs)
+      .toMatchObject([{ status: 'completed' }, { status: 'completed' }]);
+  } finally {
+    await page.request.delete(`/api/agents/${agent.id}`);
+  }
 });
 
 test('creates OpenCode with steer off, resumes its fixed session and answers a native multiselect question', async ({

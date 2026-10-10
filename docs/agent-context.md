@@ -18,7 +18,7 @@ Agent 执行、等待回答、创建或恢复时，先等待空闲或停止；�
 | ------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | Codex 0.161.0       | `thread/tokenUsage/updated.tokenUsage.last.totalTokens`，与原生 TUI 的窗口口径一致 | `modelContextWindow`；最近请求后的本地内容变化在后续报告时更新                                                           |
 | Claude Code 2.1.285 | `get_context_usage` 的 `detail: summary`，读取 `totalTokens/maxTokens`             | 原生估算，显示估算标识；不调用逐类 token-count 接口                                                                      |
-| Kimi Code 2.1.1     | ACP `usage_update.used/size`，原生每轮结束报告当前上下文                           | 原生当前 token count 与模型窗口                                                                                          |
+| Kimi Code 2.1.1     | 本地 web snapshot 的原生 context 用量                                              | 窗口来自原生模型目录；公开 API 未提供测量标识，显示估算；只读取主 Agent 用量                                             |
 | OpenCode 2.0.25     | 压缩后最新 assistant 调用的 input、output、reasoning、cache read/write 总和        | 原生 `limit.context`；普通摘要尚无新请求时使用原生字符密度估算；加密 `providerContext` 压缩后等待下一次用量报告          |
 | DSH 0.2.0-rc.2      | 原生 `tokenMeter.measure(session).totalTokens`，反映当前 surface 与压缩            | `resolveModelInfo().context.contextWindow` 与后续 `request/context`；原生 estimated baseline 或 surface 增量显示估算标识 |
 

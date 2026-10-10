@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { parse } from 'smol-toml';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
-import { kimiFixture } from './acp-fixture.js';
+import { kimiWebFixture } from './kimi-web-fixture.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -17,7 +17,7 @@ afterEach(async () => {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'isles-kimi-app-'));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const cli = await kimiFixture(root);
+  const cli = await kimiWebFixture(root);
   const config = new ConfigManager({
     configFilePath: join(root, 'config.toml'),
     homeDir: root,
@@ -49,13 +49,15 @@ async function fixture() {
       url: `/api/channels/${agent.channelId}/messages`,
       payload: { body, clientId: randomUUID() },
     });
-  const frames = async (method: string) =>
-    (await cli.records()).filter((frame) => frame.method === method);
+  const frames = async (tail: string, method = 'POST') =>
+    (await cli.records()).filter(
+      (frame) => frame.type === 'http' && frame.method === method && frame.path?.endsWith(tail),
+    );
   return { root, cli, config, app, create, send, frames };
 }
 
 describe('Kimi Code application integration', () => {
-  it('registers Kimi without steer and keeps its path and catalog independent', async () => {
+  it('registers Kimi with steer and keeps its path and catalog independent', async () => {
     const { app, config, cli, root } = await fixture();
     const harnesses = (await app.inject('/api/harnesses')).json().harnesses as {
       id: string;
@@ -71,7 +73,7 @@ describe('Kimi Code application integration', () => {
     ]);
     expect(harnesses[2]).toMatchObject({
       configuration: 'cli-path',
-      capabilities: { steer: false, sessionResume: true, mcp: true, userQuestions: true },
+      capabilities: { steer: true, sessionResume: true, mcp: true, userQuestions: true },
     });
     expect((await app.inject('/api/harnesses/kimi/status')).json()).toMatchObject({
       available: true,
@@ -101,7 +103,12 @@ describe('Kimi Code application integration', () => {
     expect(parse(await readFile(config.current.configFilePath, 'utf8'))).toMatchObject({
       kimi: { binary_path: missing },
     });
-    const refused = await app.inject({
+    await app.inject({
+      method: 'PUT',
+      url: '/api/harnesses/kimi/config',
+      payload: { binaryPath: cli.binary },
+    });
+    const steered = await app.inject({
       method: 'POST',
       url: '/api/agents',
       payload: {
@@ -112,7 +119,10 @@ describe('Kimi Code application integration', () => {
         steerEnabled: true,
       },
     });
-    expect(refused.statusCode).toBe(400);
+    expect(steered.statusCode).toBe(201);
+    const enabled = steered.json() as Agent;
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(enabled.id).status).toBe('ready'));
+    expect(enabled.steerEnabled).toBe(true);
   });
 
   it('creates a Kimi Agent, completes a private run and resumes the same session after stop', async () => {
@@ -121,13 +131,13 @@ describe('Kimi Code application integration', () => {
     const binding = app.isles.store.publicAgent(agent.id).threadId;
     expect(binding).toMatch(/^session_/);
     expect(app.isles.store.agentDetail(agent.id).runs).toEqual([]);
-    expect(await frames('session/prompt')).toEqual([]);
+    expect(await frames('/prompts')).toEqual([]);
     await send(agent, 'hello');
     await vi.waitFor(() =>
       expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([{ status: 'completed' }]),
     );
     const [run] = app.isles.store.agentDetail(agent.id).runs;
-    expect(run).toMatchObject({ threadId: binding, turnId: run!.id });
+    expect(run).toMatchObject({ threadId: binding, turnId: '1' });
     expect(run!.items).toMatchObject([
       { type: 'agentMessage', status: 'completed', text: expect.stringContaining('Reply: ') },
     ]);
@@ -138,8 +148,8 @@ describe('Kimi Code application integration', () => {
     await app.inject({ method: 'POST', url: `/api/agents/${agent.id}/resume`, payload: {} });
     await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
     expect(app.isles.store.publicAgent(agent.id).threadId).toBe(binding);
-    expect(await frames('session/resume')).toMatchObject([{ params: { sessionId: binding } }]);
-    expect(await frames('session/new')).toHaveLength(2);
+    expect(await frames(`/sessions/${binding}`, 'GET')).toHaveLength(1);
+    expect(await frames('/sessions')).toHaveLength(1);
   });
 
   it('queues busy input for the next Kimi turn in the same session', async () => {
@@ -152,7 +162,7 @@ describe('Kimi Code application integration', () => {
     expect(app.isles.store.listMessages(agent.channelId).at(-1)!.deliveries[0]!.status).toBe(
       'queued',
     );
-    expect(await frames('session/prompt')).toHaveLength(1);
+    await vi.waitFor(async () => expect(await frames('/prompts')).toHaveLength(1));
     await cli.set({ holdTurn: true, releaseHeld: true });
     await vi.waitFor(() =>
       expect(
@@ -164,10 +174,10 @@ describe('Kimi Code application integration', () => {
     ).toBe(1);
   });
 
-  it('keeps the service alive and the delivery uncertain on an invalid native result', async () => {
+  it('keeps the service alive and the delivery uncertain when native acceptance is lost', async () => {
     const { app, cli, create, send } = await fixture();
     const agent = await create();
-    await cli.set({ invalidPromptResult: true });
+    await cli.set({ loseBeforeAcceptance: true });
     await send(agent, 'invalid response');
     await vi.waitFor(() =>
       expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([{ status: 'uncertain' }]),
@@ -177,5 +187,77 @@ describe('Kimi Code application integration', () => {
       'uncertain',
     );
     expect((await app.inject('/api/health')).statusCode).toBe(200);
+  });
+
+  it('appends new messages to the active turn when steer is enabled', async () => {
+    const { app, cli, create, send, frames } = await fixture();
+    const agent = await create({ steerEnabled: true });
+    await cli.set({ holdTurn: true });
+    await send(agent, 'initial');
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('running'));
+    await send(agent, 'append');
+    await vi.waitFor(async () => expect(await frames(':steer')).toHaveLength(1));
+    await cli.finish(app.isles.store.publicAgent(agent.id).threadId!);
+    await vi.waitFor(() =>
+      expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([{ status: 'completed' }]),
+    );
+    expect(app.isles.store.agentDetail(agent.id).runs).toHaveLength(1);
+    expect(
+      app.isles.store.listMessages(agent.channelId).map((message) => message.deliveries[0]!.status),
+    ).toEqual(['completed', 'completed']);
+    expect(await frames('/prompts')).toHaveLength(2);
+  });
+
+  it('retains a cross-turn steer as uncertain and does not submit its messages twice', async () => {
+    const { app, cli, create, send, frames } = await fixture();
+    const agent = await create({ steerEnabled: true });
+    await cli.set({ manualOutput: true, boundaryOnSteer: true });
+    await send(agent, 'initial');
+    await vi.waitFor(() => expect(app.isles.store.agentDetail(agent.id).runs[0]?.turnId).toBe('1'));
+    await send(agent, 'late append');
+    await vi.waitFor(() =>
+      expect(app.isles.store.listMessages(agent.channelId).at(-1)!.deliveries[0]!.status).toBe(
+        'uncertain',
+      ),
+    );
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('error'));
+    expect(await frames('/prompts')).toHaveLength(2);
+    expect(await frames(':steer')).toHaveLength(1);
+    expect(await frames(':abort')).toHaveLength(2);
+    expect(app.isles.store.agentDetail(agent.id).runs).toHaveLength(1);
+    expect((await app.inject('/api/health')).statusCode).toBe(200);
+  });
+
+  it('publishes context usage for the current session and resets it when creating a new session', async () => {
+    const { app, cli, create, frames } = await fixture();
+    const agent = await create();
+    const firstId = app.isles.store.publicAgent(agent.id).threadId!;
+    await cli.emit(firstId, 'agent.status.updated', {
+      contextTokens: 12345,
+      maxContextTokens: 262144,
+    });
+    await vi.waitFor(() =>
+      expect(app.isles.store.agentDetail(agent.id).contextUsage).toMatchObject({
+        sessionId: firstId,
+        usedTokens: 12345,
+        maxTokens: 262144,
+        estimated: true,
+      }),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agent.id}/new-session`,
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
+    const newId = app.isles.store.publicAgent(agent.id).threadId!;
+    expect(newId).not.toBe(firstId);
+    expect(app.isles.store.agentDetail(agent.id).contextUsage).toMatchObject({
+      sessionId: newId,
+      usedTokens: 0,
+    });
+    expect(await frames('/sessions')).toHaveLength(2);
+    expect(app.isles.store.agentDetail(agent.id).runs).toEqual([]);
   });
 });
