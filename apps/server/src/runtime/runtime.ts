@@ -41,6 +41,8 @@ interface Active {
 }
 interface Handle {
   session?: HarnessSession;
+  // An exited connection still owns its process until asynchronous cleanup finishes.
+  retiring?: Promise<void>;
   active?: Active;
   task?: Promise<void>;
   // A newer stop/resume/delete supersedes a control request waiting on native I/O.
@@ -407,6 +409,10 @@ export class Runtime {
   private async pump(id: string, handle: Handle) {
     try {
       while (!this.closing && this.runnable(id)) {
+        if (handle.retiring) {
+          await handle.retiring;
+          if (this.closing || !this.runnable(id)) break;
+        }
         if (handle.refresh && handle.session) {
           // Reconnect through the adapter to reload settings and tools in the same session.
           const client = handle.session;
@@ -440,6 +446,7 @@ export class Runtime {
       } else this.log.debug({ err: error, agentId: id }, 'Native session ended while stopping');
       await handle.session?.close();
       delete handle.session;
+      await handle.retiring;
     }
   }
   private async turn(
@@ -520,7 +527,19 @@ export class Runtime {
       { err: error, agentId: id, runId: handle.active?.run.id },
       'Native process exited unexpectedly',
     );
+    const exited = handle.session;
     delete handle.session;
+    if (exited) {
+      const retiring = Promise.resolve()
+        .then(() => exited.close())
+        .catch((error: unknown) =>
+          this.log.warn({ err: error, agentId: id }, 'Exited native session cleanup failed'),
+        );
+      handle.retiring = retiring;
+      void retiring.then(() => {
+        if (handle.retiring === retiring) delete handle.retiring;
+      });
+    }
     if (handle.active) {
       this.flushOutput(handle.active, 'failed');
       this.store.finishRun(
@@ -757,6 +776,7 @@ export class Runtime {
     }
     await client?.close();
     if (handle.session === client) delete handle.session;
+    await handle.retiring;
   }
   async resume(id: string) {
     let agent = this.managed(id);
@@ -772,6 +792,7 @@ export class Runtime {
       return agent;
     };
     await handle.task;
+    await handle.retiring;
     agent = current();
     if (agent.threadCreationAttempted && !agent.threadId)
       throw new HttpError(409, '原生 thread 创建结果不明，无法用新 thread 替代；请核对原生记录。');
@@ -815,6 +836,7 @@ export class Runtime {
   }
   private async replaceSession(id: string, handle: Handle, previousSessionId: string | null) {
     try {
+      await handle.retiring;
       const previous = handle.session;
       // Fence late events and exits from the old process before shutdown awaits native I/O.
       if (handle.session === previous) delete handle.session;
@@ -892,6 +914,7 @@ export class Runtime {
         await handle.task?.catch((error: unknown) =>
           this.log.warn({ err: error }, 'Agent initialization ended during shutdown'),
         );
+        await handle.retiring;
       }),
     );
   }

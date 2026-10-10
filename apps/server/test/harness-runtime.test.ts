@@ -642,6 +642,32 @@ describe('runtime with independent semantic harness adapters', () => {
     session.complete();
   });
 
+  it('waits for an exited native session to release its process before shutdown completes', async () => {
+    const { app, a, create } = await fixture();
+    const agent = await create(a);
+    const session = a.latest(agent.id);
+    let release!: () => void;
+    const terminated = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const close = vi.spyOn(session, 'close').mockImplementation(() => terminated);
+    session.handlers.exit(new Error('Native connection lost'));
+    expect(app.isles.store.publicAgent(agent.id).status).toBe('error');
+    let closed = false;
+    const shutdown = app.close().then(() => {
+      closed = true;
+    });
+    try {
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(closed).toBe(false);
+    } finally {
+      release();
+      await shutdown;
+    }
+    expect(closed).toBe(true);
+  });
+
   it('stops both adapters by closing, uses optional interruption, and persists uncertain active work on shutdown', async () => {
     const { app, a, b, create, send, delivery, open } = await fixture();
     const first = await create(a);

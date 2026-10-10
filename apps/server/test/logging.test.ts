@@ -51,7 +51,8 @@ describe('log files', () => {
     const [day, next] = [`isles-${stamp(at(0, 0))}.log`, `isles-${stamp(at(1, 0))}.log`];
     expect(readFileSync(join(dir, day), 'utf8')).toBe('a\nb\n');
     expect(readFileSync(join(dir, next), 'utf8')).toBe('c\n');
-    expect(statSync(join(dir, next)).mode & 0o777).toBe(0o600);
+    // Windows reports access through ACLs rather than POSIX permission bits.
+    if (process.platform !== 'win32') expect(statSync(join(dir, next)).mode & 0o777).toBe(0o600);
   });
 
   it('continues in numbered segments when a file reaches its size limit', async () => {

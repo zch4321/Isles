@@ -89,7 +89,14 @@ describe('Codex native boundaries', () => {
       join(dir, 'app-server'),
       `
 const readline = require('node:readline');
-const send = (v) => { const s=JSON.stringify(v)+'\\n'; process.stdout.write(s.slice(0,3)); setTimeout(()=>process.stdout.write(s.slice(3)), 1); };
+let sending = Promise.resolve();
+const send = (v) => {
+ const s = JSON.stringify(v) + '\\n';
+ sending = sending.then(() => new Promise(resolve => {
+  process.stdout.write(s.slice(0,3));
+  setTimeout(() => { process.stdout.write(s.slice(3)); resolve(); }, 1);
+ }));
+};
 let initialized=false;
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const f=JSON.parse(line);
