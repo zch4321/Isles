@@ -733,7 +733,85 @@ describe('durable runtime with simulated Codex', () => {
     expect(restarted.isles.store.agentDetail(agent.id).runs).toHaveLength(2);
   });
 
-  it('marks unknown acceptance on crash/restart and never blindly redelivers it', async () => {
+  it('resumes an Agent after an authentication failure on startup without replaying its failed input', async () => {
+    const { app, harness, create, open } = await fixture();
+    const agent = await create();
+    app.isles.runtime.send(agent.channelId, { body: 'Failed input', clientId: 'failed' });
+    await expect.poll(() => harness.turns).toBe(1);
+    const originalClient = harness.latest(agent.id);
+    const error =
+      'Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.';
+    originalClient.handlers.notification('turn/completed', {
+      threadId: agent.threadId,
+      turn: { id: originalClient.turnId, status: 'failed', error: { message: error } },
+    });
+    await expect.poll(() => app.isles.store.publicAgent(agent.id).error).toBe(error);
+    app.isles.runtime.send(agent.channelId, { body: 'Queued input', clientId: 'queued' });
+    await app.close();
+    const restarted = await open();
+    cleanups.push(() => restarted.close());
+    await expect.poll(() => harness.turns).toBe(2);
+    expect(originalClient.closed).toBe(true);
+    expect(harness.latest(agent.id).calls[0]).toMatchObject({
+      method: 'thread/resume',
+      params: { threadId: agent.threadId },
+    });
+    expect(harness.bodies(agent.id)).toEqual([['Failed input'], ['Queued input']]);
+    expect(restarted.isles.store.publicAgent(agent.id)).toMatchObject({
+      threadId: agent.threadId,
+      error: null,
+      status: 'running',
+    });
+    expect(
+      restarted.isles.store.listMessages(agent.channelId).map((m) => m.deliveries[0]!.status),
+    ).toEqual(['failed', 'accepted']);
+    harness.latest(agent.id).complete();
+    await expect.poll(() => restarted.isles.store.publicAgent(agent.id).status).toBe('ready');
+    expect(
+      harness.clients.flatMap((c) => c.calls).filter((c) => c.method === 'thread/start'),
+    ).toHaveLength(1);
+  });
+
+  it('attempts startup recovery once per running Agent and retries failures on the next restart', async () => {
+    const { app, harness, create, open } = await fixture();
+    const missing = await create('Missing session');
+    const healthy = await create('Healthy');
+    const stopped = await create('Stopped');
+    await app.isles.runtime.stop(stopped.id);
+    await app.close();
+    harness.persistedThreads.delete(missing.threadId!);
+    const restarted = await open();
+    cleanups.push(() => restarted.close());
+    await expect.poll(() => restarted.isles.store.publicAgent(missing.id).status).toBe('error');
+    await expect.poll(() => restarted.isles.store.publicAgent(healthy.id).status).toBe('ready');
+    expect(restarted.isles.store.publicAgent(missing.id)).toMatchObject({
+      threadId: missing.threadId,
+      desiredState: 'running',
+      error: 'no rollout found for thread id',
+    });
+    expect(restarted.isles.store.publicAgent(stopped.id).status).toBe('stopped');
+    expect(harness.clients.filter((c) => c.agent.id === stopped.id)).toHaveLength(1);
+    expect(harness.latest(missing.id).closed).toBe(true);
+    restarted.isles.runtime.start('http://127.0.0.1:1');
+    restarted.isles.runtime.send(missing.channelId, { body: 'Later input', clientId: 'later' });
+    expect(harness.clients.filter((c) => c.agent.id === missing.id)).toHaveLength(2);
+    expect(harness.clients.filter((c) => c.agent.id === healthy.id)).toHaveLength(2);
+    expect(harness.turns).toBe(0);
+    harness.persistedThreads.add(missing.threadId!);
+    await restarted.close();
+    const retried = await open();
+    cleanups.push(() => retried.close());
+    await expect.poll(() => harness.turns).toBe(1);
+    expect(harness.bodies(missing.id)).toEqual([['Later input']]);
+    expect(harness.clients.filter((c) => c.agent.id === missing.id)).toHaveLength(3);
+    expect(
+      harness.clients.flatMap((c) => c.calls).filter((c) => c.method === 'thread/start'),
+    ).toHaveLength(3);
+    harness.latest(missing.id).complete();
+    await expect.poll(() => retried.isles.store.publicAgent(missing.id).status).toBe('ready');
+  });
+
+  it('automatically recovers after an interrupted run without redelivering uncertain input', async () => {
     const { app, harness, create, open } = await fixture();
     const agent = await create();
     const accepted = app.isles.runtime.send(agent.channelId, {
@@ -747,10 +825,8 @@ describe('durable runtime with simulated Codex', () => {
     const store = restarted.isles.store;
     expect(store.listMessages(agent.channelId)[0]!.deliveries[0]!.status).toBe('uncertain');
     expect(store.agentDetail(agent.id).runs[0]!.status).toBe('uncertain');
-    expect(store.publicAgent(agent.id).status).toBe('error');
-    expect(harness.turns).toBe(1);
-    await restarted.isles.runtime.resume(agent.id);
     await expect.poll(() => harness.turns).toBe(2);
+    expect(store.publicAgent(agent.id)).toMatchObject({ threadId: agent.threadId, error: null });
     expect(harness.bodies(agent.id)[1]).toEqual(['后续排队']);
     expect(
       store

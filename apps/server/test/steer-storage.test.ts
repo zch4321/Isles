@@ -363,7 +363,7 @@ describe('steer delivery storage', () => {
         status: 'uncertain',
         included: [{ channelId: message.channelId, seq: message.seq }],
       });
-      expect(recovered.getAgent(f.agent.id).status).toBe('error');
+      expect(recovered.getAgent(f.agent.id)).toMatchObject({ status: 'recovering', error: null });
       expect(f.status(message)).toBe('uncertain');
       recovered.acceptSteer(batch.id, 'turn-one');
       recovered.rejectSteer(batch.id, 'late refusal');

@@ -1353,14 +1353,12 @@ export class Store {
   }
   recoverOnBoot() {
     // Pending ACKs also exist after a normal native completion. They must never fall
-    // through the active-run query and become silently eligible for another input.
+    // through the active-run query and become eligible for redelivery.
     const pendingSteers = this.db
-      .select({ id: steerBatches.id, agentId: steerBatches.agentId })
+      .select({ id: steerBatches.id })
       .from(steerBatches)
       .where(eq(steerBatches.status, 'pending'))
       .all();
-    // Batch outcome and the Agent's recovery barrier must persist together: another
-    // crash between them must not turn a completed run's uncertain input into a resume.
     this.change(() => {
       for (const batch of pendingSteers)
         this.settleSteer(
@@ -1369,21 +1367,6 @@ export class Store {
           '服务在 steer 确认持久化前退出，原生结果待核对；不会自动重投。',
           'uncertain',
         );
-      for (const agentId of new Set(pendingSteers.map((b) => b.agentId))) {
-        const agent = this.getAgent(agentId);
-        if (agent.status !== 'deleted' && agent.desiredState === 'running') {
-          const update = {
-            status: 'error' as const,
-            error: '上次 steer 结果待核对，请查看原生记录后显式恢复。',
-          };
-          this.db
-            .update(agents)
-            .set({ ...update, updatedAt: now() })
-            .where(eq(agents.id, agentId))
-            .run();
-          this.event('agent', { agentId }, update);
-        }
-      }
     });
     const active = this.db
       .select({ id: runs.id, agentId: runs.agentId })
@@ -1401,15 +1384,11 @@ export class Store {
         'uncertain',
         '服务在执行结束前退出，原生结果待核对；不会自动重投。',
       );
-      if (this.getAgent(r.agentId).desiredState === 'running')
-        this.updateAgent(r.agentId, {
-          status: 'error',
-          error: '上次执行结果待核对，请查看原生记录后显式恢复。',
-        });
     }
+    // Retry each running Agent's connection once on boot; only queued input is scheduled.
     for (const agent of this.listAgents()) {
       if (agent.desiredState === 'stopped') this.updateAgent(agent.id, { status: 'stopped' });
-      else if (agent.status !== 'error') this.updateAgent(agent.id, { status: 'recovering' });
+      else this.updateAgent(agent.id, { status: 'recovering', error: null });
     }
   }
 }

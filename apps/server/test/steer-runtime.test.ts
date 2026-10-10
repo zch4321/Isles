@@ -391,10 +391,11 @@ describe('configurable steer scheduling', () => {
     client.complete();
     await app.close();
     const reopened = await open();
+    await expect.poll(() => reopened.isles.store.publicAgent(agent.id).status).toBe('ready');
     expect(reopened.isles.store.publicAgent(agent.id)).toMatchObject({
       steerEnabled: true,
       threadId: agent.threadId,
-      status: 'error',
+      error: null,
     });
     const input = reopened.isles.store
       .listMessages(agent.channelId)
@@ -402,8 +403,6 @@ describe('configurable steer scheduling', () => {
     expect(input.deliveries[0]!.status).toBe('uncertain');
     expect(harness.bodies(agent.id)).toHaveLength(1);
     await reopened.isles.runtime.updateAgent(agent.id, { steerEnabled: false });
-    await reopened.isles.runtime.resume(agent.id);
-    await expect.poll(() => reopened.isles.store.publicAgent(agent.id).status).toBe('ready');
     expect(reopened.isles.store.publicAgent(agent.id)).toMatchObject({
       steerEnabled: false,
       threadId: agent.threadId,

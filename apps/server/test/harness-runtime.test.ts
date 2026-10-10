@@ -386,7 +386,13 @@ describe('runtime with independent semantic harness adapters', () => {
     await expect.poll(() => delivery(first)).toEqual(['cancelled', 'accepted']);
     await app.close();
     const restarted = await open();
-    expect(restarted.isles.store.publicAgent(first.id).status).toBe('error');
+    await expect.poll(() => restarted.isles.store.publicAgent(first.id).status).toBe('ready');
+    expect(restarted.isles.store.publicAgent(first.id)).toMatchObject({
+      threadId: first.threadId,
+      error: null,
+    });
+    expect(a.latest(first.id).resumed).toEqual([nativeId]);
+    expect(restarted.isles.store.publicAgent(second.id).status).toBe('stopped');
     expect(
       restarted.isles.store
         .listMessages(first.channelId)
