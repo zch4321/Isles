@@ -1228,20 +1228,21 @@ export class Store {
       .all();
     return { ...row, inputs, items };
   }
-  updateItem(runId: string, item: RunItem, append = false) {
-    const run = this.getRun(runId);
+  /** Complete snapshots share one transaction and one execution notification. */
+  updateItems(runId: string, items: RunItem[]) {
+    if (!items.length) return;
+    const run = this.db.select().from(runs).where(eq(runs.id, runId)).get();
+    if (!run) throw new HttpError(404, '执行不存在');
     if (run.finishedAt) return;
     this.change(() => {
-      const key = `${runId}:${item.id}`;
-      const previous = append
-        ? (this.db.select().from(runItems).where(eq(runItems.key, key)).get()?.text ?? '')
-        : '';
-      const text = (previous + item.text).slice(-128_000);
-      this.db
-        .insert(runItems)
-        .values({ ...item, text, key, runId })
-        .onConflictDoUpdate({ target: runItems.key, set: { ...item, text } })
-        .run();
+      for (const item of items) {
+        const text = item.text.slice(-128_000);
+        this.db
+          .insert(runItems)
+          .values({ ...item, text, key: `${runId}:${item.id}`, runId })
+          .onConflictDoUpdate({ target: runItems.key, set: { ...item, text } })
+          .run();
+      }
       this.event('run', { agentId: run.agentId }, { runId });
     });
   }

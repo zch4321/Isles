@@ -36,11 +36,13 @@ async function fixture() {
   const workspace = new AgentWorkspace(config);
   const environment = new ClaudeEnvironment(config, workspace);
   const received: ClaudeFrame[] = [];
+  let emit!: (frame: ClaudeFrame) => void;
   const adapter = new ClaudeAdapter(
     environment,
     undefined,
-    (command, args, cwd, env, handlers, log) =>
-      new ClaudeClient(
+    (command, args, cwd, env, handlers, log) => {
+      emit = handlers.event;
+      return new ClaudeClient(
         command,
         args,
         cwd,
@@ -54,7 +56,8 @@ async function fixture() {
         },
         environment.redactor,
         log,
-      ),
+      );
+    },
   );
   const agent: AgentRecord = {
     id: randomUUID(),
@@ -96,10 +99,63 @@ async function fixture() {
     reasoningEffort: agent.reasoningEffort,
     workspace: agent.workspace,
   });
-  return { root, cli, config, adapter, agent, events, received, questions, output, connect, input };
+  return {
+    root,
+    cli,
+    config,
+    adapter,
+    agent,
+    events,
+    received,
+    questions,
+    output,
+    connect,
+    input,
+    emit: (frame: ClaudeFrame) => emit(frame),
+  };
 }
 
 describe('Claude CLI adapter', () => {
+  it('ignores partial stream frames and publishes complete assistant and tool snapshots', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    const before = f.events.length;
+    const identity = { session_id: id, user_message_uuid: input.runId };
+    f.emit({
+      ...identity,
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'partial' } },
+    });
+    f.emit({ ...identity, type: 'tool_progress', tool_use_id: 'tool', elapsed_time_seconds: 1 });
+    expect(f.events).toHaveLength(before);
+    f.emit({
+      ...identity,
+      type: 'assistant',
+      message: {
+        id: 'complete-message',
+        content: [
+          { type: 'text', text: 'Complete answer' },
+          { type: 'thinking', thinking: 'Complete reasoning' },
+          { type: 'tool_use', id: 'tool', name: 'isles.send_message', input: { body: 'Sent' } },
+        ],
+      },
+    });
+    f.emit({
+      ...identity,
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'tool', content: 'Done' }] },
+    });
+    expect(f.events.slice(before)).toMatchObject([
+      { type: 'item', append: false, item: { type: 'agentMessage', status: 'completed' } },
+      { type: 'item', append: false, item: { type: 'reasoning', status: 'completed' } },
+      { type: 'item', append: false, item: { id: 'tool', status: 'running' } },
+      { type: 'item', append: false, item: { id: 'tool', status: 'completed' } },
+    ]);
+  });
+
   it('keeps the latest context snapshot when two result controls respond in reverse order', async () => {
     const f = await fixture();
     const session = await f.connect();

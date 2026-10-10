@@ -83,7 +83,7 @@ export function apply(ctx, config = {}) {
     cwd: rec.cwd,
     contextUsage: contextUsage(rec),
   });
-  const emitAssistant = (rec, turnId, step, blocks, status, eventId) => {
+  const emitAssistant = (rec, turnId, step, blocks, status, eventId, type = 'item') => {
     for (const [blockType, itemType, prefix] of [
       ['text', 'agentMessage', 'assistant'],
       ['reasoning', 'reasoning', 'reasoning'],
@@ -93,13 +93,14 @@ export function apply(ctx, config = {}) {
       emit(
         rec,
         {
-          type: 'item',
+          type,
           turnId,
           append: false,
           item: { id: `${prefix}:${turnId}:${step}`, type: itemType, status, text },
         },
         `${eventId}:${prefix}`,
       );
+      if (type === 'item_delta') rec.streamKinds.get(`${turnId}:${step}`)?.add(prefix);
     }
   };
   const clearOwnPending = (rec) => {
@@ -179,6 +180,7 @@ export function apply(ctx, config = {}) {
               rejectInput(rec, id, '本次执行未接收该输入', `${eventId}:input:${id}`);
           }
           if (rec.activeTurn === turnId) rec.activeTurn = undefined;
+          rec.streamKinds.clear();
           const kind = data.reason?.kind;
           emit(
             rec,
@@ -213,6 +215,7 @@ export function apply(ctx, config = {}) {
             data.interrupted ? 'interrupted' : 'completed',
             eventId,
           );
+          rec.streamKinds.delete(`${data.turn}:${data.step}`);
         } else if (nativeEvent.type === 'tool/call') {
           const type = data.name.startsWith('mcp__') ? 'mcpToolCall' : 'toolCall';
           rec.tools.set(String(data.callId), type);
@@ -259,25 +262,62 @@ export function apply(ctx, config = {}) {
       ({ agent, frame }) => {
         const rec = record(agent);
         if (!rec) return;
-        if (frame.type === 'start')
+        if (frame.type === 'start') {
+          const turnId = String(frame.turn);
+          const key = `${turnId}:${frame.step}`;
+          for (const prefix of rec.streamKinds.get(key) ?? [])
+            emit(
+              rec,
+              {
+                type: 'item_delta',
+                turnId,
+                append: false,
+                item: {
+                  id: `${prefix}:${turnId}:${frame.step}`,
+                  type: prefix === 'reasoning' ? 'reasoning' : 'agentMessage',
+                  status: 'running',
+                  text: '',
+                },
+              },
+              `${rec.id}:stream:${frame.attemptId}:${frame.revision}:reset:${prefix}`,
+            );
+          const emitted = new Set();
+          rec.streamKinds.set(key, emitted);
           rec.streams.set(frame.attemptId, {
-            turnId: String(frame.turn),
+            turnId,
             step: frame.step,
             assembler: new BlockAssembler(),
+            emitted,
           });
+        }
         const stream = rec.streams.get(frame.attemptId);
         if (!stream) return;
         if (frame.type === 'chunk') {
           stream.assembler.push(frame.chunk);
-          if (frame.chunk.type === 'text-delta' || frame.chunk.type === 'reasoning-delta')
-            emitAssistant(
+          if (
+            (frame.chunk.type === 'text-delta' || frame.chunk.type === 'reasoning-delta') &&
+            frame.chunk.text !== ''
+          ) {
+            const reasoning = frame.chunk.type === 'reasoning-delta';
+            const prefix = reasoning ? 'reasoning' : 'assistant';
+            emit(
               rec,
-              stream.turnId,
-              stream.step,
-              stream.assembler.interruptedBlocks(),
-              'running',
-              `${rec.id}:stream:${frame.attemptId}:${frame.revision}`,
+              {
+                type: 'item_delta',
+                turnId: stream.turnId,
+                // Retries keep turn/step identity but start a fresh native attempt.
+                append: stream.emitted.has(prefix),
+                item: {
+                  id: `${prefix}:${stream.turnId}:${stream.step}`,
+                  type: reasoning ? 'reasoning' : 'agentMessage',
+                  status: 'running',
+                  text: frame.chunk.text,
+                },
+              },
+              `${rec.id}:stream:${frame.attemptId}:${frame.revision}:${prefix}`,
             );
+            stream.emitted.add(prefix);
+          }
         } else if (frame.type === 'end') {
           if (frame.outcome.kind !== 'committed' || frame.outcome.eventType !== 'assistant/message')
             emitAssistant(
@@ -287,6 +327,7 @@ export function apply(ctx, config = {}) {
               stream.assembler.interruptedBlocks(),
               frame.outcome.kind === 'committed' ? 'completed' : 'failed',
               `${rec.id}:stream:${frame.attemptId}:${frame.revision}`,
+              'item_delta',
             );
           rec.streams.delete(frame.attemptId);
         }
@@ -440,6 +481,7 @@ export function apply(ctx, config = {}) {
         selection,
         inputs: new Map(),
         streams: new Map(),
+        streamKinds: new Map(),
         tools: new Map(),
         interrupting: false,
         contextWindow: resolved.contextWindow,

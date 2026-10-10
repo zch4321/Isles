@@ -33,12 +33,20 @@ export class Redactor {
       Object.values(value).forEach((v) => this.collect(v));
   }
   text(value: unknown): string {
-    let output =
+    const output =
       typeof value === 'string'
         ? value
         : value instanceof Error
           ? value.message
           : '原生执行发生错误';
+    return this.scrub(output).slice(0, 64_000);
+  }
+  /** Execution output is bounded by its consumer after scrubbing. */
+  output(value: string): string {
+    return this.scrub(value);
+  }
+  private scrub(value: string): string {
+    let output = value;
     for (const secret of this.secrets) output = output.split(secret).join('[redacted]');
     return output
       .replace(/Bearer\s+[^\s"'\\]+/gi, 'Bearer [redacted]')
@@ -46,8 +54,7 @@ export class Redactor {
       .replace(
         /((?:access_token|refresh_token|api_key|authorization|cookie)\s*[=:]\s*)[^\s,;]+/gi,
         '$1[redacted]',
-      )
-      .slice(0, 64_000);
+      );
   }
   /** Log form of an error, scrubbed like `text`; the server logger applies it to every `err`. */
   error(value: unknown, depth = 0): ErrorDetails {

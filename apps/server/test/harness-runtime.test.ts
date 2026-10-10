@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import {
   HarnessSubmissionRejected,
@@ -357,6 +357,252 @@ describe('runtime with independent semantic harness adapters', () => {
     expect(a.creations).toBe(1);
     expect(b.creations).toBe(1);
   });
+
+  it.each(['fake-a', 'fake-b'])(
+    'keeps thousands of %s stream fragments off storage and notifications while discrete updates stay live',
+    async (harnessId) => {
+      const { app, a, b, create, send, delivery } = await fixture();
+      const adapter = harnessId === 'fake-a' ? a : b;
+      const agent = await create(adapter);
+      send(agent, 'Stream without refresh');
+      await expect.poll(() => delivery(agent)).toEqual(['accepted']);
+      const session = adapter.latest(agent.id);
+      const emit = (
+        type: 'item' | 'item_delta',
+        id: string,
+        text: string,
+        append = true,
+        status = 'running',
+        itemType = 'agentMessage',
+      ) =>
+        session.emit({
+          type,
+          sessionId: nativeId,
+          turnId: session.turnId,
+          append,
+          item: { id, type: itemType, status, text },
+        });
+      emit('item', 'command', 'command: echo\n', false, 'running', 'commandExecution');
+      const store = app.isles.store;
+      const cursor = store.cursor();
+      const notified = vi.fn();
+      const unsubscribe = store.subscribe(notified);
+      const read = vi.spyOn(store, 'getRun');
+      for (let n = 0; n < 10_000; n++) {
+        emit('item_delta', 'thought', 'x', true, 'running', 'reasoning');
+        emit('item_delta', 'answer', `draft ${n}`, false);
+        emit('item_delta', 'command', 'y', true, 'running', 'toolCall');
+      }
+      expect(read).not.toHaveBeenCalled();
+      read.mockRestore();
+      expect(store.cursor()).toBe(cursor);
+      expect(notified).not.toHaveBeenCalled();
+      expect(store.agentDetail(agent.id).runs[0]!.items).toEqual([
+        { id: 'command', type: 'commandExecution', status: 'running', text: 'command: echo\n' },
+      ]);
+      const formal = app.isles.runtime.publish(agent.id, agent.channelId, {
+        body: 'Formal message stays live',
+        clientId: randomUUID(),
+      });
+      expect(store.listMessages(agent.channelId).at(-1)!.seq).toBe(formal.seq);
+      expect(notified).toHaveBeenCalled();
+      session.question('stream-question');
+      expect(store.agentDetail(agent.id).questions).toHaveLength(1);
+      app.isles.runtime.answer(agent.id, store.agentDetail(agent.id).questions[0]!.id, {
+        answers: { choice: { answers: ['Continue'] } },
+      });
+      notified.mockClear();
+      emit('item', 'thought', '', true, 'completed', 'reasoning');
+      expect(notified.mock.calls.map(([event]) => event.type)).toEqual(['run']);
+      expect(store.agentDetail(agent.id).runs[0]!.items).toContainEqual({
+        id: 'thought',
+        type: 'reasoning',
+        status: 'completed',
+        text: 'x'.repeat(10_000),
+      });
+      emit('item', 'answer', 'Final answer', false, 'completed');
+      emit('item', 'command', '', true, 'completed', 'toolCall');
+      session.complete();
+      await expect.poll(() => store.publicAgent(agent.id).status).toBe('ready');
+      const items = store.agentDetail(agent.id).runs[0]!.items;
+      expect(items).toContainEqual({
+        id: 'answer',
+        type: 'agentMessage',
+        status: 'completed',
+        text: 'Final answer',
+      });
+      expect(items).toContainEqual({
+        id: 'command',
+        type: 'commandExecution',
+        status: 'completed',
+        text: 'command: echo\n' + 'y'.repeat(10_000),
+      });
+      const finalCursor = store.cursor();
+      emit('item_delta', 'answer', 'late fragment');
+      expect(store.cursor()).toBe(finalCursor);
+      expect(store.agentDetail(agent.id).runs[0]!.items).toEqual(items);
+      unsubscribe();
+    },
+  );
+
+  it.each(['completed', 'failed', 'interrupted', 'stop', 'exit', 'shutdown'] as const)(
+    'saves buffered partial output once on %s and redacts secrets split across chunks',
+    async (boundary) => {
+      const { app, a, create, send, delivery, open } = await fixture();
+      const agent = await create(a);
+      send(agent, 'Save partial output');
+      await expect.poll(() => delivery(agent)).toEqual(['accepted']);
+      const session = a.latest(agent.id);
+      app.isles.runtime.workspace.redactor.add('fixture-output-secret');
+      const cursor = app.isles.store.cursor();
+      for (const text of ['Partial fixture-output-', 'secret result'])
+        session.emit({
+          type: 'item_delta',
+          sessionId: nativeId,
+          turnId: session.turnId,
+          append: true,
+          item: { id: 'partial', type: 'agentMessage', status: 'running', text },
+        });
+      expect(app.isles.store.cursor()).toBe(cursor);
+      let observed = app;
+      if (boundary === 'stop') await app.isles.runtime.stop(agent.id);
+      else if (boundary === 'exit') session.handlers.exit(new Error('Fixture connection lost'));
+      else if (boundary === 'shutdown') {
+        await app.close();
+        observed = await open();
+      } else
+        session.emit({
+          type: 'turn_completed',
+          sessionId: nativeId,
+          turnId: session.turnId,
+          status: boundary,
+          error: boundary === 'failed' ? 'Fixture run failed' : null,
+        });
+      const run = observed.isles.store.agentDetail(agent.id).runs[0]!;
+      expect(run.status).toBe(
+        boundary === 'exit' || boundary === 'shutdown'
+          ? 'uncertain'
+          : boundary === 'stop'
+            ? 'interrupted'
+            : boundary,
+      );
+      expect(run.items).toEqual([
+        {
+          id: 'partial',
+          type: 'agentMessage',
+          status:
+            boundary === 'exit'
+              ? 'failed'
+              : boundary === 'stop' || boundary === 'shutdown'
+                ? 'interrupted'
+                : boundary,
+          text: 'Partial [redacted] result',
+        },
+      ]);
+      expect(
+        observed.isles.store
+          .eventsAfter(cursor)
+          .filter(
+            (event) => event.type === 'run' && event.data.runId === run.id && !event.data.status,
+          ),
+      ).toHaveLength(
+        boundary === 'completed' || boundary === 'failed' || boundary === 'interrupted' ? 2 : 1,
+      );
+    },
+  );
+
+  it.each(['start', 'ack'])(
+    'keeps old turn output out of an unbound run until its native %s confirms the identity',
+    async (binding) => {
+      const { app, a, create, send, delivery } = await fixture();
+      const agent = await create(a);
+      send(agent, 'First turn');
+      await expect.poll(() => delivery(agent)).toEqual(['accepted']);
+      const session = a.latest(agent.id);
+      const oldTurnId = session.turnId;
+      session.complete();
+      await expect.poll(() => app.isles.store.publicAgent(agent.id).status).toBe('ready');
+      let release!: () => void;
+      const ack = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      session.submit = async (input) => {
+        session.submissions.push(input);
+        session.turnId = 'turn-2';
+        await ack;
+        return { turnId: session.turnId };
+      };
+      send(agent, 'Second turn');
+      await expect.poll(() => session.submissions.length).toBe(2);
+      const cursor = app.isles.store.cursor();
+      const emit = (
+        type: 'item' | 'item_delta',
+        turnId: string,
+        id: string,
+        text: string,
+        append = true,
+        status = 'running',
+      ) =>
+        session.emit({
+          type,
+          sessionId: nativeId,
+          turnId,
+          append,
+          item: { id, type: 'agentMessage', status, text },
+        });
+      emit('item_delta', oldTurnId, 'stale', 'Old fragment');
+      emit('item', oldTurnId, 'stale', 'Old complete output', false, 'completed');
+      emit('item_delta', session.turnId, 'answer', 'Current result');
+      emit('item', session.turnId, 'answer', '', true, 'completed');
+      expect(app.isles.store.cursor()).toBe(cursor);
+      if (binding === 'start')
+        session.emit({
+          type: 'turn_started',
+          sessionId: nativeId,
+          turnId: session.turnId,
+        });
+      release();
+      await expect.poll(() => delivery(agent)).toEqual(['completed', 'accepted']);
+      const confirmed = app.isles.store.agentDetail(agent.id).runs[0]!;
+      expect(confirmed.items).toEqual([
+        {
+          id: 'answer',
+          type: 'agentMessage',
+          status: 'completed',
+          text: 'Current result',
+        },
+      ]);
+      const completedItemCursor = app.isles.store.cursor();
+      emit('item_delta', session.turnId, 'answer', 'Late duplicate');
+      expect(app.isles.store.cursor()).toBe(completedItemCursor);
+      session.complete();
+      await expect.poll(() => app.isles.store.publicAgent(agent.id).status).toBe('ready');
+      expect(app.isles.store.agentDetail(agent.id).runs[0]!.items).toEqual(confirmed.items);
+    },
+  );
+
+  it.each([70_000, 150_000])(
+    'preserves the newest bounded output for %i streamed characters',
+    async (length) => {
+      const { app, a, create, send, delivery } = await fixture();
+      const agent = await create(a);
+      send(agent, 'Long output');
+      await expect.poll(() => delivery(agent)).toEqual(['accepted']);
+      const session = a.latest(agent.id);
+      const text = 'x'.repeat(length - 4) + 'TAIL';
+      session.emit({
+        type: 'item_delta',
+        sessionId: nativeId,
+        turnId: session.turnId,
+        append: true,
+        item: { id: 'long-output', type: 'agentMessage', status: 'running', text },
+      });
+      await app.isles.runtime.stop(agent.id);
+      expect(app.isles.store.agentDetail(agent.id).runs[0]!.items[0]!.text).toBe(
+        text.slice(-128_000),
+      );
+    },
+  );
 
   it('stops both adapters by closing, uses optional interruption, and persists uncertain active work on shutdown', async () => {
     const { app, a, b, create, send, delivery, open } = await fixture();

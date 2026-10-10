@@ -558,6 +558,43 @@ describe('DSH native SDK adapter', () => {
     expect(f.handlers.exit).not.toHaveBeenCalled();
   });
 
+  it('keeps streamed fragments distinct from final items without native context refresh', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    f.startInput(id);
+    const { turnId } = await session.submit(f.input(id));
+    const callsBeforeStream = f.native.calls.length;
+    f.events.length = 0;
+    const item = { id: 'assistant:1:1', type: 'agentMessage', status: 'running', text: '中文' };
+    f.native.event(id, { type: 'item_delta', turnId, append: true, item });
+    f.native.event(id, {
+      type: 'item_delta',
+      turnId,
+      append: true,
+      item: { ...item, text: '输出' },
+    });
+    f.native.event(id, {
+      type: 'item',
+      turnId,
+      append: false,
+      item: { ...item, text: '中文输出', status: 'completed' },
+    });
+    expect(f.events).toEqual([
+      { type: 'item_delta', sessionId: id, turnId, append: true, item },
+      { type: 'item_delta', sessionId: id, turnId, append: true, item: { ...item, text: '输出' } },
+      {
+        type: 'item',
+        sessionId: id,
+        turnId,
+        append: false,
+        item: { ...item, text: '中文输出', status: 'completed' },
+      },
+    ]);
+    expect(f.native.calls).toHaveLength(callsBeforeStream);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
   it('interrupts the exact turn and refuses further steering', async () => {
     const f = await fixture();
     const session = await f.connect();

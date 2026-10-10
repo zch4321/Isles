@@ -57,12 +57,14 @@ describe('Agent logical deletion', () => {
     const privateMessage = say(a.channelId, '待执行的私聊');
     const run = store.startRun(a.id, a.threadId!)!.run;
     store.acceptRun(run.id, 'turn-1');
-    store.updateItem(run.id, {
-      id: 'item-1',
-      type: 'reasoning',
-      status: 'completed',
-      text: '记录',
-    });
+    store.updateItems(run.id, [
+      {
+        id: 'item-1',
+        type: 'reasoning',
+        status: 'completed',
+        text: '记录',
+      },
+    ]);
     const question = store.createQuestion(a.id, run.id, 'turn-1', 1, [
       {
         id: 'choice',

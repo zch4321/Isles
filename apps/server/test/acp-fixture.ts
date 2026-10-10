@@ -81,6 +81,7 @@ const begin = (frame) => {
   if (text === 'silent') { end('end_turn'); return; }
   if (text === 'exit') { chunk(sessionId, 'Starting'); setTimeout(() => process.exit(1), 20); return; }
   if (text === 'refuse') { end('refusal'); return; }
+  if (text === 'partial-refusal') { chunk(sessionId, 'Working'); end('refusal'); return; }
   if (text === 'limit') { chunk(sessionId, 'Partial'); end('max_turn_requests'); return; }
   if (text === 'ask' || text === 'ask-many') {
     const choices = [{ const: 'One', title: 'One', description: 'First result' }, { const: 'Two', title: 'Two', description: 'Second result' }];
@@ -102,6 +103,29 @@ const begin = (frame) => {
       chunk(sessionId, 'Permission: ' + JSON.stringify(result.outcome));
       end('end_turn');
     });
+    return;
+  }
+  if (text === 'interleaved-progress') {
+    chunk(sessionId, 'First thought', 'agent_thought_chunk');
+    chunk(sessionId, 'First answer');
+    chunk(sessionId, 'Second thought', 'agent_thought_chunk');
+    update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'progress', title: 'Shell', kind: 'execute', status: 'in_progress' });
+    chunk(sessionId, 'Thinking while tool runs', 'agent_thought_chunk');
+    chunk(sessionId, 'Output while tool runs');
+    update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'progress', rawOutput: 'working' });
+    chunk(sessionId, 'Waiting for completion', 'agent_thought_chunk');
+    update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'progress', status: 'completed', rawOutput: 'done' });
+    chunk(sessionId, 'Final answer');
+    end('end_turn');
+    return;
+  }
+  if (text === 'tool-progress') {
+    update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'progress', title: 'Shell', kind: 'execute', status: 'in_progress' });
+    update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'progress', content: [{ type: 'content', content: { type: 'text', text: 'working' } }] });
+    update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'progress', status: 'in_progress', rawOutput: 'still working' });
+    update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'progress', title: 'Shell updated' });
+    update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'progress', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'done' } }] });
+    end('end_turn');
     return;
   }
   if (text === 'tools') {

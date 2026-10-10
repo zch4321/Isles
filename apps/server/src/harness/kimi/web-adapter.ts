@@ -6,6 +6,7 @@ import {
   HarnessSubmissionRejected,
   type HarnessAdapter,
   type HarnessCatalog,
+  type HarnessContextUsage,
   type HarnessHandlers,
   type HarnessRequestId,
   type HarnessSession,
@@ -126,7 +127,11 @@ class KimiWebSession implements HarnessSession {
   private readonly models = new Map<string, number>();
   private buffered: KimiWebEvent[] = [];
   private bound = false;
-  private contextRefresh = Promise.resolve();
+  private contextRefresh: Promise<void> | undefined;
+  private contextRefreshPending = false;
+  private contextRevision = 0;
+  private contextUsage?: HarnessContextUsage;
+  private contextModel?: string;
   private segmentCounter = 0;
   constructor(
     private readonly agent: AgentRecord,
@@ -413,14 +418,25 @@ class KimiWebSession implements HarnessSession {
     const payload = frame.payload;
     const agentId = payload.agentId ?? 'main';
     const active = this.active;
-    if (
+    if (agentId === 'main' && frame.type === 'agent.status.updated') {
+      const status = z
+        .object({
+          contextTokens: z.number().int().nonnegative(),
+          maxContextTokens: z.number().int().nonnegative().optional(),
+          model: z.string().optional(),
+        })
+        .safeParse(payload);
+      if (status.success) {
+        this.contextRevision++;
+        this.reportContext(
+          status.data.contextTokens,
+          status.data.maxContextTokens,
+          status.data.model,
+        );
+      } else void this.refreshContext();
+    } else if (
       agentId === 'main' &&
-      [
-        'agent.status.updated',
-        'turn.step.completed',
-        'turn.ended',
-        'compaction.completed',
-      ].includes(frame.type)
+      ['turn.step.completed', 'turn.ended', 'compaction.completed'].includes(frame.type)
     )
       void this.refreshContext();
     if (!active) return;
@@ -638,18 +654,25 @@ class KimiWebSession implements HarnessSession {
         this.offsets.set(offsetKey, offset + delta.length);
       }
       let segment = this.segments.get(key);
+      let append = true;
       if (!segment || segment.type !== type) {
-        this.endSegment(key, turnId, agentId);
+        this.endSegment(key, turnId, agentId, 'item_delta');
         segment = { id: `${key}:${++this.segmentCounter}`, type, text: '' };
         this.segments.set(key, segment);
+        append = false;
       }
       segment.text += delta;
-      this.item(turnId, {
-        id: segment.id,
-        type,
-        status: 'running',
-        text: this.prefix(agentId) + segment.text,
-      });
+      this.item(
+        turnId,
+        {
+          id: segment.id,
+          type,
+          status: 'running',
+          text: (append ? '' : this.prefix(agentId)) + delta,
+        },
+        'item_delta',
+        append,
+      );
       return;
     }
     if (
@@ -657,10 +680,12 @@ class KimiWebSession implements HarnessSession {
       frame.type === 'tool.result' ||
       frame.type === 'tool.progress'
     ) {
-      this.endSegment(key, turnId, agentId);
       const id = z.string().parse(payload.toolCallId);
       const toolKey = `${key}:tool:${id}`;
+      const known = this.tools.has(toolKey);
       const tool = this.tools.get(toolKey) ?? { name: id, input: '', output: '' };
+      let progressText: string | undefined;
+      let append = false;
       if (frame.type === 'tool.call.started') {
         tool.name = z.string().parse(payload.name);
         tool.input = kimiText(payload.args);
@@ -670,22 +695,44 @@ class KimiWebSession implements HarnessSession {
           .object({ text: z.string().optional(), replace: z.boolean().optional() })
           .passthrough()
           .parse(payload.update);
+        if (update.text === undefined || (!update.text && !update.replace)) return;
+        append = known && !update.replace;
+        progressText = append ? (tool.output ? '' : '\n') + update.text : undefined;
         tool.output = update.replace ? (update.text ?? '') : tool.output + (update.text ?? '');
       }
+      this.endSegment(key, turnId, agentId, frame.type === 'tool.progress' ? 'item_delta' : 'item');
       this.tools.set(toolKey, tool);
-      this.item(turnId, {
-        id: toolKey,
-        type: tool.name.startsWith('mcp__') ? 'mcpToolCall' : 'toolCall',
-        status:
-          frame.type === 'tool.result'
-            ? payload.isError === true
-              ? 'failed'
-              : 'completed'
-            : 'running',
-        text: `${this.prefix(agentId)}${tool.name}\n${tool.input}${tool.output ? `\n${tool.output}` : ''}`,
-      });
+      this.item(
+        turnId,
+        {
+          id: toolKey,
+          type: tool.name.startsWith('mcp__') ? 'mcpToolCall' : 'toolCall',
+          status:
+            frame.type === 'tool.result'
+              ? payload.isError === true
+                ? 'failed'
+                : 'completed'
+              : 'running',
+          text:
+            progressText ??
+            `${this.prefix(agentId)}${tool.name}\n${tool.input}${tool.output ? `\n${tool.output}` : ''}`,
+        },
+        frame.type === 'tool.progress' ? 'item_delta' : 'item',
+        append,
+      );
     }
-    if (agentId !== 'main' && frame.type === 'turn.ended') this.endSegment(key, turnId, agentId);
+    if (agentId !== 'main' && frame.type === 'turn.ended')
+      this.endSegment(
+        key,
+        turnId,
+        agentId,
+        'item',
+        payload.reason === 'cancelled'
+          ? 'interrupted'
+          : payload.reason === 'failed' || payload.reason === 'blocked'
+            ? 'failed'
+            : 'completed',
+      );
   }
   private childLabel(id: string, child: Child) {
     return `子代理 ${child.name} (${id})${child.model ? ` · ${child.model}` : ''}`;
@@ -694,30 +741,51 @@ class KimiWebSession implements HarnessSession {
     const child = this.children.get(agentId);
     return child ? `${this.childLabel(agentId, child)}\n` : '';
   }
-  private endSegment(key: string, turnId: string, agentId: string) {
+  private endSegment(
+    key: string,
+    turnId: string,
+    agentId: string,
+    type: 'item' | 'item_delta' = 'item',
+    status: RunItem['status'] = 'completed',
+  ) {
     const segment = this.segments.get(key);
     if (!segment) return;
-    this.item(turnId, {
-      id: segment.id,
-      type: segment.type,
-      status: 'completed',
-      text: this.prefix(agentId) + segment.text,
-    });
+    this.item(
+      turnId,
+      {
+        id: segment.id,
+        type: segment.type,
+        status,
+        text: this.prefix(agentId) + segment.text,
+      },
+      type,
+    );
     this.segments.delete(key);
   }
-  private item(turnId: string, item: RunItem) {
+  private item(
+    turnId: string,
+    item: RunItem,
+    type: 'item' | 'item_delta' = 'item',
+    append = false,
+  ) {
     this.handlers.event({
-      type: 'item',
+      type,
       sessionId: this.sessionId!,
       turnId,
-      append: false,
-      item: { ...item, text: this.environment.redactor.text(item.text) },
+      append,
+      item: { ...item, text: this.environment.redactor.output(item.text) },
     });
   }
   private finish(active: Turn) {
     if (this.active !== active || !active.id || !active.ended || active.inputs.size) return;
     for (const key of this.segments.keys())
-      this.endSegment(key, active.id, key.slice(0, key.lastIndexOf(':')));
+      this.endSegment(
+        key,
+        active.id,
+        key.slice(0, key.lastIndexOf(':')),
+        'item',
+        active.ended.status,
+      );
     this.active = undefined;
     this.questions.clear();
     this.approvals.clear();
@@ -733,37 +801,48 @@ class KimiWebSession implements HarnessSession {
     this.owned.delete(active.promptId);
   }
   private refreshContext() {
-    this.contextRefresh = this.contextRefresh
+    this.contextRefreshPending = true;
+    if (this.contextRefresh) return this.contextRefresh;
+    this.contextRefresh = Promise.resolve()
       .then(async () => {
-        if (!this.sessionId || this.stopped) return;
-        const snapshot = kimiSnapshotSchema.parse(
-          await this.native().request('GET', this.path('snapshot')),
-        );
-        const status = kimiStatusSchema.parse(
-          await this.native().request('GET', this.path('status')),
-        );
-        if (this.stopped) return;
-        const model = status.model ?? this.agent.model;
-        this.handlers.event({
-          type: 'context_usage',
-          sessionId: this.sessionId!,
-          usage: {
-            usedTokens: snapshot.session.usage.context_tokens,
-            maxTokens:
-              this.models.get(model) ??
-              (snapshot.session.usage.context_limit || status.max_context_tokens || null),
-            // The public API reports the native count without exposing its measured/estimated split.
-            estimated: true,
-          },
-        });
+        while (this.contextRefreshPending && this.sessionId && !this.stopped) {
+          this.contextRefreshPending = false;
+          const revision = this.contextRevision;
+          const status = kimiStatusSchema.parse(
+            await this.native().request('GET', this.path('status')),
+          );
+          if (this.stopped) return;
+          // A native status event received while GET was in flight is newer than its response.
+          if (revision === this.contextRevision)
+            this.reportContext(status.context_tokens, status.max_context_tokens, status.model);
+        }
       })
       .catch((error: unknown) => {
         this.environment.log.warn(
           { error: this.environment.redactor.text(error) },
           'Kimi Code context usage refresh failed',
         );
+      })
+      .finally(() => {
+        this.contextRefresh = undefined;
       });
     return this.contextRefresh;
+  }
+  private reportContext(usedTokens: number, maxTokens?: number, model?: string) {
+    if (model !== undefined) this.contextModel = model;
+    const usage: HarnessContextUsage = {
+      usedTokens,
+      maxTokens: this.models.get(this.contextModel ?? this.agent.model) ?? (maxTokens || null),
+      // The public API reports the native count without exposing its measured/estimated split.
+      estimated: true,
+    };
+    if (
+      this.contextUsage?.usedTokens === usage.usedTokens &&
+      this.contextUsage.maxTokens === usage.maxTokens
+    )
+      return;
+    this.contextUsage = usage;
+    this.handlers.event({ type: 'context_usage', sessionId: this.sessionId!, usage });
   }
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
     const approval = this.approvals.get(String(requestId));

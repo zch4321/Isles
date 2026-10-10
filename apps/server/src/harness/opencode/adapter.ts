@@ -553,7 +553,7 @@ class OpenCodeSession implements HarnessSession {
         sessionId: this.sessionId!,
         turnId: this.active.turnId,
         append: false,
-        item: { ...item, text: this.environment.redactor.text(item.text) },
+        item: { ...item, text: this.environment.redactor.output(item.text) },
       });
   }
   private live(frame: unknown) {

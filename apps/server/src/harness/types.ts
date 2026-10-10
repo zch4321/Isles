@@ -33,7 +33,8 @@ export type HarnessEvent =
       error: string | null;
     }
   | {
-      type: 'item';
+      /** item_delta stays in memory; item publishes a complete output or discrete state. */
+      type: 'item' | 'item_delta';
       sessionId: string;
       turnId: string | null;
       item: RunItem;

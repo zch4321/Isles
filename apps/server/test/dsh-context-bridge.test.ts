@@ -28,9 +28,17 @@ async function bridgeFixture() {
   // Replace the carrier package loader; execute the unchanged native plugin body.
   // The meter is the native service boundary, not Isles' reconstruction of usage.
   const dependencyKey = `__islesBridge_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const push = vi.fn();
+  const interruptedBlocks = vi.fn((): { type: string; text: string }[] => []);
   const dependencies = {
     '@deepseek-ai/dsh-sdk-protocol': { JsonRpcLineTransport: Transport },
-    '@deepseek-ai/dsh-llm': { createUserMessage: vi.fn(), BlockAssembler: class {} },
+    '@deepseek-ai/dsh-llm': {
+      createUserMessage: vi.fn(),
+      BlockAssembler: class {
+        push = push;
+        interruptedBlocks = interruptedBlocks;
+      },
+    },
     '@deepseek-ai/dsh-agent': { installModelSelection: vi.fn() },
     '@deepseek-ai/dsh-user-questions': { UserQuestionError: Error },
   };
@@ -92,6 +100,11 @@ async function bridgeFixture() {
     llm: ctx.llm,
     warnings,
     emit,
+    push,
+    interruptedBlocks,
+    stream(frame: Record<string, unknown>) {
+      listeners.get('agent/assistant-stream')!({ agent, frame });
+    },
     measurement(value: typeof measured) {
       measured = value;
     },
@@ -198,5 +211,328 @@ describe('DSH bridge native context meter', () => {
     ).not.toThrow();
     expect(f.warnings).toHaveBeenCalledWith('Isles DSH context usage read failed');
     expect(JSON.stringify(f.warnings.mock.calls)).not.toContain('secret-provider-diagnostic');
+  });
+});
+
+describe('DSH bridge assistant streams', () => {
+  it('forwards only raw text and reasoning deltas and persists the native final snapshot once', async () => {
+    const f = await bridgeFixture();
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    const measuredBeforeStream = f.measure.mock.calls.length;
+    f.stream({ type: 'start', attemptId: 'attempt-1', turn: 1, step: 2, revision: 0 });
+    const chunks = [
+      { type: 'reasoning-delta', index: 0, text: 'Think' },
+      { type: 'text-delta', index: 1, text: 'Hello' },
+      { type: 'text-delta', index: 1, text: ' 中文' },
+      { type: 'reasoning-delta', index: 0, text: ' more' },
+      { type: 'text-delta', index: 1, text: '' },
+      { type: 'tool-call-delta', index: 2, id: 'call-1', name: 'shell', argumentsDelta: '{}' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ];
+    chunks.forEach((chunk, revision) =>
+      f.stream({ type: 'chunk', attemptId: 'attempt-1', revision: revision + 1, chunk }),
+    );
+    expect(f.push.mock.calls.map(([chunk]) => chunk)).toEqual(chunks);
+    expect(f.interruptedBlocks).not.toHaveBeenCalled();
+    expect(f.measure).toHaveBeenCalledTimes(measuredBeforeStream);
+    const deltas = f.frames.map((frame) => frame.params.event);
+    expect(deltas).toEqual([
+      {
+        type: 'item_delta',
+        turnId: '1',
+        append: false,
+        item: { id: 'reasoning:1:2', type: 'reasoning', status: 'running', text: 'Think' },
+      },
+      {
+        type: 'item_delta',
+        turnId: '1',
+        append: false,
+        item: { id: 'assistant:1:2', type: 'agentMessage', status: 'running', text: 'Hello' },
+      },
+      {
+        type: 'item_delta',
+        turnId: '1',
+        append: true,
+        item: { id: 'assistant:1:2', type: 'agentMessage', status: 'running', text: ' 中文' },
+      },
+      {
+        type: 'item_delta',
+        turnId: '1',
+        append: true,
+        item: { id: 'reasoning:1:2', type: 'reasoning', status: 'running', text: ' more' },
+      },
+    ]);
+    expect(new Set(f.frames.map((frame) => frame.params.eventId)).size).toBe(4);
+    f.emit(f.session, {
+      type: 'assistant/message',
+      seq: 10,
+      data: {
+        turn: 1,
+        step: 2,
+        message: {
+          content: [
+            { type: 'reasoning', text: 'Think more' },
+            { type: 'text', text: 'Hello 中文' },
+          ],
+        },
+      },
+    });
+    const frameCount = f.frames.length;
+    f.stream({
+      type: 'end',
+      attemptId: 'attempt-1',
+      revision: 8,
+      outcome: { kind: 'committed', eventType: 'assistant/message' },
+    });
+    expect(f.frames).toHaveLength(frameCount);
+    expect(f.interruptedBlocks).not.toHaveBeenCalled();
+    expect(f.frames.slice(4).map((frame) => frame.params.event)).toEqual([
+      {
+        type: 'item',
+        turnId: '1',
+        append: false,
+        item: {
+          id: 'assistant:1:2',
+          type: 'agentMessage',
+          status: 'completed',
+          text: 'Hello 中文',
+        },
+      },
+      {
+        type: 'item',
+        turnId: '1',
+        append: false,
+        item: { id: 'reasoning:1:2', type: 'reasoning', status: 'completed', text: 'Think more' },
+      },
+    ]);
+  });
+
+  it('replaces each previous attempt prefix on retry while keeping final item identities stable', async () => {
+    const f = await bridgeFixture();
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    const chunk = (attemptId: string, revision: number, type: string, text: string) =>
+      f.stream({
+        type: 'chunk',
+        attemptId,
+        revision,
+        chunk: { type, index: type === 'reasoning-delta' ? 0 : 1, text },
+      });
+    f.stream({ type: 'start', attemptId: 'initial', turn: 1, step: 2, revision: 0 });
+    chunk('initial', 1, 'text-delta', 'Old answer');
+    chunk('initial', 2, 'reasoning-delta', 'Old thought');
+    f.interruptedBlocks.mockReturnValue([
+      { type: 'text', text: 'Old answer' },
+      { type: 'reasoning', text: 'Old thought' },
+    ]);
+    f.stream({
+      type: 'end',
+      attemptId: 'initial',
+      revision: 3,
+      outcome: { kind: 'committed', eventType: 'assistant/attempt' },
+    });
+    f.stream({ type: 'start', attemptId: 'retry', turn: 1, step: 2, revision: 4 });
+    chunk('retry', 5, 'text-delta', '');
+    chunk('retry', 6, 'text-delta', 'New');
+    chunk('retry', 7, 'text-delta', ' answer');
+    chunk('retry', 8, 'reasoning-delta', 'New');
+    chunk('retry', 9, 'reasoning-delta', ' thought');
+    const events = f.frames.map((frame) => frame.params.event) as {
+      type: string;
+      append: boolean;
+      item: { id: string; text: string };
+    }[];
+    expect(
+      events.slice(4).map((event) => ({
+        id: event.item.id,
+        text: event.item.text,
+        append: event.append,
+      })),
+    ).toEqual([
+      { id: 'assistant:1:2', text: '', append: false },
+      { id: 'reasoning:1:2', text: '', append: false },
+      { id: 'assistant:1:2', text: 'New', append: false },
+      { id: 'assistant:1:2', text: ' answer', append: true },
+      { id: 'reasoning:1:2', text: 'New', append: false },
+      { id: 'reasoning:1:2', text: ' thought', append: true },
+    ]);
+    const cumulative = new Map<string, string>();
+    for (const event of events)
+      cumulative.set(
+        event.item.id,
+        (event.append ? (cumulative.get(event.item.id) ?? '') : '') + event.item.text,
+      );
+    expect([...cumulative]).toEqual([
+      ['assistant:1:2', 'New answer'],
+      ['reasoning:1:2', 'New thought'],
+    ]);
+    f.emit(f.session, {
+      type: 'assistant/message',
+      seq: 10,
+      data: {
+        turn: 1,
+        step: 2,
+        message: {
+          content: [
+            { type: 'text', text: 'New answer' },
+            { type: 'reasoning', text: 'New thought' },
+          ],
+        },
+      },
+    });
+    expect(f.frames.slice(-2).map((frame) => frame.params.event)).toMatchObject([
+      { type: 'item', append: false, item: { id: 'assistant:1:2', text: 'New answer' } },
+      { type: 'item', append: false, item: { id: 'reasoning:1:2', text: 'New thought' } },
+    ]);
+  });
+
+  it('clears abandoned reasoning when a retry only returns text and clears attempt tracking on turn end', async () => {
+    const f = await bridgeFixture();
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    f.stream({ type: 'start', attemptId: 'with-reasoning', turn: 1, step: 2, revision: 0 });
+    f.stream({
+      type: 'chunk',
+      attemptId: 'with-reasoning',
+      revision: 1,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'Abandoned thought' },
+    });
+    f.interruptedBlocks.mockReturnValue([{ type: 'reasoning', text: 'Abandoned thought' }]);
+    f.stream({
+      type: 'end',
+      attemptId: 'with-reasoning',
+      revision: 2,
+      outcome: { kind: 'committed', eventType: 'assistant/attempt' },
+    });
+    const firstAttemptFrameCount = f.frames.length;
+    f.stream({ type: 'start', attemptId: 'text-only', turn: 1, step: 2, revision: 3 });
+    expect(f.frames.slice(firstAttemptFrameCount).map((frame) => frame.params.event)).toEqual([
+      {
+        type: 'item_delta',
+        turnId: '1',
+        append: false,
+        item: { id: 'reasoning:1:2', type: 'reasoning', status: 'running', text: '' },
+      },
+    ]);
+    f.stream({
+      type: 'chunk',
+      attemptId: 'text-only',
+      revision: 4,
+      chunk: { type: 'text-delta', index: 0, text: 'Final answer' },
+    });
+    f.emit(f.session, {
+      type: 'assistant/message',
+      seq: 5,
+      data: { turn: 1, step: 2, message: { content: [{ type: 'text', text: 'Final answer' }] } },
+    });
+    expect(
+      f.frames
+        .filter((frame) => (frame.params.event as { type: string }).type === 'item')
+        .map((frame) => frame.params.event),
+    ).toEqual([
+      {
+        type: 'item',
+        turnId: '1',
+        append: false,
+        item: {
+          id: 'assistant:1:2',
+          type: 'agentMessage',
+          status: 'completed',
+          text: 'Final answer',
+        },
+      },
+    ]);
+    f.stream({
+      type: 'end',
+      attemptId: 'text-only',
+      revision: 5,
+      outcome: { kind: 'committed', eventType: 'assistant/message' },
+    });
+    f.emit(f.session, {
+      type: 'turn/end',
+      seq: 6,
+      data: { turn: 1, reason: { kind: 'completed' } },
+    });
+    const completedFrameCount = f.frames.length;
+    f.stream({ type: 'start', attemptId: 'after-completion', turn: 1, step: 2, revision: 6 });
+    expect(f.frames).toHaveLength(completedFrameCount);
+  });
+
+  it('keeps an incomplete native snapshot transient until the turn completes', async () => {
+    const f = await bridgeFixture();
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    f.stream({ type: 'start', attemptId: 'attempt-2', turn: 3, step: 1, revision: 0 });
+    f.stream({
+      type: 'chunk',
+      attemptId: 'attempt-2',
+      revision: 1,
+      chunk: { type: 'text-delta', index: 0, text: 'Partial' },
+    });
+    f.interruptedBlocks.mockReturnValue([
+      { type: 'text', text: 'Partial' },
+      { type: 'text', text: 'closed block' },
+      { type: 'reasoning', text: 'unfinished thought' },
+    ]);
+    f.stream({
+      type: 'end',
+      attemptId: 'attempt-2',
+      revision: 2,
+      outcome: { kind: 'discarded' },
+    });
+    expect(f.interruptedBlocks).toHaveBeenCalledTimes(1);
+    expect(f.frames.slice(1).map((frame) => frame.params.event)).toEqual([
+      {
+        type: 'item_delta',
+        turnId: '3',
+        append: false,
+        item: {
+          id: 'assistant:3:1',
+          type: 'agentMessage',
+          status: 'failed',
+          text: 'Partial\nclosed block',
+        },
+      },
+      {
+        type: 'item_delta',
+        turnId: '3',
+        append: false,
+        item: {
+          id: 'reasoning:3:1',
+          type: 'reasoning',
+          status: 'failed',
+          text: 'unfinished thought',
+        },
+      },
+    ]);
+    f.emit(f.session, {
+      type: 'turn/end',
+      seq: 20,
+      data: { turn: 3, reason: { kind: 'aborted' } },
+    });
+    expect(f.frames.at(-1)?.params.event).toMatchObject({
+      type: 'turn_completed',
+      turnId: '3',
+      status: 'interrupted',
+    });
+    expect(f.frames.some((frame) => (frame.params.event as { type: string }).type === 'item')).toBe(
+      false,
+    );
+    const completedFrameCount = f.frames.length;
+    f.stream({ type: 'start', attemptId: 'after-abort', turn: 3, step: 1, revision: 3 });
+    expect(f.frames).toHaveLength(completedFrameCount);
   });
 });

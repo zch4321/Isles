@@ -641,7 +641,7 @@ class ClaudeSession implements HarnessSession {
       sessionId: this.sessionId!,
       turnId: this.active.id,
       append: false,
-      item: { ...item, text: this.environment.redactor.text(item.text) },
+      item: { ...item, text: this.environment.redactor.output(item.text) },
     });
   }
 }

@@ -368,7 +368,7 @@ class AcpSession implements HarnessSession {
     error: string | null,
   ) {
     if (this.active !== active) return;
-    this.endSegment(active);
+    this.endSegment(active, false, status);
     this.active = undefined;
     for (const [key, pending] of this.questions)
       if (pending.turnId === active.id) this.questions.delete(key);
@@ -547,10 +547,10 @@ class AcpSession implements HarnessSession {
       active.accept();
       const type = update.sessionUpdate === 'agent_message_chunk' ? 'agentMessage' : 'reasoning';
       if (active.segment?.type !== type) {
-        this.endSegment(active);
+        this.endSegment(active, true);
         active.segment = { id: `${active.id}:${++active.segments}`, type };
       }
-      this.item({ id: active.segment.id, type, status: 'running', text }, true);
+      this.item({ id: active.segment.id, type, status: 'running', text }, true, true);
     } else if (
       update.sessionUpdate === 'tool_call' ||
       update.sessionUpdate === 'tool_call_update'
@@ -558,7 +558,6 @@ class AcpSession implements HarnessSession {
       const call = toolCallSchema.safeParse(update);
       if (!call.success) return;
       active.accept();
-      this.endSegment(active);
       this.tool(active, call.data);
     } else if (update.sessionUpdate === 'plan') {
       const plan = planSchema.safeParse(update);
@@ -579,7 +578,14 @@ class AcpSession implements HarnessSession {
   }
   /** Updates carry only changed fields; content replaces the previous content. */
   private tool(active: ActiveTurn, call: z.infer<typeof toolCallSchema>) {
-    const state = active.tools.get(call.toolCallId) ?? {
+    const previous = active.tools.get(call.toolCallId);
+    const progress =
+      previous !== undefined &&
+      call.sessionUpdate === 'tool_call_update' &&
+      !['completed', 'failed'].includes(previous.status) &&
+      (call.status == null || call.status === previous.status);
+    this.endSegment(active, progress);
+    const state = previous ?? {
       title: '',
       kind: 'other',
       status: 'pending',
@@ -606,35 +612,43 @@ class AcpSession implements HarnessSession {
       else if (call.rawInput === undefined && !state.input) state.input = text;
     }
     if (call.rawOutput !== undefined && !state.output) state.output = format(call.rawOutput);
-    this.item({
-      id: call.toolCallId,
-      type:
-        state.kind === 'execute'
-          ? 'commandExecution'
-          : ['edit', 'delete', 'move'].includes(state.kind)
-            ? 'fileChange'
-            : state.kind === 'fetch'
-              ? 'webSearch'
-              : 'toolCall',
-      status: ['completed', 'failed'].includes(state.status) ? state.status : 'running',
-      text: [state.title, state.input, state.output].filter(Boolean).join('\n\n'),
-    });
+    this.item(
+      {
+        id: call.toolCallId,
+        type:
+          state.kind === 'execute'
+            ? 'commandExecution'
+            : ['edit', 'delete', 'move'].includes(state.kind)
+              ? 'fileChange'
+              : state.kind === 'fetch'
+                ? 'webSearch'
+                : 'toolCall',
+        status: ['completed', 'failed'].includes(state.status) ? state.status : 'running',
+        text: [state.title, state.input, state.output].filter(Boolean).join('\n\n'),
+      },
+      false,
+      progress,
+    );
   }
-  private endSegment(active: ActiveTurn) {
+  private endSegment(
+    active: ActiveTurn,
+    delta = false,
+    status: 'completed' | 'interrupted' | 'failed' = 'completed',
+  ) {
     const segment = active.segment;
     if (!segment) return;
     active.segment = undefined;
-    this.item({ id: segment.id, type: segment.type, status: 'completed', text: '' }, true);
+    this.item({ id: segment.id, type: segment.type, status, text: '' }, true, delta);
   }
-  private item(item: RunItem, append = false) {
+  private item(item: RunItem, append = false, delta = false) {
     const active = this.active;
     if (!active) return;
     this.output.event({
-      type: 'item',
+      type: delta ? 'item_delta' : 'item',
       sessionId: this.sessionId!,
       turnId: active.id,
       append,
-      item: { ...item, text: this.harness.redactor.text(item.text) },
+      item: { ...item, text: this.harness.redactor.output(item.text) },
     });
   }
 }

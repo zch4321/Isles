@@ -126,6 +126,7 @@ const server = http.createServer(async (req,res) => {
     if (body.op === 'begin') { const p = s.queue.find(p => p.prompt_id === body.promptId); if (p) begin(s,p); }
     if (body.op === 'finish') finish(s,body.reason);
     if (body.op === 'emit') emit(s,body.event,body.fields,body.transport);
+    if (body.op === 'emitBatch') for (const event of body.events) emit(s,event.type,event.fields,event.transport);
     if (body.op === 'queue') { s.queue.push(body.prompt); save(s); }
     return envelope(res);
   }
@@ -158,7 +159,9 @@ const server = http.createServer(async (req,res) => {
   if (tail === '/status') {
     const mcpPath = path.join(s.metadata.cwd,'.kimi-code','mcp.json');
     record({ type: 'loaded', cwd: s.metadata.cwd, mcp: fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath,'utf8')) : null });
-    return envelope(res,{ busy: Boolean(s.active), model: s.agent_config.model, thinking_level: s.agent_config.thinking ?? 'max', permission: s.agent_config.permission_mode ?? 'manual', plan_mode: false, swarm_mode: false, context_tokens: s.context_tokens ?? 0, max_context_tokens: 262144 });
+    const status = { busy: Boolean(s.active), model: s.agent_config.model, thinking_level: s.agent_config.thinking ?? 'max', permission: s.agent_config.permission_mode ?? 'manual', plan_mode: false, swarm_mode: false, context_tokens: s.context_tokens ?? 0, max_context_tokens: 262144 };
+    if (settings().statusDelayMs) return setTimeout(() => envelope(res,status),settings().statusDelayMs);
+    return envelope(res,status);
   }
   if (tail === '/snapshot') return envelope(res,{ session: wireSession(s), as_of_seq: s.seq, epoch: s.epoch, messages: { items: [], has_more: false }, in_flight_turn: s.active ? { turn_id: s.turn, current_prompt_id: s.active.prompt_id, assistant_text: '', thinking_text: '', running_tools: [] } : null, pending_approvals: [], pending_questions: s.questions, subagents: [] });
   if (tail === '/prompts' && req.method === 'GET') return envelope(res,{ active: s.active, queued: s.queue });
@@ -304,6 +307,14 @@ process.on('SIGTERM',() => { for (const peer of peers) peer.socket.destroy(); se
       transport: { volatile?: boolean; offset?: number } = {},
     ) => control({ op: 'emit', sessionId, event, fields, transport }),
     begin: (sessionId: string, promptId: string) => control({ op: 'begin', sessionId, promptId }),
+    emitBatch: (
+      sessionId: string,
+      events: {
+        type: string;
+        fields?: Record<string, unknown>;
+        transport?: { volatile?: boolean; offset?: number };
+      }[],
+    ) => control({ op: 'emitBatch', sessionId, events }),
     finish: (sessionId: string, reason = 'completed') =>
       control({ op: 'finish', sessionId, reason }),
     drop: () => control({ op: 'drop' }),

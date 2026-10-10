@@ -7,6 +7,7 @@ import {
   type QuestionAnswer,
   type QuestionDefinition,
   type Run,
+  type RunItem,
   type SendMessage,
   type UpdateAgent,
 } from '@isles/contracts';
@@ -22,11 +23,15 @@ import { HttpError } from '../errors.js';
 import type { Logger } from '../logging.js';
 import type { Actor, AgentRecord, ClaimedChannel, MessageInput, Store } from '../storage/store.js';
 import { formatMessages, MessageLabels } from './envelope.js';
+import { RunOutputBuffer } from './output.js';
 import type { AgentWorkspace } from './workspace.js';
 
 interface Active {
   run: Run;
   turnId: string | null;
+  output: RunOutputBuffer;
+  unboundOutput: Map<string, { output: RunOutputBuffer; items: Map<string, RunItem> }>;
+  finished: boolean;
   done: Promise<void>;
   finish: () => void;
   requests: Map<string, HarnessRequestId>;
@@ -449,7 +454,16 @@ export class Runtime {
     const done = new Promise<void>((resolve) => {
       finish = resolve;
     });
-    const active: Active = { run, turnId: null, done, finish, requests: new Map() };
+    const active: Active = {
+      run,
+      turnId: null,
+      output: new RunOutputBuffer(),
+      unboundOutput: new Map(),
+      finished: false,
+      done,
+      finish,
+      requests: new Map(),
+    };
     handle.active = active;
     this.store.updateAgent(id, { status: 'running' });
     try {
@@ -463,7 +477,7 @@ export class Runtime {
       });
       if (active.turnId && active.turnId !== response.turnId)
         throw new Error('原生 turn 确认与已绑定的运行不一致，结果待核对');
-      active.turnId = response.turnId;
+      this.bindTurn(active, response.turnId);
       this.store.acceptRun(run.id, response.turnId);
       this.log.info({ agentId: id, runId: run.id, turnId: response.turnId }, 'Run started');
       this.kickSteer(id, handle, active);
@@ -474,13 +488,16 @@ export class Runtime {
         { err: error, agentId: id, runId: run.id },
         rejected ? 'Run submission rejected' : 'Run result is uncertain',
       );
-      if (!this.store.getRun(run.id).finishedAt)
+      if (!active.finished) {
+        this.flushOutput(active, 'failed');
         this.store.finishRun(
           run.id,
           rejected ? 'failed' : 'uncertain',
           rejected ? 'failed' : 'uncertain',
           this.workspace.redactor.text(error),
         );
+        active.finished = true;
+      }
       if (this.store.getAgent(id).desiredState === 'running')
         this.store.updateAgent(id, {
           status: 'error',
@@ -505,12 +522,14 @@ export class Runtime {
     );
     delete handle.session;
     if (handle.active) {
+      this.flushOutput(handle.active, 'failed');
       this.store.finishRun(
         handle.active.run.id,
         'uncertain',
         'uncertain',
         this.workspace.redactor.text(error),
       );
+      handle.active.finished = true;
       handle.active.finish();
     }
     if (!this.closing && this.store.getAgent(id).desiredState === 'running')
@@ -519,22 +538,47 @@ export class Runtime {
         error: this.workspace.redactor.text(error),
       });
   }
+  private bindTurn(active: Active, turnId: string) {
+    if (active.turnId || active.finished) return;
+    active.turnId = turnId;
+    const buffered = active.unboundOutput.get(turnId);
+    if (buffered) {
+      active.output.adopt(buffered.output);
+      this.store.updateItems(
+        active.run.id,
+        [...buffered.items.values()].map((item) => ({
+          ...item,
+          text: this.workspace.redactor.output(item.text),
+        })),
+      );
+    }
+    active.unboundOutput.clear();
+  }
+  private flushOutput(active: Active, status: 'completed' | 'interrupted' | 'failed') {
+    if (active.finished) return;
+    this.store.updateItems(
+      active.run.id,
+      active.output.flush(status).map((item) => ({
+        ...item,
+        text: this.workspace.redactor.output(item.text),
+      })),
+    );
+  }
   private event(id: string, handle: Handle, event: HarnessEvent) {
     if (event.type === 'context_usage') {
       this.store.recordContextUsage(id, event.sessionId, event.usage);
       return;
     }
     const active = handle.active;
-    if (!active || event.sessionId !== active.run.threadId) return;
-    const run = this.store.getRun(active.run.id);
-    if (run.finishedAt) return;
+    if (!active || active.finished || event.sessionId !== active.run.threadId) return;
     if (event.type === 'turn_started' || event.type === 'turn_completed') {
       if (active.turnId && active.turnId !== event.turnId) return;
-      active.turnId = event.turnId;
-      this.store.acceptRun(active.run.id, active.turnId);
+      this.bindTurn(active, event.turnId);
+      this.store.acceptRun(active.run.id, event.turnId);
       if (event.type === 'turn_started') this.kickSteer(id, handle, active);
       if (event.type === 'turn_completed') {
         const error = event.error ? this.workspace.redactor.text(event.error) : null;
+        this.flushOutput(active, event.status);
         this.store.finishRun(
           active.run.id,
           event.status,
@@ -545,6 +589,7 @@ export class Runtime {
               : 'failed',
           error,
         );
+        active.finished = true;
         if (event.status === 'failed')
           this.store.updateAgent(id, { status: 'error', error: error ?? '原生 turn 失败' });
         const context = { agentId: id, runId: active.run.id, status: event.status, reason: error };
@@ -555,16 +600,21 @@ export class Runtime {
       return;
     }
     if (event.turnId && active.turnId && event.turnId !== active.turnId) return;
-    const previous = event.append ? run.items.find((item) => item.id === event.item.id) : undefined;
-    this.store.updateItem(
-      active.run.id,
-      {
-        ...event.item,
-        type: previous?.type ?? event.item.type,
-        text: this.workspace.redactor.text(event.item.text),
-      },
-      event.append,
-    );
+    if (event.turnId && !active.turnId) {
+      let buffered = active.unboundOutput.get(event.turnId);
+      if (!buffered) {
+        buffered = { output: new RunOutputBuffer(), items: new Map() };
+        active.unboundOutput.set(event.turnId, buffered);
+      }
+      const item = buffered.output.update(event.item, event.append, event.type === 'item_delta');
+      if (event.type === 'item') buffered.items.set(item.id, item);
+      return;
+    }
+    const item = active.output.update(event.item, event.append, event.type === 'item_delta');
+    if (event.type === 'item_delta') return;
+    this.store.updateItems(active.run.id, [
+      { ...item, text: this.workspace.redactor.output(item.text) },
+    ]);
   }
   private question(id: string, handle: Handle, request: HarnessQuestion) {
     const session = handle.session;
@@ -668,12 +718,14 @@ export class Runtime {
     const client = handle.session;
     if (handle.active) {
       const active = handle.active;
+      this.flushOutput(active, 'interrupted');
       this.store.finishRun(
         active.run.id,
         'interrupted',
         'cancelled',
         '用户停止了 Agent；该输入不会再次投递。',
       );
+      active.finished = true;
       active.finish();
       if (
         client &&
@@ -806,12 +858,14 @@ export class Runtime {
           (handle.active.steerBatchId &&
             this.store.getSteer(handle.active.steerBatchId).status === 'pending'))
       ) {
+        this.flushOutput(handle.active, 'interrupted');
         this.store.finishRun(
           handle.active.run.id,
           'uncertain',
           'uncertain',
           '服务关闭时原生执行尚未结束，结果待核对；不会自动重投。',
         );
+        handle.active.finished = true;
         this.log.warn(
           { agentId: handle.active.run.agentId, runId: handle.active.run.id },
           'Run left uncertain at shutdown',

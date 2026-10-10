@@ -424,6 +424,8 @@ Codex 的子代理设置沿用用户自己的 Codex 配置。子代理运行在�
 
 adapter 将原生 turn 与条目事件转换为 `HarnessEvent`，将用户问题转换为 `HarnessQuestion`，携带准确的 session、turn 与请求关联。确定原生拒绝用 `HarnessSubmissionRejected` 表达；超时、断连和其他提交错误保留结果不明语义，Runtime 不猜测是否执行，也不盲目重试。过期问题通过 adapter 拒绝，回答只交回仍有效的原请求。
 
+`HarnessEvent.item_delta` 表示正文、思考、命令输出或工具进度的暂态片段；`item` 表示完整输出或离散状态。Runtime 为每个活动执行维护 `RunOutputBuffer`，按条目 ID 在内存处理追加或替换，保持原有 128000 字符上限。增量处理不查询或更新数据库，也不产生平台事件。收到 `item` 时保存完整快照；执行结束、停止、连接异常及服务关闭前批量保存剩余片段，整批只产生一次 `run` 通知。完整缓冲内容在持久化前再次脱敏，覆盖凭据跨片段出现的情况。执行结束后拒绝迟到输出，新执行使用独立缓冲区。DSH 桥接层仅转发原始文本或思考增量，避免逐片段重组及重复传输累积全文；Kimi 使用独立状态用量与合并后的轻量 status 查询，snapshot 留给会话初始化。
+
 `GET /api/harnesses` 公开 descriptor；`GET /api/harnesses/:id/status` 与 `/models` 调用对应 catalog。Web 动态读取目录、模型和能力，只显示已注册项。旧 Codex 状态/模型路径删除，不加兼容别名。descriptor 声明 `configuration: 'cli-path'` 的 harness 通过 `GET/PUT /api/harnesses/:id/config` 读写可执行路径，保存后通过 adapter 失效发现/模型缓存；其他 harness 返回 404。
 
 审批或提问需要保存 Agent、原生 session、turn 和请求 ID。用户答复前检查请求是否仍有效，过期或已取消的请求不得被转交给后续执行。

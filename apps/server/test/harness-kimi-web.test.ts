@@ -94,7 +94,7 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
   const items = () => {
     const result = new Map<string, { type: string; status: string; text: string }>();
     for (const event of events)
-      if (event.type === 'item') {
+      if (event.type === 'item' || event.type === 'item_delta') {
         const previous = result.get(event.item.id);
         result.set(event.item.id, {
           type: event.item.type,
@@ -395,6 +395,11 @@ describe('Kimi Code local Web adapter', () => {
       turnId: 99,
       delta: 'Child result',
     });
+    await f.cli.emit(id, 'assistant.delta', {
+      agentId: 'child',
+      turnId: 99,
+      delta: ' continued',
+    });
     await f.cli.emit(id, 'turn.ended', { agentId: 'child', turnId: 99, reason: 'completed' });
     await f.cli.emit(id, 'agent.status.updated', {
       agentId: 'child',
@@ -436,12 +441,276 @@ describe('Kimi Code local Web adapter', () => {
         .some((event) => event.usage?.usedTokens === 99999),
     ).toBe(false);
     expect(
-      f.events
-        .filter((event) => event.type === 'item')
-        .every((event) => event.turnId === turnId && event.sessionId === id),
+      f.events.every((event) => {
+        if (event.type !== 'item' && event.type !== 'item_delta') return true;
+        return event.turnId === turnId && event.sessionId === id;
+      }),
     ).toBe(true);
+    const childDeltas = f.events.filter(
+      (event) => event.type === 'item_delta' && event.item.id.startsWith('child:99:'),
+    );
+    expect(childDeltas).toMatchObject([
+      { append: false, item: { text: '子代理 Research (child)\nChild result' } },
+      { append: true, item: { text: ' continued' } },
+    ]);
     await f.cli.finish(id);
     expect(await f.completed(turnId)).toMatchObject({ status: 'completed' });
+  });
+
+  it('isolates text chunks and tool progress from discrete items while completing full segments', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ manualOutput: true });
+    const { turnId } = await session.submit(f.input('many chunks', id));
+    const chunks = Array.from({ length: 200 }, (_, index) => `${index},${'x'.repeat(400)}`);
+    await f.cli.emitBatch(
+      id,
+      chunks.map((delta) => ({
+        type: 'assistant.delta',
+        fields: { turnId: 1, delta },
+      })),
+    );
+    await vi.waitFor(() =>
+      expect(f.events.filter((event) => event.type === 'item_delta')).toHaveLength(200),
+    );
+    expect(f.events.filter((event) => event.type === 'item')).toEqual([]);
+    const deltas = f.events.filter(
+      (event): event is Extract<HarnessEvent, { type: 'item' | 'item_delta' }> =>
+        event.type === 'item_delta',
+    );
+    expect(deltas.map((event) => event.item.text)).toEqual(chunks);
+    expect(deltas.map((event) => event.append)).toEqual([
+      false,
+      ...chunks.slice(1).map(() => true),
+    ]);
+    await f.cli.emit(id, 'tool.call.started', {
+      turnId: 1,
+      toolCallId: 'mcp-1',
+      name: 'mcp__isles__read',
+      args: { id: 'x' },
+    });
+    await f.cli.emitBatch(id, [
+      ...chunks.map((text) => ({
+        type: 'tool.progress',
+        fields: {
+          turnId: 1,
+          toolCallId: 'mcp-1',
+          update: { kind: 'stdout', text },
+        },
+      })),
+      {
+        type: 'tool.progress',
+        fields: {
+          turnId: 1,
+          toolCallId: 'mcp-1',
+          update: { kind: 'status', count: 20 },
+        },
+      },
+      {
+        type: 'tool.progress',
+        fields: {
+          turnId: 1,
+          toolCallId: 'mcp-1',
+          update: { text: 'replacement', replace: true },
+        },
+      },
+    ]);
+    await vi.waitFor(() =>
+      expect(f.events.filter((event) => event.type === 'item_delta')).toHaveLength(401),
+    );
+    expect(f.events.filter((event) => event.type === 'item')).toHaveLength(2);
+    const progress = f.events.filter(
+      (event) => event.type === 'item_delta' && event.item.type === 'mcpToolCall',
+    );
+    expect(progress[0]).toMatchObject({ append: true, item: { text: `\n${chunks[0]}` } });
+    expect(progress[1]).toMatchObject({ append: true, item: { text: chunks[1] } });
+    expect(progress.at(-1)).toMatchObject({
+      append: false,
+      item: { text: 'mcp__isles__read\n{"id":"x"}\nreplacement' },
+    });
+    await f.cli.emit(id, 'tool.result', {
+      turnId: 1,
+      toolCallId: 'mcp-1',
+      output: 'final result',
+      isError: false,
+    });
+    await f.cli.finish(id);
+    await f.completed(turnId);
+    expect(f.events.filter((event) => event.type === 'item')).toHaveLength(3);
+    expect(f.items()).toEqual([
+      { type: 'agentMessage', status: 'completed', text: chunks.join('') },
+      {
+        type: 'mcpToolCall',
+        status: 'completed',
+        text: 'mcp__isles__read\n{"id":"x"}\nfinal result',
+      },
+    ]);
+  });
+
+  it('keeps channel switches and tool progress transient until a real lifecycle boundary', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ manualOutput: true });
+    const { turnId } = await session.submit(f.input('alternate channels', id));
+    const statusCount = (await f.requests('/status', 'GET')).length;
+    const snapshotCount = (await f.requests('/snapshot', 'GET')).length;
+    await f.cli.emitBatch(id, [
+      { type: 'thinking.delta', fields: { turnId: 1, delta: 'Thought' } },
+      { type: 'assistant.delta', fields: { turnId: 1, delta: 'Answer' } },
+      { type: 'thinking.delta', fields: { turnId: 1, delta: 'Thought again' } },
+    ]);
+    await vi.waitFor(() =>
+      expect(f.events.filter((event) => event.type === 'item_delta')).toHaveLength(5),
+    );
+    await f.cli.emit(id, 'tool.progress', {
+      turnId: 1,
+      toolCallId: 'progress-1',
+      update: { kind: 'status', count: 20 },
+    });
+    await f.cli.emitBatch(id, [
+      { type: 'thinking.delta', fields: { turnId: 1, delta: ' appended' } },
+      {
+        type: 'tool.progress',
+        fields: { turnId: 1, toolCallId: 'progress-1', update: { text: 'progress text' } },
+      },
+      { type: 'assistant.delta', fields: { turnId: 1, delta: 'Final answer' } },
+    ]);
+    await vi.waitFor(() =>
+      expect(f.events.filter((event) => event.type === 'item_delta')).toHaveLength(9),
+    );
+    expect(f.events.filter((event) => event.type === 'item')).toEqual([]);
+    expect(f.items()).toEqual([
+      { type: 'reasoning', status: 'completed', text: 'Thought' },
+      { type: 'agentMessage', status: 'completed', text: 'Answer' },
+      { type: 'reasoning', status: 'completed', text: 'Thought again appended' },
+      { type: 'toolCall', status: 'running', text: 'progress-1\n\nprogress text' },
+      { type: 'agentMessage', status: 'running', text: 'Final answer' },
+    ]);
+    expect(await f.requests('/status', 'GET')).toHaveLength(statusCount);
+    expect(await f.requests('/snapshot', 'GET')).toHaveLength(snapshotCount);
+    await f.cli.emit(id, 'tool.result', {
+      turnId: 1,
+      toolCallId: 'progress-1',
+      output: 'done',
+      isError: false,
+    });
+    await vi.waitFor(() =>
+      expect(f.events.filter((event) => event.type === 'item')).toHaveLength(2),
+    );
+    await f.cli.finish(id);
+    await f.completed(turnId);
+    expect(f.items().every((item) => item.status === 'completed')).toBe(true);
+  });
+
+  it.each([
+    ['failed', 'failed'],
+    ['cancelled', 'interrupted'],
+  ] as const)(
+    'preserves partial main and child text when a native turn is %s',
+    async (reason, status) => {
+      const f = await fixture();
+      const { session, id } = await f.created();
+      await f.cli.set({ manualOutput: true });
+      const { turnId } = await session.submit(f.input('partial termination', id));
+      await f.cli.emit(id, 'subagent.spawned', {
+        subagentId: 'child',
+        subagentName: 'Partial',
+        parentToolCallId: 'dispatch',
+        runInBackground: false,
+      });
+      await f.cli.emitBatch(id, [
+        { type: 'thinking.delta', fields: { turnId: 1, delta: 'Completed thought' } },
+        { type: 'assistant.delta', fields: { turnId: 1, delta: 'Partial ' } },
+        { type: 'assistant.delta', fields: { turnId: 1, delta: 'main text' } },
+        {
+          type: 'assistant.delta',
+          fields: { agentId: 'child', turnId: 99, delta: 'Partial child text' },
+        },
+        { type: 'turn.ended', fields: { agentId: 'child', turnId: 99, reason } },
+      ]);
+      await f.cli.finish(id, reason);
+      expect(await f.completed(turnId)).toMatchObject({ status });
+      expect(f.items()).toEqual(
+        expect.arrayContaining([
+          { type: 'reasoning', status: 'completed', text: 'Completed thought' },
+          { type: 'agentMessage', status, text: 'Partial main text' },
+          { type: 'agentMessage', status, text: '子代理 Partial (child)\nPartial child text' },
+        ]),
+      );
+    },
+  );
+
+  it('reports main native status while idle without fetching snapshots or status', async () => {
+    const f = await fixture({ model: 'default', reasoningEffort: 'default' });
+    const { id } = await f.created();
+    const statusCount = (await f.requests('/status', 'GET')).length;
+    const snapshotCount = (await f.requests('/snapshot', 'GET')).length;
+    await f.cli.emitBatch(id, [
+      {
+        type: 'agent.status.updated',
+        fields: { contextTokens: 77, maxContextTokens: 999999, model: 'kimi-code/fast' },
+      },
+      {
+        type: 'agent.status.updated',
+        fields: { contextTokens: 77, maxContextTokens: 999999 },
+      },
+      {
+        type: 'agent.status.updated',
+        fields: { contextTokens: 77, maxContextTokens: 999999, model: 'kimi-code/fast' },
+      },
+      {
+        type: 'agent.status.updated',
+        fields: { agentId: 'child', contextTokens: 88888, maxContextTokens: 99999 },
+      },
+      {
+        type: 'agent.status.updated',
+        fields: { contextTokens: 88, maxContextTokens: 123456, model: 'native-other-model' },
+      },
+    ]);
+    await vi.waitFor(() =>
+      expect(f.events.filter((event) => event.type === 'context_usage').at(-1)).toMatchObject({
+        usage: { usedTokens: 88, maxTokens: 123456 },
+      }),
+    );
+    expect(f.events.filter((event) => event.type === 'context_usage')).toHaveLength(3);
+    expect(f.events.filter((event) => event.type === 'context_usage')[1]).toMatchObject({
+      usage: { usedTokens: 77, maxTokens: 131072, estimated: true },
+    });
+    expect(await f.requests('/snapshot', 'GET')).toHaveLength(snapshotCount);
+    expect(await f.requests('/status', 'GET')).toHaveLength(statusCount);
+  });
+
+  it('coalesces context refreshes into status requests and ignores stale responses after native status', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ manualOutput: true, statusDelayMs: 120 });
+    const { turnId } = await session.submit(f.input('refresh', id));
+    const statusCount = (await f.requests('/status', 'GET')).length;
+    await f.cli.emit(id, 'turn.step.completed', { turnId: 1 });
+    await vi.waitFor(async () =>
+      expect(await f.requests('/status', 'GET')).toHaveLength(statusCount + 1),
+    );
+    await f.cli.emitBatch(
+      id,
+      Array.from({ length: 40 }, () => ({
+        type: 'turn.step.completed',
+        fields: { turnId: 1 },
+      })),
+    );
+    await f.cli.emit(id, 'agent.status.updated', { contextTokens: 4321, maxContextTokens: 262144 });
+    await vi.waitFor(async () =>
+      expect(await f.requests('/status', 'GET')).toHaveLength(statusCount + 2),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 170));
+    expect(await f.requests('/status', 'GET')).toHaveLength(statusCount + 2);
+    expect(await f.requests('/snapshot', 'GET')).toHaveLength(1);
+    expect(
+      f.events
+        .filter((event) => event.type === 'context_usage')
+        .map((event) => event.usage?.usedTokens),
+    ).toEqual([0, 4321]);
+    await f.cli.finish(id);
+    await f.completed(turnId);
   });
 
   it('deduplicates volatile offsets before switching channels and resets both channels for each step', async () => {
@@ -496,6 +765,24 @@ describe('Kimi Code local Web adapter', () => {
       { type: 'agentMessage', status: 'completed', text: 'Final' },
     ]);
     expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('rejects stream offset gaps without accepting the missing chunk', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ manualOutput: true });
+    await session.submit(f.input('gap', id));
+    await f.cli.emit(id, 'assistant.delta', { turnId: 1, delta: 'first' }, { offset: 0 });
+    await f.cli.emit(id, 'assistant.delta', { turnId: 1, delta: 'gap' }, { offset: 9 });
+    await vi.waitFor(() => expect(f.handlers.exit).toHaveBeenCalledTimes(1));
+    expect(f.handlers.exit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('流式内容存在缺口'),
+      }),
+    );
+    expect(f.events.filter((event) => event.type === 'item_delta')).toHaveLength(1);
+    expect(f.items()).toEqual([{ type: 'agentMessage', status: 'running', text: 'first' }]);
+    await session.close();
   });
 
   it('distinguishes definite refusal from transport loss before native acceptance', async () => {

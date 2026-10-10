@@ -122,6 +122,67 @@ describe('OpenCode native SSE', () => {
 });
 
 describe('OpenCode v2 adapter', () => {
+  it('ignores output fragments without context reads and publishes ended snapshots and tool boundaries', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    f.native.onRequest = ({ path, body }) => {
+      if (!path.endsWith('/prompt')) return;
+      const receipt = inboxReceipt(id, 'stream-boundaries', (body as { id: string }).id);
+      f.native.execution(id);
+      f.native.deliver(id, receipt.data.id);
+      return receipt;
+    };
+    await session.submit(f.input(id));
+    const before = f.events.length;
+    const reads = f.native.calls.filter((call) => call.path.endsWith('/context')).length;
+    for (const type of ['session.text.started', 'session.text.delta', 'session.reasoning.delta'])
+      f.native.emit(
+        f.native.frame(id, type, { assistantMessageID: 'message', ordinal: 0, text: 'partial' }),
+      );
+    f.native.emit(
+      f.native.frame(id, 'session.tool.input.delta', {
+        assistantMessageID: 'message',
+        id: 'tool',
+        delta: '{}',
+      }),
+    );
+    expect(f.events).toHaveLength(before);
+    expect(f.native.calls.filter((call) => call.path.endsWith('/context'))).toHaveLength(reads);
+    for (const type of ['session.text.ended', 'session.reasoning.ended'])
+      f.native.emit(
+        f.native.frame(id, type, { assistantMessageID: 'message', ordinal: 0, text: 'Complete' }),
+      );
+    f.native.emit(
+      f.native.frame(id, 'session.tool.input.started', {
+        assistantMessageID: 'message',
+        id: 'tool',
+        name: 'isles.send_message',
+      }),
+    );
+    f.native.emit(
+      f.native.frame(id, 'session.tool.called', {
+        assistantMessageID: 'message',
+        id: 'tool',
+        input: { body: 'Sent' },
+      }),
+    );
+    f.native.emit(
+      f.native.frame(id, 'session.tool.success', {
+        assistantMessageID: 'message',
+        id: 'tool',
+        content: [{ type: 'text', text: 'Done' }],
+      }),
+    );
+    expect(f.events.slice(before)).toMatchObject([
+      { type: 'item', append: false, item: { type: 'agentMessage', status: 'completed' } },
+      { type: 'item', append: false, item: { type: 'reasoning', status: 'completed' } },
+      { type: 'item', append: false, item: { type: 'mcpToolCall', status: 'running' } },
+      { type: 'item', append: false, item: { type: 'mcpToolCall', status: 'completed' } },
+    ]);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
   it('restores the latest main-session context call, including cache and reasoning, without session billing totals', async () => {
     const f = await fixture();
     const session = await f.connect();

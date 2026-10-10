@@ -88,11 +88,11 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
       if (!event) throw new Error('turn still running');
       return event;
     });
-  /** Applies item events the way the store does: appends extend, others replace. */
+  /** Includes buffered deltas before applying the final persistence boundary. */
   const items = () => {
     const result = new Map<string, { type: string; status: string; text: string }>();
     for (const event of events)
-      if (event.type === 'item') {
+      if (event.type === 'item' || event.type === 'item_delta') {
         const previous = result.get(event.item.id);
         result.set(event.item.id, {
           type: event.item.type,
@@ -338,6 +338,17 @@ describe('Kimi Code ACP adapter', () => {
     expect(await session.submit(input)).toEqual({ turnId: input.runId });
     expect(await f.completed(input.runId)).toMatchObject({ status: 'completed', error: null });
     expect(f.events[0]).toEqual({ type: 'turn_started', sessionId: id, turnId: input.runId });
+    expect(f.events.filter((event) => event.type === 'item_delta')).toMatchObject([
+      { append: true, item: { type: 'reasoning', text: 'Thinking about it' } },
+      { append: true, item: { type: 'reasoning', status: 'completed', text: '' } },
+      { append: true, item: { type: 'agentMessage', text: 'Let me ' } },
+      { append: true, item: { type: 'agentMessage', text: 'check.' } },
+      { append: true, item: { type: 'agentMessage', text: 'Done' } },
+    ]);
+    expect(f.events.filter((event) => event.type === 'item' && event.append)).toMatchObject([
+      { item: { type: 'agentMessage', status: 'completed', text: '' } },
+      { item: { type: 'agentMessage', status: 'completed', text: '' } },
+    ]);
     expect(f.items()).toEqual([
       { type: 'reasoning', status: 'completed', text: 'Thinking about it' },
       { type: 'agentMessage', status: 'completed', text: 'Let me check.' },
@@ -357,6 +368,86 @@ describe('Kimi Code ACP adapter', () => {
     expect((await f.frames('session/prompt'))[0]).toMatchObject({
       params: { sessionId: id, prompt: [{ type: 'text', text: 'tools' }] },
     });
+  });
+
+  it('buffers repeated running tool progress while publishing starts and state changes', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    const input = f.input('tool-progress', id);
+    await session.submit(input);
+    await f.completed(input.runId);
+    const tools = f.events.filter(
+      (event) =>
+        (event.type === 'item' || event.type === 'item_delta') && event.item.id === 'progress',
+    );
+    expect(tools).toMatchObject([
+      { type: 'item', append: false, item: { status: 'running', text: 'Shell' } },
+      { type: 'item_delta', append: false, item: { status: 'running', text: 'Shell\n\nworking' } },
+      { type: 'item_delta', append: false, item: { status: 'running' } },
+      { type: 'item_delta', append: false, item: { status: 'running' } },
+      { type: 'item', append: false, item: { status: 'completed' } },
+    ]);
+  });
+
+  it('keeps chunk-kind switches and same-state tool updates entirely in the delta path', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    const input = f.input('interleaved-progress', id);
+    await session.submit(input);
+    await f.completed(input.runId);
+    const items = f.events.filter((event) => event.type === 'item' || event.type === 'item_delta');
+    expect(items).toMatchObject([
+      { type: 'item_delta', item: { text: 'First thought' } },
+      { type: 'item_delta', append: true, item: { status: 'completed', text: '' } },
+      { type: 'item_delta', item: { text: 'First answer' } },
+      { type: 'item_delta', append: true, item: { status: 'completed', text: '' } },
+      { type: 'item_delta', item: { text: 'Second thought' } },
+      { type: 'item', append: true, item: { status: 'completed', text: '' } },
+      { type: 'item', item: { id: 'progress', status: 'running' } },
+      { type: 'item_delta', item: { text: 'Thinking while tool runs' } },
+      { type: 'item_delta', append: true, item: { status: 'completed', text: '' } },
+      { type: 'item_delta', item: { text: 'Output while tool runs' } },
+      { type: 'item_delta', append: true, item: { status: 'completed', text: '' } },
+      { type: 'item_delta', item: { id: 'progress', status: 'running' } },
+      { type: 'item_delta', item: { text: 'Waiting for completion' } },
+      { type: 'item', append: true, item: { status: 'completed', text: '' } },
+      { type: 'item', item: { id: 'progress', status: 'completed' } },
+      { type: 'item_delta', item: { text: 'Final answer' } },
+      { type: 'item', append: true, item: { status: 'completed', text: '' } },
+    ]);
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+    expect(
+      f.items().filter((item) => item.type === 'agentMessage' || item.type === 'reasoning'),
+    ).toEqual([
+      { type: 'reasoning', status: 'completed', text: 'First thought' },
+      { type: 'agentMessage', status: 'completed', text: 'First answer' },
+      { type: 'reasoning', status: 'completed', text: 'Second thought' },
+      { type: 'reasoning', status: 'completed', text: 'Thinking while tool runs' },
+      { type: 'agentMessage', status: 'completed', text: 'Output while tool runs' },
+      { type: 'reasoning', status: 'completed', text: 'Waiting for completion' },
+      { type: 'agentMessage', status: 'completed', text: 'Final answer' },
+    ]);
+  });
+
+  it.each([
+    { status: 'failed', text: 'partial-refusal' },
+    { status: 'interrupted', text: 'hold' },
+  ] as const)('preserves $status for an unfinished streamed segment', async ({ status, text }) => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ chunkBeforeHold: true });
+    const input = f.input(text, id);
+    await session.submit(input);
+    if (status === 'interrupted') await session.interrupt(id, input.runId);
+    expect(await f.completed(input.runId)).toMatchObject({ status });
+    expect(
+      f.events.filter((event) => event.type === 'item' || event.type === 'item_delta'),
+    ).toMatchObject([
+      { type: 'item_delta', append: true, item: { status: 'running', text: 'Working' } },
+      { type: 'item', append: true, item: { status, text: '' } },
+    ]);
+    expect(f.items()).toEqual([{ type: 'agentMessage', status, text: 'Working' }]);
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
   });
 
   it('retries a prompt Kimi refuses as busy and keeps one run', async () => {

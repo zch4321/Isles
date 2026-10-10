@@ -57,6 +57,7 @@ export const eventSchema = z.object({
       reason: z.string(),
     }),
     z.object({ type: z.literal('item'), turnId, item: runItemSchema, append: z.boolean() }),
+    z.object({ type: z.literal('item_delta'), turnId, item: runItemSchema, append: z.boolean() }),
   ]),
   eventId: z.string().optional(),
 });

@@ -293,7 +293,7 @@ class CodexSession implements HarnessSession {
     if (method === 'item/agentMessage/delta' || method === 'item/commandExecution/outputDelta') {
       if (typeof params.itemId !== 'string' || typeof params.delta !== 'string') return;
       this.output.event({
-        type: 'item',
+        type: 'item_delta',
         sessionId,
         turnId,
         append: true,
@@ -301,7 +301,7 @@ class CodexSession implements HarnessSession {
           id: params.itemId,
           type: method === 'item/agentMessage/delta' ? 'agentMessage' : 'commandExecution',
           status: 'running',
-          text: this.environment.redactor.text(params.delta),
+          text: this.environment.redactor.output(params.delta),
         },
       });
     } else if (method === 'item/started' || method === 'item/completed') {
@@ -311,6 +311,8 @@ class CodexSession implements HarnessSession {
         .safeParse(params.item);
       if (!parsed.success) return;
       const item = parsed.data;
+      if (method === 'item/started' && (item.type === 'agentMessage' || item.type === 'reasoning'))
+        return;
       const detail: string[] = [];
       for (const key of [
         'text',
@@ -333,7 +335,7 @@ class CodexSession implements HarnessSession {
           id: item.id,
           type: item.type,
           status: method === 'item/completed' ? 'completed' : 'running',
-          text: this.environment.redactor.text(detail.join('\n')),
+          text: this.environment.redactor.output(detail.join('\n')),
         },
       });
     }

@@ -308,10 +308,10 @@ class DshSession implements HarnessSession {
         this.finish(active);
       } else
         this.handlers.event({
-          type: 'item',
+          type: event.type,
           sessionId: this.sessionId!,
           turnId: event.turnId,
-          item: { ...event.item, text: this.environment.redactor.text(event.item.text) },
+          item: { ...event.item, text: this.environment.redactor.output(event.item.text) },
           append: event.append,
         });
     }

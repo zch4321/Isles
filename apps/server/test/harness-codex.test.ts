@@ -125,6 +125,46 @@ async function fixture() {
 }
 
 describe('Codex adapter protocol boundary', () => {
+  it('isolates message and command deltas while retaining discrete tool and completion boundaries', async () => {
+    const { wire, output } = await fixture();
+    const identity = { threadId: 'session-one', turnId: 'turn-one' };
+    for (const type of ['agentMessage', 'reasoning'])
+      wire.notification('item/started', {
+        ...identity,
+        item: { id: type, type, text: 'partial output' },
+      });
+    expect(output.event).not.toHaveBeenCalled();
+    wire.notification('item/started', {
+      ...identity,
+      item: { id: 'command', type: 'commandExecution', command: 'echo hello' },
+    });
+    wire.notification('item/agentMessage/delta', {
+      ...identity,
+      itemId: 'message',
+      delta: 'hello',
+    });
+    wire.notification('item/commandExecution/outputDelta', {
+      ...identity,
+      itemId: 'command',
+      delta: 'hello\n',
+    });
+    wire.notification('item/completed', {
+      ...identity,
+      item: { id: 'message', type: 'agentMessage', text: 'hello' },
+    });
+    wire.notification('item/completed', {
+      ...identity,
+      item: { id: 'command', type: 'commandExecution', aggregatedOutput: 'hello\n' },
+    });
+    expect(vi.mocked(output.event).mock.calls.map(([event]) => event)).toMatchObject([
+      { type: 'item', append: false, item: { id: 'command', status: 'running' } },
+      { type: 'item_delta', append: true, item: { id: 'message', text: 'hello' } },
+      { type: 'item_delta', append: true, item: { id: 'command', text: 'hello\n' } },
+      { type: 'item', append: false, item: { id: 'message', status: 'completed' } },
+      { type: 'item', append: false, item: { id: 'command', status: 'completed' } },
+    ]);
+  });
+
   it('reports last context usage outside turns and filters other native threads', async () => {
     const { session, wire, output } = await fixture();
     await session.createSession(() => {});

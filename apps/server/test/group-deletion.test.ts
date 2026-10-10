@@ -55,12 +55,14 @@ describe('group logical deletion', () => {
     say(outside.id, '其他群输入');
     const run = store.startRun(a.id, a.threadId!)!.run;
     store.acceptRun(run.id, 'native-turn');
-    store.updateItem(run.id, {
-      id: 'reasoning',
-      type: 'reasoning',
-      status: 'completed',
-      text: '保留原生记录',
-    });
+    store.updateItems(run.id, [
+      {
+        id: 'reasoning',
+        type: 'reasoning',
+        status: 'completed',
+        text: '保留原生记录',
+      },
+    ]);
     const question = store.createQuestion(a.id, run.id, 'native-turn', 1, [
       {
         id: 'choice',
