@@ -58,7 +58,10 @@ function focusFirst(event: Event) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="sm:max-w-md" @open-auto-focus="focusFirst">
+    <DialogContent
+      class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md"
+      @open-auto-focus="focusFirst"
+    >
       <DialogHeader>
         <DialogTitle>{{ channel ? '添加成员' : '新建群聊' }}</DialogTitle>
         <DialogDescription v-if="channel">

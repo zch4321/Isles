@@ -56,7 +56,7 @@ const contextOpen = ref(false);
 
 <template>
   <header
-    class="flex h-16 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 lg:h-20 lg:px-6"
+    class="flex h-16 shrink-0 items-center gap-1.5 border-b border-line bg-surface px-2 sm:gap-3 sm:px-3 lg:h-20 lg:px-6"
   >
     <Button
       variant="ghost"
@@ -70,7 +70,7 @@ const contextOpen = ref(false);
     <template v-if="agent">
       <ParticipantAvatar :name="agent.name" :identity="agent.id" size="md" />
       <div class="min-w-0 flex-1">
-        <div class="flex min-w-0 items-center gap-2">
+        <div class="flex min-w-0 items-center gap-1.5 sm:gap-2">
           <h1 class="truncate text-base font-semibold tracking-tight lg:text-[17px]">
             {{ agent.name }}
           </h1>
@@ -92,22 +92,32 @@ const contextOpen = ref(false);
       <Button
         v-if="agent.status !== 'deleted' && canResume"
         variant="outline"
-        size="sm"
+        size="icon-sm"
+        class="sm:w-auto sm:gap-1.5 sm:px-2.5"
         aria-label="恢复 Agent"
+        title="恢复 Agent"
         :disabled="controlPending"
         @click="$emit('resume')"
       >
-        <LoaderCircle v-if="controlPending" class="animate-spin" /><Play v-else />恢复
+        <LoaderCircle v-if="controlPending" class="animate-spin" /><Play v-else /><span
+          class="hidden sm:inline"
+          >恢复</span
+        >
       </Button>
       <Button
         v-else-if="agent.status !== 'deleted'"
         variant="outline"
-        size="sm"
+        size="icon-sm"
+        class="sm:w-auto sm:gap-1.5 sm:px-2.5"
         aria-label="停止 Agent"
+        title="停止 Agent"
         :disabled="controlPending"
         @click="$emit('stop')"
       >
-        <LoaderCircle v-if="controlPending" class="animate-spin" /><Square v-else />停止
+        <LoaderCircle v-if="controlPending" class="animate-spin" /><Square v-else /><span
+          class="hidden sm:inline"
+          >停止</span
+        >
       </Button>
     </template>
     <template v-else>
