@@ -37,6 +37,13 @@ OpenCode v2.0.25 CLI 的 Bus 默认 `persist=false`，`serve` 没有启用事件
 
 OpenCode 原生 MCP 通过 CodeMode `execute` 提供，调用方式为 `tools.isles.send_message(...)`；工具索引在 MCP 建立后异步更新，原生 `search` 和规则更新可观察其变化，本轮保留原生机制。验收脚本为 `apps/server/test/verify-native-opencode.ts`，本地模式通过 `ISLES_TEST_OPENCODE_LOCAL=1` 开启，不修改用户文件；远端模式可用 `ISLES_TEST_OPENCODE_MODEL=provider/model` 明确选择模型。
 
+## Windows 自动发现验收（2026-10-10）
+
+- Windows npm v2 包为 `@opencode/cli`，入口为 `bin/opencode.exe`。发现逻辑解析 npm/pnpm 启动文件后直接运行该原生程序，版本探测和后续 server 启动使用相同命令。
+- 回归测试覆盖 `.cmd` 与 `.ps1` 自动发现、带空格路径及相对包路径的 pnpm 启动文件、显式无效配置的错误边界，以及 JS 入口继续由 Node 运行。
+- 本机 `@opencode/cli` `2.0.26` 在源码与构建产物中均自动检测成功，真实 HTTP 接口首次返回 11 个模型，构建产物复验返回当前的 50 个模型。验证使用隔离 Isles 数据目录，只读取目录，未调用模型。与 DSH 共用的报告保存在 `%LOCALAPPDATA%\Temp\isles-windows-discovery-9RZdRU\report.json`。
+- 完整 `pnpm check` 通过，435 项测试通过、1 项条件跳过；OpenCode、DSH 与目录切换的 5 项 Chrome 浏览器验证通过。
+
 ## 来源
 
 - [OpenCode v2.0.25 原生会话 API](https://github.com/anomalyco/opencode/blob/v2.0.25/packages/protocol/src/groups/session.ts)

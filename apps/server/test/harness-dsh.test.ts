@@ -102,11 +102,11 @@ describe('DSH SDK stdio transport', () => {
     const debug = vi.fn();
     const handlers = { notification: vi.fn(), exit: vi.fn() };
     const client = new DshClient(
-      command,
+      { ...command, env: { DSH_HOME: f.home } },
       f.root,
       {
         args: ['fixture-runtime-arg'],
-        env: { DSH_HOME: f.home, DSH_FIXTURE_AUDIT: audit, DSH_FIXTURE_TOKEN: secret },
+        env: { DSH_FIXTURE_AUDIT: audit, DSH_FIXTURE_TOKEN: secret },
       },
       handlers,
       f.environment.redactor,

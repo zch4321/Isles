@@ -1,5 +1,5 @@
 import { ConfigManager } from '@isles/config';
-import { chmod, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DshClientFactory, DshConnection, DshHandlers } from '../src/harness/dsh/client.js';
 import type { DshRuntime } from '../src/harness/dsh/environment.js';
@@ -18,11 +18,10 @@ export const fixtureModel = {
 };
 
 export async function dshConfig(root: string) {
-  const binary = join(root, 'dsh-fixture');
+  const binary = join(root, 'dsh-fixture.mjs');
   const home = join(root, 'native-home');
   await mkdir(home, { recursive: true });
-  await writeFile(binary, '#!/bin/sh\nprintf "0.2.0-rc.2\\n"\n');
-  await chmod(binary, 0o755);
+  await writeFile(binary, 'console.log("0.2.0-rc.2");\n');
   const config = new ConfigManager({
     configFilePath: join(root, 'config.toml'),
     homeDir: root,

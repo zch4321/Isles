@@ -41,6 +41,13 @@ SDK profile 仅包含问答服务，Isles overlay 另行加载官方 `dsh-tool-a
 
 构建产物的空 session 停止/恢复也通过，保持相同 ID、0 个 run；证据目录为 `/var/folders/pn/j5nzy9z97cq0h_0df57g2kj80000gp/T/isles-native-dsh-built-empty-dCZWkF/`。额外使用无法连接的 MCP 地址验证启动失败，Agent 明确报告 MCP 未就绪，threadId 保持 null、0 个 run；证据目录为 `/var/folders/pn/j5nzy9z97cq0h_0df57g2kj80000gp/T/isles-native-dsh-mcp-failure-0evM5L/`。创建前的连接检查要求原生 Isles MCP 工具实际注册，模型目录读取独立于该检查。
 
+## Windows 自动发现验收（2026-10-10）
+
+- Windows 桌面版安装在自定义目录时，从用户及系统安装登记读取位置，并搜索常见安装目录。自动发现和显式配置的 `dsh.cmd` 均使用桌面版 Electron、`--expose-internals`、ASAR CLI 入口与 `ELECTRON_RUN_AS_NODE=1`。
+- 回归测试覆盖自定义安装目录、中文和空格路径、单个及多个登记结果、登记查询失败、完整桌面运行时、未完成安装回退至 npm CLI，以及 macOS 用户 Applications 发现。
+- 本机 Windows 桌面版 `0.2.0-rc.2` 安装于 `E:\program\dsh`，源码与构建产物均自动检测成功，真实 SDK 桥接返回 4 个模型。验证使用隔离 Isles 数据目录，只读取目录，未调用模型。与 OpenCode 共用的报告保存在 `%LOCALAPPDATA%\Temp\isles-windows-discovery-9RZdRU\report.json`。
+- 完整 `pnpm check` 通过，435 项测试通过、1 项条件跳过；OpenCode、DSH 与目录切换的 5 项 Chrome 浏览器验证通过。本轮同时修正 Windows 权限断言、Codex 模拟器分片发送顺序，以及 Runtime 在连接退出后等待原生进程清理的竞态。
+
 ## 来源
 
 - [官方 DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)

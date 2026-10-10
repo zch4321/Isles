@@ -63,7 +63,7 @@ export class DshClient implements DshConnection {
   ) {
     this.child = spawn(command.file, [...command.args, ...runtime.args], {
       cwd,
-      env: { ...process.env, ...runtime.env },
+      env: { ...process.env, ...command.env, ...runtime.env },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
       windowsHide: true,

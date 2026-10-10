@@ -32,9 +32,9 @@ Claude Code 同样支持自动发现与“新建 Agent → Claude Code 路径设
 
 Kimi Code 使用“新建 Agent → Kimi Code 路径设置”，发现顺序为 `ISLES_KIMI_BIN`、界面保存的路径、PATH，以及 `~/.local/bin`、Homebrew 和 npm/pnpm 的常见目录；路径保存在 `[kimi].binary_path`。模型与推理等级来自原生 ACP 会话的配置项：Isles 在 `<data_dir>/acp-catalog/kimi` 建立一个不发送消息的临时会话，逐个模型读取支持的 thinking 等级后删除该会话。没有 thinking 选项的模型显示 `default`。
 
-OpenCode 使用“新建 Agent → OpenCode 路径设置”，路径保存到 `[opencode].binary_path`，环境覆盖为 `ISLES_OPENCODE_BIN`。当前实现采用本机 OpenCode v2 原生接口，验证基线为 `opencode v2.0.25`。模型目录来自原生已启用模型，推理等级映射为模型 variant；`default` 使用原生默认值。每位 Agent 启动独立的 `opencode serve --stdio`，复用用户原生配置和登录数据库，创建时不调用模型。实现与验证见 [OpenCode 验收](docs/opencode-acceptance.md)。
+OpenCode 使用“新建 Agent → OpenCode 路径设置”，路径保存到 `[opencode].binary_path`，环境覆盖为 `ISLES_OPENCODE_BIN`。当前实现采用本机 OpenCode v2 原生接口，验证基线为 `opencode v2.0.25`。Windows 自动解析 `@opencode/cli` 的 npm/pnpm 启动文件，直接运行包内的 `opencode.exe`。模型目录来自原生已启用模型，推理等级映射为模型 variant；`default` 使用原生默认值。每位 Agent 启动独立的 `opencode serve --stdio`，复用用户原生配置和登录数据库，创建时不调用模型。实现与验证见 [OpenCode 验收](docs/opencode-acceptance.md)。
 
-DeepSeek Harness 使用“新建 Agent → DeepSeek Harness 路径设置”，路径保存在 `[dsh].binary_path`，环境覆盖为 `ISLES_DSH_BIN`。macOS 可自动发现系统或用户 Applications 中的桌面版自带 `dsh`；当前验证基线为 `0.2.0-rc.2`。每位 Agent 启动独立的 `dsh --profile sdk`，通过运行时 overlay 加载 Isles 桥接插件、官方问答工具和 MCP，复用原生登录与 session 存储。模型及推理等级来自原生目录，默认选择采用桌面版保存的配置。实现与验证见 [DSH 验收](docs/dsh-acceptance.md)。
+DeepSeek Harness 使用“新建 Agent → DeepSeek Harness 路径设置”，路径保存在 `[dsh].binary_path`，环境覆盖为 `ISLES_DSH_BIN`。macOS 可自动发现系统或用户 Applications 中的桌面版自带 `dsh`；Windows 从安装登记和常见安装目录发现桌面版自带的 `resources/runtime/cli/bin/dsh.cmd`，支持自定义安装目录，并使用桌面版自带运行时。当前验证基线为 `0.2.0-rc.2`。每位 Agent 启动独立的 `dsh --profile sdk`，通过运行时 overlay 加载 Isles 桥接插件、官方问答工具和 MCP，复用原生登录与 session 存储。模型及推理等级来自原生目录，默认选择采用桌面版保存的配置。实现与验证见 [DSH 验收](docs/dsh-acceptance.md)。
 
 SQLite 驱动包含原生模块。项目已提供 `node-gyp`，本机还需要 Python 3 和 C/C++ 构建工具；macOS 使用 Xcode Command Line Tools。
 

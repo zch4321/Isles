@@ -1,6 +1,6 @@
 import { ConfigManager } from '@isles/config';
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   OpenCodeClientFactory,
@@ -21,11 +21,10 @@ export const fixtureModel = {
 };
 
 export async function opencodeConfig(root: string) {
-  const binary = join(root, 'opencode-fixture');
+  const binary = join(root, 'opencode-fixture.mjs');
   const home = join(root, 'native-home');
   await mkdir(home, { recursive: true });
-  await writeFile(binary, '#!/bin/sh\nprintf "opencode v2.0.25\\n"\n');
-  await chmod(binary, 0o755);
+  await writeFile(binary, 'console.log("opencode v2.0.25");\n');
   const config = new ConfigManager({
     configFilePath: join(root, 'config.toml'),
     homeDir: root,

@@ -8,6 +8,8 @@ import { promisify } from 'node:util';
 export interface CliCommand {
   file: string;
   args: string[];
+  /** Environment required by an installer's native runtime. */
+  env?: Record<string, string>;
 }
 export interface CliExecutable extends CliCommand {
   path: string;
@@ -24,11 +26,13 @@ export interface CliProfile {
   /** The command name searched on PATH and in standard directories. */
   name: string;
   displayName: string;
-  /** The package's entry script, used to unwrap Windows npm/pnpm launchers. */
+  /** The package's executable or JS entry, used to unwrap Windows npm/pnpm launchers. */
   npmEntry: string;
   versionPattern: RegExp;
   /** Installer-specific directories searched before the shared standard ones. */
-  installDirectories?(home: string): string[];
+  installDirectories?(home: string, environment: NodeJS.ProcessEnv): string[] | Promise<string[]>;
+  /** Resolve an installer-owned launcher before applying the npm layout. */
+  resolveCommand?(path: string, platform: NodeJS.Platform): Promise<CliCommand | undefined>;
 }
 const exec = promisify(execFile);
 
@@ -38,6 +42,8 @@ async function commandAt(
   profile: CliProfile,
 ): Promise<CliCommand> {
   if (!(await stat(path)).isFile()) throw new Error('路径不是文件');
+  const installedCommand = await profile.resolveCommand?.(path, platform);
+  if (installedCommand) return installedCommand;
   if (platform === 'win32' && ['.cmd', '.bat', '.ps1'].includes(extname(path).toLowerCase())) {
     const segments = profile.npmEntry.split('/');
     let script = join(dirname(path), 'node_modules', ...segments);
@@ -56,7 +62,7 @@ async function commandAt(
       script = isAbsolute(relative) ? relative : resolve(dirname(path), relative);
       await access(script);
     }
-    return { file: process.execPath, args: [script] };
+    return commandAt(script, platform, profile);
   }
   const target = await realpath(path);
   if (['.js', '.mjs', '.cjs'].includes(extname(target).toLowerCase()))
@@ -90,7 +96,7 @@ export async function findCliExecutable(
     ).map((name) => resolve(directory, name));
   const standard = [
     join(home, '.local', 'bin'),
-    ...(profile.installDirectories?.(home) ?? []),
+    ...(configured ? [] : ((await profile.installDirectories?.(home, environment)) ?? [])),
     ...(platform === 'win32'
       ? [
           environment.PNPM_HOME,
@@ -121,7 +127,7 @@ export async function findCliExecutable(
           ? await probe(command)
           : (
               await exec(command.file, [...command.args, '--version'], {
-                env: environment,
+                env: { ...environment, ...command.env },
                 timeout: 10_000,
                 maxBuffer: 64_000,
                 windowsHide: true,

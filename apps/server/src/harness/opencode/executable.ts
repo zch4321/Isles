@@ -13,7 +13,7 @@ export function findOpenCodeExecutable(
     {
       name: 'opencode',
       displayName: 'OpenCode',
-      npmEntry: 'opencode-ai/bin/opencode',
+      npmEntry: '@opencode/cli/bin/opencode.exe',
       versionPattern: /^opencode v2\.\d+\.\d+(?:[-+][\w.-]+)?$/,
       installDirectories: (home) => [`${home}/.opencode/bin`],
     },
