@@ -35,15 +35,11 @@ const unavailable = computed(() => {
   if (!detail.data.value)
     return detail.isError.value ? '加载上下文后可新建会话。' : '正在加载上下文…';
   if (current.value.status === 'deleted') return 'Agent 已删除，聊天记录和工作文件已保留。';
-  if (current.value.status === 'creating') return 'Agent 正在创建，完成后可新建会话。';
-  if (current.value.status === 'recovering') return 'Agent 正在恢复，完成后可新建会话。';
   if (
     current.value.status === 'running' ||
     detail.data.value.runs.some((run) => isActiveRun(run.status))
   )
     return 'Agent 正在执行或等待回答，请先停止 Agent，或等待执行完成。';
-  if (detail.data.value.pendingMessageCount > 0)
-    return `有 ${detail.data.value.pendingMessageCount} 条消息待处理，处理完成后可新建会话。`;
   return '';
 });
 const create = useMutation({
@@ -130,11 +126,11 @@ function startConfirmation() {
       <section v-if="confirming" class="info-box space-y-1">
         <h3 class="text-[13px] font-semibold">新建会话</h3>
         <p class="text-[13px] leading-relaxed">
-          新会话将从新的上下文开始。聊天记录、群成员和工作文件保留。
+          新会话将从新的上下文开始，取消当前待投递消息。聊天记录、群成员和工作文件保留。
         </p>
       </section>
       <p v-else class="text-xs leading-relaxed text-ink-3">
-        新建会话可重新开始上下文，保留聊天记录、群成员和工作文件。
+        新建会话可重新开始上下文并取消当前待投递消息，保留聊天记录、群成员和工作文件。
       </p>
       <p v-if="unavailable" class="text-xs leading-relaxed text-ink-3">
         {{ unavailable }}

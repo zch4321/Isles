@@ -3,6 +3,7 @@ import { LoaderCircle } from '@lucide/vue';
 import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue';
 import { useAgents, useChannels, useDirectory } from '@/api/queries';
 import AppSidebar from '@/components/AppSidebar.vue';
+import BulkDeleteDialog from '@/components/BulkDeleteDialog.vue';
 import ConversationView from '@/components/ConversationView.vue';
 import CreateAgentDialog from '@/components/CreateAgentDialog.vue';
 import GroupDialog from '@/components/GroupDialog.vue';
@@ -17,6 +18,13 @@ const selected = ref(readStorage('isles.channel') ?? '');
 const pane = ref<'list' | 'chat'>(selected.value ? 'chat' : 'list');
 const inspectorOpen = ref(false);
 const creating = ref<'agent' | 'group'>();
+const bulkDeleting = ref<'agent' | 'group'>();
+const bulkDeleteOpen = computed({
+  get: () => Boolean(bulkDeleting.value),
+  set: (value: boolean) => {
+    if (!value) bulkDeleting.value = undefined;
+  },
+});
 
 const agents = useAgents();
 const channels = useChannels();
@@ -50,7 +58,8 @@ function back() {
   inspectorOpen.value = false;
 }
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && inspectorOpen.value && !creating.value) inspectorOpen.value = false;
+  if (event.key === 'Escape' && inspectorOpen.value && !creating.value && !bulkDeleting.value)
+    inspectorOpen.value = false;
 }
 onMounted(() => window.addEventListener('keydown', onKeydown));
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
@@ -73,6 +82,7 @@ const groupDialog = dialogOpen('group');
       :selected-id="selected"
       @select="choose"
       @create="creating = $event"
+      @bulk-delete="bulkDeleting = $event"
     />
     <main :class="cn('min-h-0 min-w-0 flex-1', pane === 'list' && 'max-md:hidden')">
       <ConversationView
@@ -100,5 +110,6 @@ const groupDialog = dialogOpen('group');
     />
     <CreateAgentDialog v-model:open="agentDialog" @created="choose" />
     <GroupDialog v-model:open="groupDialog" @done="choose" />
+    <BulkDeleteDialog v-model:open="bulkDeleteOpen" :kind="bulkDeleting ?? 'agent'" />
   </div>
 </template>

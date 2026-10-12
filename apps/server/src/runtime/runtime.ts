@@ -818,15 +818,10 @@ export class Runtime {
     if (!this.baseUrl || this.closing) throw new HttpError(503, 'Runtime 尚未就绪');
     const agent = this.managed(id);
     const handle = this.handle(id);
-    if (
-      handle.task ||
-      handle.active ||
-      this.store.hasActiveRun(id) ||
-      !['ready', 'stopped', 'error'].includes(agent.status)
-    )
+    // Native initialization and outstanding turn cleanup must finish before their
+    // connection can be replaced; the displayed status alone does not imply work.
+    if (handle.task || handle.active || this.store.hasActiveRun(id))
       throw new HttpError(409, 'Agent 正在执行或初始化，请等待空闲后新建会话。');
-    if (this.store.pendingMessageCount(id))
-      throw new HttpError(409, 'Agent 有待投递消息，请处理完消息后新建会话。');
     this.resetting.add(id);
     handle.controlRevision = (handle.controlRevision ?? 0) + 1;
     let task: Promise<void> | undefined;

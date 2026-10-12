@@ -95,6 +95,7 @@ async function contextFixture(page: Page) {
         if (failure) return route.fulfill({ status: 409, json: { error: failure } });
         detail.agent.threadId = 'session-after';
         detail.contextUsage = null;
+        detail.pendingMessageCount = 0;
         privateMessages.push({
           ...message(channelId, '已新建会话，后续消息使用新的上下文。', 2),
           sender: 'system',
@@ -216,18 +217,10 @@ test('context shows native usage and percentage independently of the same real m
   await expect(dialog.getByText(/tokens/)).toHaveCount(0);
 });
 
-for (const state of [
-  'creating',
-  'recovering',
-  'running',
-  'deleted',
-  'waiting',
-  'pending',
-] as const) {
+for (const state of ['running', 'deleted', 'waiting'] as const) {
   test(`context blocks a new session while ${state}`, async ({ page }) => {
     const fixture = await contextFixture(page);
-    if (state === 'pending') fixture.detail.pendingMessageCount = 2;
-    else if (state === 'waiting')
+    if (state === 'waiting')
       fixture.detail.runs.push({
         id: 'a3b1bbc2-738c-49ea-9bba-202f296a2089',
         agentId,
@@ -244,19 +237,25 @@ for (const state of [
     const dialog = await openContext(page);
     await expect(dialog.getByRole('button', { name: '新建会话', exact: true })).toBeDisabled();
     await expect(
-      dialog.getByText(
-        state === 'pending'
-          ? /2 条消息待处理/
-          : state === 'waiting' || state === 'running'
-            ? /请先停止 Agent/
-            : state === 'deleted'
-              ? /Agent 已删除/
-              : state === 'creating'
-                ? /Agent 正在创建/
-                : /Agent 正在恢复/,
-      ),
+      dialog.getByText(state === 'deleted' ? /Agent 已删除/ : /请先停止 Agent/),
     ).toBeVisible();
     expect(fixture.requests).toEqual([]);
+  });
+}
+
+for (const state of ['ready', 'stopped', 'error', 'creating', 'recovering'] as const) {
+  test(`context allows clearing queued input from an inactive ${state} Agent`, async ({ page }) => {
+    const fixture = await contextFixture(page);
+    fixture.detail.agent.status = state;
+    fixture.detail.pendingMessageCount = 2;
+    const dialog = await openContext(page);
+    await expect(dialog.getByRole('button', { name: '新建会话', exact: true })).toBeEnabled();
+    await dialog.getByRole('button', { name: '新建会话', exact: true }).click();
+    await expect(dialog.getByText(/取消当前待投递消息/).first()).toBeVisible();
+    await dialog.getByRole('button', { name: '确认新建', exact: true }).click();
+    await expect(dialog.getByRole('status')).toHaveText('新会话已建立。');
+    expect(fixture.detail.pendingMessageCount).toBe(0);
+    expect(fixture.requests).toEqual([`POST /api/agents/${agentId}/new-session`]);
   });
 }
 
@@ -272,7 +271,9 @@ test('context confirms and creates a session while preserving stopped intent, hi
   await dialog.getByRole('button', { name: '新建会话', exact: true }).click();
   expect(fixture.requests).toEqual([]);
   await expect(
-    dialog.getByText('新会话将从新的上下文开始。聊天记录、群成员和工作文件保留。'),
+    dialog.getByText(
+      '新会话将从新的上下文开始，取消当前待投递消息。聊天记录、群成员和工作文件保留。',
+    ),
   ).toBeVisible();
   await dialog.getByRole('button', { name: '取消', exact: true }).click();
   expect(fixture.requests).toEqual([]);
@@ -300,14 +301,14 @@ test('context reports session creation failure and allows retry from Agent detai
 }) => {
   const fixture = await contextFixture(page);
   fixture.detail.agent.status = 'error';
-  fixture.fail('有新消息待处理，请处理完成后重试');
+  fixture.fail('原生会话正在初始化，请稍后重试');
   await page.goto('/');
   await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
   await page.getByRole('button', { name: '查看上下文', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '上下文', exact: true });
   await dialog.getByRole('button', { name: '新建会话', exact: true }).click();
   await dialog.getByRole('button', { name: '确认新建', exact: true }).click();
-  await expect(dialog.getByRole('alert')).toHaveText('有新消息待处理，请处理完成后重试');
+  await expect(dialog.getByRole('alert')).toHaveText('原生会话正在初始化，请稍后重试');
   expect(fixture.detail.agent.threadId).toBe('session-before');
   await expect(dialog.getByRole('button', { name: '确认新建', exact: true })).toBeEnabled();
   fixture.fail('');

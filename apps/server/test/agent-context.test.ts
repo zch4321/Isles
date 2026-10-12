@@ -47,6 +47,7 @@ class ContextSession implements HarnessSession {
     if (!this.adapter.persisted.has(id)) throw new Error('Native session missing');
     this.id = id;
     this.resumes.push(id);
+    await this.adapter.resumeGate;
     return id;
   }
   async submit(input: HarnessTurnInput) {
@@ -116,6 +117,7 @@ class ContextAdapter implements HarnessAdapter {
   creations = 0;
   reusedId: string | undefined;
   creationGate: Promise<void> | undefined;
+  resumeGate: Promise<void> | undefined;
   closeGate: Promise<void> | undefined;
   failBeforeId = false;
   failAfterId = false;
@@ -294,23 +296,153 @@ describe('Agent context and explicit new sessions', () => {
     old.complete();
   });
 
-  it('blocks queued private messages and messages parked in paused groups', async () => {
+  it('cancels queued private and paused group messages while retaining their history and stopped intent', async () => {
     const f = await fixture();
     await f.app.isles.runtime.stop(f.agent.id);
     f.send('Queued private message');
     expect(f.detail().pendingMessageCount).toBe(1);
-    expect((await f.reset()).statusCode).toBe(409);
-    f.app.isles.store.receiveMessages(f.agent.id, { limit: 10 });
     const group = f.app.isles.runtime.createGroup('user', {
       name: 'Paused group',
       memberIds: [f.agent.id],
     });
     f.app.isles.store.updateChannel(group.id, { paused: true });
     f.app.isles.runtime.send(group.id, { body: 'Parked group message', clientId: randomUUID() });
-    expect(f.app.isles.store.hasPendingMessages(f.agent.id)).toBe(false);
+    expect(f.detail().pendingMessageCount).toBe(2);
+    expect((await f.reset()).statusCode).toBe(200);
+    expect(f.detail().pendingMessageCount).toBe(0);
+    expect(f.detail().agent).toMatchObject({ desiredState: 'stopped', status: 'stopped' });
+    for (const [channelId, body] of [
+      [f.agent.channelId, 'Queued private message'],
+      [group.id, 'Parked group message'],
+    ])
+      expect(f.app.isles.store.listMessages(channelId!)).toContainEqual(
+        expect.objectContaining({
+          body,
+          deliveries: [{ agentId: f.agent.id, status: 'cancelled' }],
+        }),
+      );
+    expect(f.app.isles.store.publicChannel(group.id)).toMatchObject({
+      paused: true,
+      memberIds: [f.agent.id],
+    });
+    expect(f.adapter.creations).toBe(2);
+    await f.app.isles.runtime.resume(f.agent.id);
+    await expect.poll(() => f.detail().agent.status).toBe('ready');
+    f.app.isles.runtime.updateChannel(group.id, { paused: false });
+    f.send('After clearing queued messages');
+    const current = f.adapter.latest();
+    await expect.poll(() => current.submissions.length).toBe(1);
+    expect(current.submissions[0]!.text).toContain('After clearing queued messages');
+    expect(current.submissions[0]!.text).not.toContain('Queued private message');
+    expect(current.submissions[0]!.text).not.toContain('Parked group message');
+    current.complete();
+  });
+
+  it('cancels claimed but unexecuted input at the storage boundary and preserves later input', async () => {
+    const f = await fixture();
+    await f.app.isles.runtime.stop(f.agent.id);
+    const claimedMessage = f.send('Claimed before execution');
+    const claimed = f.app.isles.store.startRun(f.agent.id, f.detail().agent.threadId!);
+    expect(claimed!.input[0]!.messages[0]!.deliveries).toEqual([
+      { agentId: f.agent.id, status: 'submitting' },
+    ]);
+    f.send('Queued before the boundary');
+    f.app.isles.store.beginNewSession(f.agent.id);
+    const later = f.send('Queued after the boundary');
     expect(f.detail().pendingMessageCount).toBe(1);
-    expect((await f.reset()).statusCode).toBe(409);
-    expect(f.adapter.creations).toBe(1);
+    expect(f.app.isles.store.listMessages(f.agent.channelId)).toMatchObject([
+      { seq: claimedMessage.seq, deliveries: [{ status: 'cancelled' }] },
+      { deliveries: [{ status: 'cancelled' }] },
+      { seq: later.seq, deliveries: [{ status: 'queued' }] },
+    ]);
+    // A stale admission confirmation cannot turn a cancelled delivery into accepted input.
+    f.app.isles.store.acceptRun(claimed!.run.id, 'late-old-turn');
+    expect(f.app.isles.store.listMessages(f.agent.channelId)[0]!.deliveries).toEqual([
+      { agentId: f.agent.id, status: 'cancelled' },
+    ]);
+  });
+
+  it('settles old steer admissions and expires their native questions at the boundary', async () => {
+    const f = await fixture();
+    await f.app.isles.runtime.stop(f.agent.id);
+    f.send('Initial stored claim');
+    const claimed = f.app.isles.store.startRun(f.agent.id, f.detail().agent.threadId!)!;
+    f.app.isles.store.acceptRun(claimed.run.id, 'stored-turn');
+    f.app.isles.store.updateAgent(f.agent.id, {
+      steerEnabled: true,
+      desiredState: 'running',
+      status: 'running',
+    });
+    // Save through Store so this isolated admission never invokes a harness turn.
+    f.app.isles.store.saveMessage(
+      f.agent.channelId,
+      { type: 'user' },
+      { body: 'Pending old steer', clientId: randomUUID() },
+    );
+    const batch = f.app.isles.store.claimSteer(f.agent.id, claimed.run.id, 'stored-turn')!;
+    const questionId = f.app.isles.store.createQuestion(
+      f.agent.id,
+      claimed.run.id,
+      'stored-turn',
+      'stale-request',
+      [
+        {
+          id: 'choice',
+          header: 'Choice',
+          question: 'Choose',
+          isOther: true,
+          isSecret: false,
+          multiSelect: false,
+          options: null,
+        },
+      ],
+    );
+    f.app.isles.store.beginNewSession(f.agent.id);
+    expect(f.detail().pendingMessageCount).toBe(0);
+    expect(f.detail().questions).toEqual([]);
+    expect(f.app.isles.store.getQuestion(questionId).status).toBe('expired');
+    expect(
+      (
+        await f.app.inject({
+          method: 'POST',
+          url: `/api/agents/${f.agent.id}/questions/${questionId}/answer`,
+          payload: { answers: { choice: { answers: ['Continue'] } } },
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(f.app.isles.store.getSteer(batch.id).status).toBe('uncertain');
+    f.app.isles.store.rejectSteer(batch.id, 'Late refusal');
+    f.app.isles.store.acceptSteer(batch.id, 'stored-turn');
+    expect(f.app.isles.store.listMessages(f.agent.channelId)[1]!.deliveries).toEqual([
+      { agentId: f.agent.id, status: 'cancelled' },
+    ]);
+  });
+
+  it.each(['creating', 'recovering'] as const)(
+    'allows replacement when displayed %s status has no actual initialization task',
+    async (status) => {
+      const f = await fixture();
+      f.app.isles.store.updateAgent(f.agent.id, { status });
+      expect((await f.reset()).statusCode).toBe(200);
+      expect(f.adapter.creations).toBe(2);
+    },
+  );
+
+  it('waits for an actual native recovery task before allowing replacement', async () => {
+    const f = await fixture();
+    await f.app.isles.runtime.stop(f.agent.id);
+    const gate = deferred();
+    f.adapter.resumeGate = gate.promise;
+    await f.app.isles.runtime.resume(f.agent.id);
+    try {
+      await expect.poll(() => f.adapter.latest().resumes.length).toBe(1);
+      expect((await f.reset()).statusCode).toBe(409);
+      expect(f.adapter.creations).toBe(1);
+    } finally {
+      gate.resolve();
+    }
+    await expect.poll(() => f.detail().agent.status).toBe('ready');
+    expect((await f.reset()).statusCode).toBe(200);
   });
 
   it('preserves stopped intent when creating and after process restart', async () => {
@@ -337,12 +469,24 @@ describe('Agent context and explicit new sessions', () => {
   it('serializes replacement against management and sends newly arriving inputs only to the new session', async () => {
     const f = await fixture();
     const old = f.adapter.latest();
+    const group = f.app.isles.runtime.createGroup('user', {
+      name: 'Paused at replacement',
+      memberIds: [f.agent.id],
+    });
+    f.app.isles.runtime.updateChannel(group.id, { paused: true });
+    f.app.isles.runtime.send(group.id, {
+      body: 'Parked before replacement',
+      clientId: randomUUID(),
+    });
     const gate = deferred();
     f.adapter.creationGate = gate.promise;
     const replacement = f.reset();
     try {
       await expect.poll(() => f.adapter.creations).toBe(2);
       expect(f.detail().agent.status).toBe('creating');
+      expect(f.app.isles.store.listMessages(group.id)[0]!.deliveries).toEqual([
+        { agentId: f.agent.id, status: 'cancelled' },
+      ]);
       expect((await f.reset()).statusCode).toBe(409);
       for (const action of ['stop', 'resume'])
         expect(
@@ -372,6 +516,8 @@ describe('Agent context and explicit new sessions', () => {
     const current = f.adapter.latest();
     await expect.poll(() => current.submissions.length).toBe(1);
     expect(current.submissions[0]!.sessionId).toBe(current.id);
+    expect(current.submissions[0]!.text).toContain('Arrived during replacement');
+    expect(current.submissions[0]!.text).not.toContain('Parked before replacement');
     expect(old.submissions).toEqual([]);
     current.complete();
   });
@@ -386,7 +532,24 @@ describe('Agent context and explicit new sessions', () => {
       await expect.poll(() => old.closed).toBe(true);
       old.handlers.exit(new Error('Old client exited during close'));
       old.context({ usedTokens: 10_000, maxTokens: 20_000, estimated: false });
+      old.handlers.question({
+        sessionId: old.id,
+        turnId: 'late-old-turn',
+        requestId: 'late-old-question',
+        questions: [
+          {
+            id: 'late',
+            header: 'Late',
+            question: 'Old question',
+            isOther: true,
+            isSecret: false,
+            multiSelect: false,
+            options: null,
+          },
+        ],
+      });
       expect(f.detail().contextUsage).toBeNull();
+      expect(f.detail().questions).toEqual([]);
       expect(f.detail().agent.status).toBe('creating');
     } finally {
       f.adapter.closeGate = undefined;

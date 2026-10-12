@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Channel } from '@isles/contracts';
 import { useQueryClient } from '@tanstack/vue-query';
-import { CircleAlert, LoaderCircle, Plus, RefreshCw, Search, X } from '@lucide/vue';
+import { CircleAlert, LoaderCircle, Plus, RefreshCw, Search, Trash2, X } from '@lucide/vue';
 import { computed, ref } from 'vue';
 import { invalidateAll, useAgents, useChannels, useDirectory } from '@/api/queries';
 import ChannelListItem from './ChannelListItem.vue';
@@ -12,7 +12,11 @@ import { Input } from '@/components/ui/input';
 import { byActivity, channelTitle } from '@/lib/channels';
 
 defineProps<{ selectedId: string }>();
-defineEmits<{ select: [id: string]; create: [kind: 'agent' | 'group'] }>();
+defineEmits<{
+  select: [id: string];
+  create: [kind: 'agent' | 'group'];
+  bulkDelete: [kind: 'agent' | 'group'];
+}>();
 
 const queryClient = useQueryClient();
 const agents = useAgents();
@@ -165,7 +169,19 @@ async function refresh() {
               v-if="section.create"
               variant="ghost"
               size="icon-xs"
-              class="ml-auto text-ink-3 hover:bg-surface-hover hover:text-primary-ink dark:hover:bg-surface-hover"
+              class="ml-auto text-ink-3 hover:bg-surface-hover hover:text-destructive dark:hover:bg-surface-hover"
+              :aria-label="section.create.kind === 'group' ? '批量删除群聊' : '批量删除 Agents'"
+              :title="section.create.kind === 'group' ? '批量删除群聊' : '批量删除 Agents'"
+              :disabled="!section.total"
+              @click="$emit('bulkDelete', section.create.kind)"
+            >
+              <Trash2 />
+            </Button>
+            <Button
+              v-if="section.create"
+              variant="ghost"
+              size="icon-xs"
+              class="text-ink-3 hover:bg-surface-hover hover:text-primary-ink dark:hover:bg-surface-hover"
               :aria-label="section.create.label"
               :title="section.create.label"
               @click="$emit('create', section.create.kind)"

@@ -302,11 +302,35 @@ export class Store {
     if (!snapshot.success) return;
     this.change(() => this.event('agent', { agentId: id }, { contextUsage: snapshot.data }));
   }
-  /** Explicit session replacement invalidates old telemetry without removing any history. */
+  /** Cancel existing admissions at the replacement boundary while retaining their history. */
   beginNewSession(id: string) {
     this.change(() => {
       const agent = this.getAgent(id);
       if (agent.status === 'deleted') throw new HttpError(410, '该 Agent 已删除');
+      const cancelled = this.db
+        .update(deliveries)
+        .set({ status: 'cancelled', updatedAt: now() })
+        .where(
+          and(
+            eq(deliveries.agentId, id),
+            inArray(deliveries.status, ['queued', 'submitting', 'steering']),
+          ),
+        )
+        .returning({ channelId: deliveries.channelId })
+        .all();
+      // A late native admission ACK or refusal must not revive input from the old session.
+      for (const batch of this.db
+        .select({ runId: steerBatches.runId })
+        .from(steerBatches)
+        .where(and(eq(steerBatches.agentId, id), eq(steerBatches.status, 'pending')))
+        .all())
+        this.settlePendingSteers(batch.runId, 'cancelled', '新建会话操作已取消待投递消息。');
+      const expired = this.db
+        .update(questions)
+        .set({ status: 'expired' })
+        .where(and(eq(questions.agentId, id), eq(questions.status, 'pending')))
+        .returning({ id: questions.id })
+        .all();
       const update = {
         threadId: null,
         threadCreationAttempted: false,
@@ -328,6 +352,9 @@ export class Store {
           sessionReset: 'started',
         },
       );
+      for (const channelId of new Set(cancelled.map((d) => d.channelId)))
+        this.event('delivery', { agentId: id, channelId }, { status: 'cancelled' });
+      if (expired.length) this.event('question', { agentId: id }, { status: 'expired' });
     });
   }
   completeNewSession(id: string, previousSessionId: string | null) {

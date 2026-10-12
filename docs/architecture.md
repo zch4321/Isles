@@ -15,7 +15,7 @@ Isles 是一个让人类与独立 Agent 通过私聊、群聊协作的应用。�
 以下约束已确定：
 
 1. 首版为单用户、单机 Web 应用，Web 服务与所有 harness 在同一台电脑或服务器上运行。
-2. 每个 Agent 对应一个 harness、模型与实例，绑定一个当前原生 session。创建尚未完成时可以没有 session；服务重启恢复该绑定。用户可在空闲且无待投递时显式新建会话。
+2. 每个 Agent 对应一个 harness、模型与实例，绑定一个当前原生 session。创建尚未完成时可以没有 session；服务重启恢复该绑定。用户可在没有活动执行时显式新建会话，取消已有待投递消息。
 3. 私聊、群聊和不同工作内容共享该 Agent 的原生 session。需要并行上下文时，由用户创建新的编号 Agent。
 4. 只有用户能够创建 Agent。自然语言指定的 leader 身份不自动授予平台权限。
 5. 拉群、私聊按 Agent 授权；未获授权的 Agent 看不到相应 MCP 工具，服务端同时校验调用。
@@ -270,6 +270,8 @@ Agent 编辑由 `Runtime.updateAgent` 校验后提交：仅接受名称、模型
 
 默认 Agent 列表和 MCP 联系人目录排除 `deleted`；Web 使用 `includeDeleted=true` 获取历史作者目录，将对应私聊放入“历史对话”。已删除详情可读，私聊写入拒绝，编辑/停止/恢复拒绝，MCP HTTP 请求重新检查删除状态并使仍保留的 token 失效。SQLite 的 Agent 状态为文本列，无需增加列或转换旧数据。
 
+Web 的批量删除入口固定所选对象 ID 与名称，确认后逐项调用已有 Agent 或群聊 DELETE 接口。界面保留每项结果，只重试失败项；删除完成后刷新列表，已删除对象继续通过历史目录展示。
+
 ### 6.4 群聊管理与删除
 
 群聊创建、查询、改名、成员增减和暂停/继续复用既有频道接口；新增 `DELETE /api/channels/:id`，仅允许群频道。`Channel.deletedAt` 从 SQLite 中该群永久保留的 `group_deleted` 事件的创建时间派生，普通频道为 `null`。默认列表、成员目录和调度查询排除有此标记的群；人类可通过 `includeDeleted=true`、频道详情及消息接口读取历史。
@@ -288,7 +290,7 @@ Web 将已删除群放入“历史对话”，显示名称、删除标记、消�
 
 每个 Agent 的 Runtime 持有固定 session 绑定、原生连接、待输入通知和当前执行。不同 Agent 可以并行；同一 Agent 在任一时刻只能存在一条由 Isles 管理的活动执行路径，不维护群消息防抖计时器或全员轮次屏障。
 
-上下文用量通过独立的 `HarnessEvent.context_usage` 上报，不要求活跃 turn。Store 将当前 session 快照持久化为既有 `agent` 事件的数据，详情返回 token、窗口、估算标识和更新时间。`Runtime.newSession()` 同步核验空闲与全部频道的待投递，建立显式切换边界，再关闭旧连接、创建新 session、记录私聊系统分界。管理操作和投递在此期间互斥；新到达输入交给新会话，旧连接回调和旧 session 用量被过滤。操作保留身份、历史、工作区、群关系与停止意愿。接口、原生口径和测试见 [上下文管理](agent-context.md)。
+上下文用量通过独立的 `HarnessEvent.context_usage` 上报，不要求活跃 turn。Store 将当前 session 快照持久化为既有 `agent` 事件的数据，详情返回 token、窗口、估算标识和更新时间。`Runtime.newSession()` 核验实际执行与原生初始化任务，在同步切换事务内取消全部频道的已有待投递、收束旧 steer 和问题，再关闭旧连接、创建新 session、记录私聊系统分界。管理操作和投递在此期间互斥；边界后新到达输入交给新会话，旧连接回调和旧 session 用量被过滤。操作保留身份、历史、工作区、群关系与停止意愿。接口、原生口径和测试见 [上下文管理](agent-context.md)。
 
 M1 使用持久排队；当前按 Agent 保存 `steerEnabled`，默认 `false`。只有用户开启且 adapter 声明 `steer` 时，忙碌输入才追加到当前主 session/turn；否则排队到下一轮。支持 harness 也允许创建、编辑时关闭；unsupported 不允许开启，但已有开启值可关闭。切换频道或偏好不生成新 session。
 
