@@ -432,7 +432,7 @@ adapter 将原生 turn 与条目事件转换为 `HarnessEvent`，将用户问题
 
 Agent 的 `dangerFullAccess` 默认关闭，记录在已有 Agent 配置事件中；Store 启动时恢复配置，并在配置事务提交后更新内存状态。该设置复用当前数据库基线。Runtime 在下一次执行前重新连接原生会话，应用修改后的配置与工作区说明，保留会话身份、工作目录和当前执行的权限策略。
 
-默认模式对应 Codex `workspace-write`/`on-request`、Claude `acceptEdits`、Kimi `manual`、DSH `workspace-write`/`ask` 和 ACP harness 声明的原生普通模式。支持目录授权的接口传入 Agent workspace 与 sharedDir。OpenCode 按原生 `edit`/`external_directory` 规则授权个人与共享目录，其他工具继续使用原生规则。完整访问映射为各自原生 full/yolo/bypass 模式。
+默认模式对应 Codex `workspace-write`/`on-request`、Claude `acceptEdits`、Kimi `yolo`、DSH `workspace-write`/`ask` 和 ACP harness 声明的原生普通模式。支持目录授权的接口传入 Agent workspace 与 sharedDir。OpenCode 按原生 `edit`/`external_directory` 规则授权个人与共享目录，其他工具继续使用原生规则。完整访问映射为各自原生 full/yolo/bypass 模式。Kimi 在普通与完整访问配置下均使用 `yolo`，自动处理常规编辑和命令，保留原生提问与必要审批。
 
 原生执行授权通过 `HarnessQuestion` 复用现有问答存储与界面，固定提供“允许本次”和“拒绝”；授权范围由原生协议定义，例如 Codex permission profile 持续至当前 turn 结束。adapter 保留原生请求、session 与执行关联，外部答复、取消、结束及连接关闭使对应问题过期；迟到答复不会授予后续请求。原生已有规则和授权由 harness 自行管理，Isles 不增加持久化路径授权或命令解析规则。
 

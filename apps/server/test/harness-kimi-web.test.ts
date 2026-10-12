@@ -159,7 +159,7 @@ describe('Kimi Code local Web adapter', () => {
     ).toThrow('已失效');
     expect(await f.requests('/approvals/external-tool')).toHaveLength(0);
   });
-  it('registers shared context without persistence before cold snapshot and restores manual after full access', async () => {
+  it('registers shared context without persistence before cold snapshot and keeps yolo after full access', async () => {
     const f = await fixture({ dangerFullAccess: true });
     const first = await f.created();
     expect((await f.requests('/profile')).at(-1)?.body).toMatchObject({
@@ -170,7 +170,7 @@ describe('Kimi Code local Web adapter', () => {
     const restored = await f.connect();
     await restored.resumeSession(first.id);
     expect((await f.requests('/profile')).at(-1)?.body).toMatchObject({
-      agent_config: { permission_mode: 'manual' },
+      agent_config: { permission_mode: 'yolo' },
     });
     const records = await f.cli.records();
     const adds = records.filter((record) => record.path?.endsWith('/add-dir'));
@@ -283,7 +283,7 @@ describe('Kimi Code local Web adapter', () => {
     });
     expect((await f.requests('/profile'))[0]).toMatchObject({
       body: {
-        agent_config: { model: 'kimi-code/k3', thinking: 'high', permission_mode: 'manual' },
+        agent_config: { model: 'kimi-code/k3', thinking: 'high', permission_mode: 'yolo' },
       },
     });
     expect(JSON.parse(await readFile(join(dir, 'mcp.json'), 'utf8'))).toEqual({
@@ -317,7 +317,7 @@ describe('Kimi Code local Web adapter', () => {
     const defaults = await fixture({ model: 'default', reasoningEffort: 'default' });
     await defaults.created();
     expect((await defaults.requests('/profile'))[0]!.body).toEqual({
-      agent_config: { permission_mode: 'manual' },
+      agent_config: { permission_mode: 'yolo' },
     });
   });
 
@@ -430,7 +430,7 @@ describe('Kimi Code local Web adapter', () => {
         content: [{ type: 'text', text: 'waiting' }],
         model: input.model,
         thinking: input.reasoningEffort,
-        permission_mode: 'manual',
+        permission_mode: 'yolo',
       },
     });
     expect(accepted).toBe(false);

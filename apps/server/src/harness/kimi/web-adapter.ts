@@ -284,7 +284,7 @@ class KimiWebSession implements HarnessSession {
   }
   private configuration() {
     return {
-      permission_mode: this.agent.dangerFullAccess ? 'yolo' : 'manual',
+      permission_mode: 'yolo',
       ...(this.agent.model === 'default' ? {} : { model: this.agent.model }),
       ...(this.agent.reasoningEffort === 'default' ? {} : { thinking: this.agent.reasoningEffort }),
     };
