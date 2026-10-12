@@ -9,7 +9,12 @@ async function send(page: Page, body: string) {
   await composer(page).fill(body);
   await page.getByRole('button', { name: '发送消息' }).click();
 }
-async function createAgent(page: Page, name: string, steerEnabled = false) {
+async function createAgent(
+  page: Page,
+  name: string,
+  steerEnabled = false,
+  dangerFullAccess = false,
+) {
   await page.getByRole('button', { name: '新建 Agent' }).first().click();
   await page.getByLabel('名称').fill(name);
   await page.getByLabel('模型', { exact: true }).selectOption('test-model');
@@ -19,6 +24,11 @@ async function createAgent(page: Page, name: string, steerEnabled = false) {
     .getByRole('switch', { name: '忙碌时实时接收（steer）', exact: true });
   await expect(steering).toHaveAttribute('aria-checked', 'false');
   if (steerEnabled) await steering.click();
+  const access = page
+    .getByRole('dialog', { name: '新建 Agent', exact: true })
+    .getByRole('switch', { name: '完整访问', exact: true });
+  await expect(access).toHaveAttribute('aria-checked', 'false');
+  if (dangerFullAccess) await access.click();
   const [response] = await Promise.all([
     page.waitForResponse(
       (response) =>
@@ -26,7 +36,11 @@ async function createAgent(page: Page, name: string, steerEnabled = false) {
     ),
     page.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
-  expect(response.request().postDataJSON()).toMatchObject({ harness: 'codex', steerEnabled });
+  expect(response.request().postDataJSON()).toMatchObject({
+    harness: 'codex',
+    steerEnabled,
+    dangerFullAccess,
+  });
   const created = (await response.json()) as Agent;
   await expect
     .poll(async () => (await (await page.request.get(`/api/agents/${created.id}`)).json()).agent)
@@ -202,6 +216,7 @@ test('switches registered harness catalogs and cached selections without applyin
     reasoningEffort: 'medium',
     canCreateGroups: false,
     steerEnabled: false,
+    dangerFullAccess: false,
   });
   expect(creation.status()).toBe(404);
   await expect(dialog.getByRole('alert')).toContainText('未注册的 harness：semantic-test');
@@ -219,6 +234,90 @@ test('opens the workspace and connects through the Web proxy to SQLite-backed he
   await page.screenshot({ path: testInfo.outputPath('workspace.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: testInfo.outputPath('workspace-mobile.png'), fullPage: true });
+});
+
+test('persists per-Agent complete access through creation, edit and details on mobile', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  const agent = await createAgent(page, '权限模式 Agent', false, true);
+  expect(agent.dangerFullAccess).toBe(true);
+  const ready = (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent as Agent;
+  const identity = {
+    threadId: ready.threadId,
+    workspace: agent.workspace,
+    channelId: agent.channelId,
+  };
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  const inspector = page.getByTestId('inspector');
+  await expect(inspector.getByRole('switch', { name: '完整访问', exact: true })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
+  await page.getByRole('button', { name: '编辑 Agent', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '编辑 Agent', exact: true });
+  await dialog.getByRole('switch', { name: '完整访问', exact: true }).click();
+  const [edited] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/agents/${agent.id}`) &&
+        response.request().method() === 'PATCH',
+    ),
+    dialog.getByRole('button', { name: '保存修改', exact: true }).click(),
+  ]);
+  expect(edited.request().postDataJSON()).toEqual({ dangerFullAccess: false });
+  expect(await edited.json()).toMatchObject({ dangerFullAccess: false, ...identity });
+  await expect(dialog).not.toBeVisible();
+  await expect(inspector.getByRole('switch', { name: '完整访问', exact: true })).toHaveAttribute(
+    'aria-checked',
+    'false',
+  );
+  const [enabled] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/agents/${agent.id}`) &&
+        response.request().method() === 'PATCH',
+    ),
+    inspector.getByRole('switch', { name: '完整访问', exact: true }).click(),
+  ]);
+  expect(enabled.request().postDataJSON()).toEqual({ dangerFullAccess: true });
+  await page.reload();
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  await expect(inspector.getByRole('switch', { name: '完整访问', exact: true })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
+  expect((await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent).toMatchObject({
+    dangerFullAccess: true,
+    ...identity,
+  });
+  expect(await noHorizontalScroll(page)).toBe(false);
+  expect((await page.request.delete(`/api/agents/${agent.id}`)).ok()).toBe(true);
+});
+
+test('answers native execution approval through the existing question form', async ({ page }) => {
+  await page.goto('/');
+  const agent = await createAgent(page, '原生授权 Agent');
+  await send(page, '请请求原生执行授权');
+  await expect(page.getByText('原生授权 Agent 需要你的回答')).toBeVisible();
+  await expect(page.getByText('执行授权', { exact: true })).toBeVisible();
+  await page.getByRole('radio', { name: /^允许本次/ }).check();
+  const [answered] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().includes('/questions/') && response.request().method() === 'POST',
+    ),
+    page.getByRole('button', { name: '提交回答', exact: true }).click(),
+  ]);
+  expect(answered.request().postDataJSON()).toEqual({
+    answers: { permission: { answers: ['允许本次'] } },
+  });
+  await expect(page.locator('[data-sender="agent"]').last()).toContainText(
+    'MCP 回复：请请求原生执行授权',
+  );
+  await expect(page.getByText('原生授权 Agent 需要你的回答')).not.toBeVisible();
+  expect((await page.request.delete(`/api/agents/${agent.id}`)).ok()).toBe(true);
 });
 
 test('creates an Agent, publishes MCP replies, persists reload and handles stop/resume and native questions', async ({
@@ -1415,7 +1514,7 @@ test('steers Kimi within its original run and displays child progress and questi
     const inspector = page.getByTestId('inspector');
     await expect(inspector).toContainText('子代理 页面助手 (agent-browser) · test-kimi-model');
     await expect(inspector).toContainText('正在检查页面结构');
-    await expect(inspector).toContainText('已读取页面，等待范围确认');
+    await expect(inspector).not.toContainText('已读取页面，等待范围确认');
     await page.getByRole('checkbox', { name: '文档', exact: true }).check();
     await page.getByRole('checkbox', { name: '测试', exact: true }).check();
     const [answered] = await Promise.all([

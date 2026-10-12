@@ -99,6 +99,7 @@ export class Runtime {
       ...input,
       canCreateGroups: input.canCreateGroups ?? false,
       steerEnabled: input.steerEnabled ?? false,
+      dangerFullAccess: input.dangerFullAccess ?? false,
       nativeHome: adapter.nativeHome,
     });
     this.log.info({ agentId: agent.id, harness: agent.harness }, 'Agent created');
@@ -141,7 +142,15 @@ export class Runtime {
         ([key, value]) => value !== undefined && value !== agent[key as keyof AgentRecord],
       ),
     ) as Partial<
-      Pick<AgentRecord, 'name' | 'model' | 'reasoningEffort' | 'canCreateGroups' | 'steerEnabled'>
+      Pick<
+        AgentRecord,
+        | 'name'
+        | 'model'
+        | 'reasoningEffort'
+        | 'canCreateGroups'
+        | 'steerEnabled'
+        | 'dangerFullAccess'
+      >
     >;
     if (Object.keys(changed).length) {
       this.store.updateAgent(id, changed);

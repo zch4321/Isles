@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,6 +6,7 @@ import { findDshExecutable } from '../src/harness/dsh/executable.js';
 import { windowsInstallDirectories } from '../src/harness/dsh/desktop.js';
 import { findOpenCodeExecutable } from '../src/harness/opencode/executable.js';
 import { findCliExecutable } from '../src/harness/shared/executable.js';
+import type { CliCommand } from '../src/harness/shared/executable.js';
 
 vi.mock('../src/harness/dsh/desktop.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/harness/dsh/desktop.js')>()),
@@ -22,9 +23,11 @@ afterEach(async () => {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'isles-cli-discovery-'));
   roots.push(root);
+  const files = new Set<string>();
   const file = async (path: string, contents = '') => {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, contents, { mode: 0o755 });
+    files.add(await realpath(path));
     return path;
   };
   const options = {
@@ -32,10 +35,15 @@ async function fixture() {
     platform: 'win32' as const,
     environment: { Path: '', APPDATA: join(root, 'roaming'), LOCALAPPDATA: join(root, 'local') },
   };
-  return { root, file, options };
+  const probe = (version: string) => async (command: CliCommand) => {
+    const entry = command.file === process.execPath ? command.args[0] : command.file;
+    if (!entry || !files.has(await realpath(entry))) throw new Error('Not a fixture executable');
+    return version;
+  };
+  return { root, file, options, probe };
 }
-const opencodeVersion = async () => 'opencode v2.0.26';
-const dshVersion = async () => '0.2.0-rc.2';
+const opencodeVersion = 'opencode v2.0.26';
+const dshVersion = '0.2.0-rc.2';
 
 it('includes the native carrier environment in the real version probe', async () => {
   const f = await fixture();
@@ -65,13 +73,13 @@ describe('OpenCode v2 executable discovery', () => {
   it.each(['cmd', 'ps1'])(
     'runs the native npm entry behind a .%s launcher without Node',
     async (ext) => {
-      const { file, options } = await fixture();
+      const { file, options, probe } = await fixture();
       const npm = join(options.environment.APPDATA, 'npm');
       const binary = await file(
         join(npm, 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'),
       );
       const launcher = await file(join(npm, `opencode.${ext}`));
-      expect(await findOpenCodeExecutable(options, opencodeVersion)).toEqual({
+      expect(await findOpenCodeExecutable(options, probe(opencodeVersion))).toEqual({
         file: binary,
         args: [],
         path: launcher,
@@ -81,7 +89,7 @@ describe('OpenCode v2 executable discovery', () => {
   );
 
   it('resolves pnpm launchers with a relative native entry and spaces in the path', async () => {
-    const { root, file, options } = await fixture();
+    const { root, file, options, probe } = await fixture();
     const bin = join(root, 'custom pnpm');
     const binary = await file(join(bin, '.pnpm', '@opencode', 'cli', 'bin', 'opencode.exe'));
     const launcher = await file(
@@ -89,17 +97,17 @@ describe('OpenCode v2 executable discovery', () => {
       '@echo off\n"%~dp0.pnpm/@opencode/cli/bin/opencode.exe" %*\n',
     );
     expect(
-      await findOpenCodeExecutable({ ...options, binary: `"${launcher}"` }, opencodeVersion),
+      await findOpenCodeExecutable({ ...options, binary: `"${launcher}"` }, probe(opencodeVersion)),
     ).toMatchObject({ file: binary, args: [], path: launcher });
   });
 
   it('honors an invalid explicit path even when a working native executable is on PATH', async () => {
-    const { root, file, options } = await fixture();
+    const { root, file, options, probe } = await fixture();
     await file(join(root, 'opencode.exe'));
     await expect(
       findOpenCodeExecutable(
         { ...options, binary: join(root, 'missing.exe'), environment: { Path: root } },
-        opencodeVersion,
+        probe(opencodeVersion),
       ),
     ).rejects.toThrow('找不到配置的 OpenCode');
   });
@@ -119,11 +127,19 @@ describe('DSH desktop executable discovery', () => {
   it('discovers a registered custom Windows install and preserves its Electron runtime', async () => {
     const f = await desktopFixture();
     vi.mocked(windowsInstallDirectories).mockResolvedValue([f.bin]);
-    expect(await findDshExecutable(f.options, dshVersion)).toEqual({
-      file: f.binary,
+    expect(await findDshExecutable(f.options, f.probe(dshVersion))).toEqual({
+      file: await realpath(f.binary),
       args: [
         '--expose-internals',
-        join(f.archive, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js'),
+        join(
+          await realpath(f.archive),
+          'dsh',
+          'node_modules',
+          '@deepseek-ai',
+          'dsh-desktop-host',
+          'lib',
+          'cli.js',
+        ),
       ],
       env: { ELECTRON_RUN_AS_NODE: '1' },
       path: f.launcher,
@@ -133,9 +149,9 @@ describe('DSH desktop executable discovery', () => {
 
   it('runs a configured desktop launcher without searching registered installations', async () => {
     const f = await desktopFixture();
-    expect(await findDshExecutable({ ...f.options, binary: f.launcher }, dshVersion)).toMatchObject(
-      { file: f.binary, env: { ELECTRON_RUN_AS_NODE: '1' } },
-    );
+    expect(
+      await findDshExecutable({ ...f.options, binary: f.launcher }, f.probe(dshVersion)),
+    ).toMatchObject({ file: await realpath(f.binary), env: { ELECTRON_RUN_AS_NODE: '1' } });
     expect(windowsInstallDirectories).not.toHaveBeenCalled();
   });
 
@@ -147,9 +163,9 @@ describe('DSH desktop executable discovery', () => {
     const npm = join(f.options.environment.APPDATA, 'npm');
     const script = await f.file(join(npm, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'));
     const launcher = await f.file(join(npm, 'dsh.cmd'));
-    expect(await findDshExecutable(f.options, dshVersion)).toMatchObject({
+    expect(await findDshExecutable(f.options, f.probe(dshVersion))).toMatchObject({
       file: process.execPath,
-      args: [script],
+      args: [await realpath(script)],
       path: launcher,
     });
   });
@@ -169,13 +185,13 @@ describe('DSH desktop executable discovery', () => {
         'dsh',
       ),
     );
-    expect(await findDshExecutable({ ...f.options, platform: 'darwin' }, dshVersion)).toMatchObject(
-      {
-        file: binary,
-        args: [],
-        path: binary,
-      },
-    );
+    expect(
+      await findDshExecutable({ ...f.options, platform: 'darwin' }, f.probe(dshVersion)),
+    ).toMatchObject({
+      file: binary,
+      args: [],
+      path: binary,
+    });
     expect(windowsInstallDirectories).not.toHaveBeenCalled();
   });
 });

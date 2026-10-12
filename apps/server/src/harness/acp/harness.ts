@@ -4,6 +4,7 @@ import type { CliExecutable } from '../shared/executable.js';
 import type { Logger } from '../../logging.js';
 import type { AgentRecord } from '../../storage/store.js';
 import type { AcpConnection } from './client.js';
+import type { AgentWorkspace } from '../../runtime/workspace.js';
 
 /** What one ACP agent adds to the generic adapter: discovery, launch and native checks. */
 export interface AcpHarness {
@@ -14,12 +15,15 @@ export interface AcpHarness {
   readonly log: Logger;
   /** Platform data directory; the catalog probe runs in a fixed folder beneath it. */
   readonly dataDir: string;
+  readonly workspace: Pick<AgentWorkspace, 'sharedDir'>;
   /** Arguments that start the agent's ACP server on stdio. */
   readonly args: string[];
   /** Environment layered over the service environment for every native process. */
   readonly env: Record<string, string>;
-  /** The mode each session runs in: tools run without approval and user questions stay on. */
+  /** Native full-access mode, if this harness declares one. */
   readonly sessionMode: string;
+  /** Native ordinary mode; omitted uses the mode returned when opening the session. */
+  readonly defaultSessionMode?: string;
   readonly binaryPath: string | null;
   executable(refresh?: boolean): Promise<CliExecutable>;
   invalidate(): void;

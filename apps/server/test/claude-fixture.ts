@@ -155,6 +155,14 @@ function begin(frame) {
     return;
   }
   if (frame.message.content === 'hold' || config.holdTurn) return;
+  if (frame.message.content === 'permission') {
+    const toolId = 'tool-' + frame.uuid;
+    question = { toolId, requestId: 'permission-' + frame.uuid };
+    const input = { command: 'echo fixture' };
+    send({ type: 'assistant', session_id: sid, user_message_uuid: frame.uuid, message: { content: [{ type: 'tool_use', id: toolId, name: 'Bash', input }] } });
+    send({ type: 'control_request', request_id: question.requestId, request: { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: toolId, input } });
+    return;
+  }
   if (frame.message.content === 'ask') {
     const toolId = 'tool-' + frame.uuid;
     question = { toolId, requestId: 'question-' + frame.uuid };

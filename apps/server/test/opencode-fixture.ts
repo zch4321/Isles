@@ -8,7 +8,7 @@ import type {
   OpenCodeMethod,
   OpenCodeStream,
 } from '../src/harness/opencode/client.js';
-import type { OpenCodeEvent } from '../src/harness/opencode/protocol.js';
+import type { OpenCodeEvent, OpenCodePermissionRequest } from '../src/harness/opencode/protocol.js';
 
 export const fixtureModel = {
   id: 'fixture-model',
@@ -43,6 +43,7 @@ export interface NativeCall {
 export class OpenCodeFixture implements OpenCodeConnection {
   readonly calls: NativeCall[] = [];
   readonly sessions = new Map<string, Record<string, unknown>>();
+  readonly permissions = new Map<string, OpenCodePermissionRequest>();
   readonly watchers = new Map<
     string,
     { event: (frame: unknown) => void; end: () => void; fail: (error: Error) => void }
@@ -79,11 +80,45 @@ export class OpenCodeFixture implements OpenCodeConnection {
       this.sessions.set(info.id as string, info);
       return { data: info };
     }
+    if (route === '/api/session' && method === 'GET') {
+      const parentID = new URLSearchParams(path.split('?')[1]).get('parentID');
+      return {
+        data: [...this.sessions.values()].filter((session) => session.parentID === parentID),
+        cursor: {},
+      };
+    }
     if (route === '/api/session/active') return { data: {} };
     if (route?.startsWith('/api/session/') && method === 'GET' && route.split('/').length === 4) {
       const info = this.sessions.get(route.split('/')[3]!);
       if (!info) throw new Error('Native session missing');
       return { data: info };
+    }
+    if (route?.endsWith('/permission') && method === 'GET') {
+      const sessionID = route.split('/')[3];
+      return {
+        data: [...this.permissions.values()].filter((request) => request.sessionID === sessionID),
+      };
+    }
+    if (route?.includes('/permission/') && route.endsWith('/reply')) {
+      const id = route.split('/')[5]!;
+      const request = this.permissions.get(id);
+      const reply = (body as { decision: 'once' | 'reject' }).decision;
+      if (request) {
+        for (const pending of [...this.permissions.values()]) {
+          if (pending.id !== id && (reply !== 'reject' || pending.sessionID !== request.sessionID))
+            continue;
+          this.permissions.delete(pending.id);
+          this.emit(
+            this.frame(pending.sessionID, 'permission.replied', { requestID: pending.id, reply }),
+          );
+        }
+      }
+      return {};
+    }
+    if (method === 'PATCH' && route?.startsWith('/api/session/') && route.split('/').length === 4) {
+      const session = this.sessions.get(route.split('/')[3]!);
+      if (session) Object.assign(session, body);
+      return {};
     }
     if (route?.endsWith('/context') || route?.endsWith('/inbox') || route === '/api/form')
       return { data: [] };
@@ -123,6 +158,12 @@ export class OpenCodeFixture implements OpenCodeConnection {
     this.emit({ type: 'server.connected', id: 'evt_connected', data: {} });
   }
   emit(frame: unknown) {
+    const event = frame as OpenCodeEvent;
+    if (event.type === 'permission.asked') {
+      const request = event.data as unknown as OpenCodePermissionRequest;
+      this.permissions.set(request.id, request);
+    }
+    if (event.type === 'permission.replied') this.permissions.delete(String(event.data.requestID));
     for (const [path, watcher] of this.watchers)
       if (path.split('?')[0] === '/api/event')
         try {

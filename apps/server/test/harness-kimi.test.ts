@@ -45,6 +45,7 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
     threadId: null,
     threadCreationAttempted: false,
     canCreateGroups: false,
+    dangerFullAccess: false,
     steerEnabled: false,
     desiredState: 'running',
     status: 'creating',
@@ -194,6 +195,72 @@ describe('Kimi Code discovery', () => {
 });
 
 describe('Kimi Code ACP adapter', () => {
+  it('uses declared ordinary/full modes and resets full access on resume', async () => {
+    const f = await fixture({ dangerFullAccess: true });
+    const first = await f.created();
+    expect(
+      (await f.frames('session/set_config_option')).map((frame) => frame.params),
+    ).toContainEqual({ sessionId: first.id, configId: 'mode', value: 'yolo' });
+    expect((await f.frames('session/new'))[0]?.params).toMatchObject({
+      additionalDirectories: [f.workspace.sharedDir],
+    });
+    await first.session.close();
+    await f.cli.set({ initialMode: 'yolo' });
+    f.agent.dangerFullAccess = false;
+    const restored = await f.connect();
+    await restored.resumeSession(first.id);
+    expect(
+      (await f.frames('session/set_config_option')).map((frame) => frame.params).at(-2),
+    ).toMatchObject({ configId: 'mode', value: 'default' });
+    expect((await f.frames('session/resume'))[0]?.params).toMatchObject({
+      additionalDirectories: [f.workspace.sharedDir],
+    });
+  });
+
+  it('cancels native requests offering only a persistent grant', async () => {
+    const f = await fixture();
+    await f.cli.set({ permissionAlwaysOnly: true });
+    const { session, id } = await f.created();
+    const input = f.input('permission', id);
+    await session.submit(input);
+    await f.completed(input.runId);
+    expect(f.questions).toHaveLength(0);
+    expect(f.items().at(-1)?.text).toContain('"outcome":"cancelled"');
+  });
+
+  it('omits additional directories when native capability is absent', async () => {
+    const f = await fixture();
+    await f.cli.set({ noAdditionalDirectories: true });
+    await f.created();
+    expect((await f.frames('session/new'))[0]?.params).not.toHaveProperty('additionalDirectories');
+  });
+
+  it('declines native permissions and expires pending requests on interruption', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    const first = f.input('permission', id);
+    await session.submit(first);
+    await vi.waitFor(() => expect(f.questions).toHaveLength(1));
+    session.answer(f.questions[0]!.requestId, { answers: { permission: { answers: ['拒绝'] } } });
+    await f.completed(first.runId);
+    expect(f.items().at(-1)?.text).toContain('"optionId":"reject"');
+    const second = f.input('permission', id);
+    await session.submit(second);
+    await vi.waitFor(() => expect(f.questions).toHaveLength(2));
+    await session.interrupt(id, second.runId);
+    expect(f.events).toContainEqual({
+      type: 'question_expired',
+      sessionId: id,
+      turnId: second.runId,
+      requestId: f.questions[1]!.requestId,
+    });
+    expect(() =>
+      session.answer(f.questions[1]!.requestId, {
+        answers: { permission: { answers: ['允许本次'] } },
+      }),
+    ).toThrow('已失效');
+  });
+
   it('reads per-model thinking levels from a deleted probe session without a prompt', async () => {
     const f = await fixture();
     expect(await f.adapter.catalog.status()).toMatchObject({
@@ -268,7 +335,6 @@ describe('Kimi Code ACP adapter', () => {
       },
     });
     expect((await f.frames('session/set_config_option')).map((frame) => frame.params)).toEqual([
-      { sessionId: id, configId: 'mode', value: 'yolo' },
       { sessionId: id, configId: 'thinking', value: 'high' },
     ]);
     expect(await f.frames('initialize')).toMatchObject([
@@ -304,9 +370,7 @@ describe('Kimi Code ACP adapter', () => {
       { params: { sessionId: first.id, cwd: f.agent.workspace, mcpServers: [{ name: 'isles' }] } },
     ]);
     expect((await f.frames('session/set_config_option')).map((frame) => frame.params)).toEqual([
-      { sessionId: first.id, configId: 'mode', value: 'yolo' },
       { sessionId: first.id, configId: 'model', value: 'kimi-code/fast' },
-      { sessionId: first.id, configId: 'mode', value: 'yolo' },
       { sessionId: first.id, configId: 'model', value: 'kimi-code/fast' },
     ]);
     const input = f.input('hello', first.id);
@@ -583,11 +647,15 @@ describe('Kimi Code ACP adapter', () => {
     ).toThrow('原生问题已失效');
   });
 
-  it('allows tool permissions once and leaves question fallbacks to the user', async () => {
+  it('asks before native tool approval and leaves question fallbacks to the user', async () => {
     const f = await fixture();
     const { session, id } = await f.created();
     const tool = f.input('permission', id);
     await session.submit(tool);
+    await vi.waitFor(() => expect(f.questions).toHaveLength(1));
+    session.answer(f.questions[0]!.requestId, {
+      answers: { permission: { answers: ['允许本次'] } },
+    });
     await f.completed(tool.runId);
     expect(f.items().at(-1)?.text).toBe(
       'Permission: {"outcome":"selected","optionId":"approve_once"}',

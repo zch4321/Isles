@@ -10,6 +10,7 @@ import {
   type HarnessTurnInput,
 } from '../types.js';
 import type { AgentRecord } from '../../storage/store.js';
+import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import { AcpCatalog } from './catalog.js';
 import {
   AcpClient,
@@ -130,11 +131,22 @@ class AcpSession implements HarnessSession {
   private resumeMethod: 'session/resume' | 'session/load' = 'session/resume';
   private options: AcpConfigOption[] = [];
   private mode: string | undefined;
+  private availableModes: string[] = [];
+  private additionalDirectories = false;
   private closed = false;
   private closing: Promise<void> | undefined;
   private exitReported = false;
   private active: ActiveTurn | undefined;
   private questions = new Map<string, PendingQuestion>();
+  private permissions = new Map<
+    string,
+    {
+      id: AcpRequestId;
+      turnId: string;
+      toolCallId: string;
+      options: z.infer<typeof permissionRequestSchema>['options'];
+    }
+  >();
   constructor(
     private agent: AgentRecord,
     private harness: AcpHarness,
@@ -183,6 +195,7 @@ class AcpSession implements HarnessSession {
       this.harness.log.child({ agentId: this.agent.id }),
     );
     const capabilities = (await initializeAcp(this.native(), this.name)).agentCapabilities;
+    this.additionalDirectories = capabilities?.sessionCapabilities?.additionalDirectories != null;
     if (!capabilities?.mcpCapabilities?.http)
       throw new Error(`${this.name} 未声明 HTTP MCP 支持，无法连接 Isles`);
     if (capabilities.sessionCapabilities?.resume) this.resumeMethod = 'session/resume';
@@ -195,6 +208,11 @@ class AcpSession implements HarnessSession {
       const result = newSessionResultSchema.parse(
         await this.native().request('session/new', {
           cwd: this.agent.workspace,
+          ...(this.additionalDirectories
+            ? {
+                additionalDirectories: [this.harness.workspace.sharedDir],
+              }
+            : {}),
           mcpServers: this.mcpServers(),
         }),
       );
@@ -218,6 +236,11 @@ class AcpSession implements HarnessSession {
           .request(this.resumeMethod, {
             sessionId,
             cwd: this.agent.workspace,
+            ...(this.additionalDirectories
+              ? {
+                  additionalDirectories: [this.harness.workspace.sharedDir],
+                }
+              : {}),
             mcpServers: this.mcpServers(),
           })
           .catch((error: unknown) => {
@@ -247,13 +270,19 @@ class AcpSession implements HarnessSession {
     const mode = this.options.find((option) => option.category === 'mode')?.currentValue;
     if (typeof mode === 'string') this.mode = mode;
     else if (state.modes) this.mode = state.modes.currentModeId;
+    if (state.modes) this.availableModes = state.modes.availableModes.map((mode) => mode.id);
   }
   private async applyMode() {
-    const mode = this.harness.sessionMode;
+    const mode = this.agent.dangerFullAccess
+      ? this.harness.sessionMode
+      : this.harness.defaultSessionMode;
+    if (mode === undefined) return;
     if (this.mode === mode) return;
     if (this.options.some((option) => option.category === 'mode'))
       await this.select('mode', mode, '运行模式');
     else {
+      if (!this.availableModes.includes(mode))
+        throw new Error(`${this.name} 当前不支持运行模式 ${mode}，请修改 Agent 设置`);
       await this.native().request('session/set_mode', { sessionId: this.sessionId, modeId: mode });
       this.mode = mode;
     }
@@ -368,6 +397,7 @@ class AcpSession implements HarnessSession {
     error: string | null,
   ) {
     if (this.active !== active) return;
+    this.expirePermissions();
     this.endSegment(active, false, status);
     this.active = undefined;
     for (const [key, pending] of this.questions)
@@ -384,6 +414,7 @@ class AcpSession implements HarnessSession {
     const active = this.active;
     if (sessionId !== this.sessionId || active?.id !== turnId) return;
     active.interrupted = true;
+    this.expirePermissions(undefined, true);
     for (const pending of this.questions.values())
       this.native().respond(pending.id, { action: 'cancel' });
     this.questions.clear();
@@ -391,6 +422,14 @@ class AcpSession implements HarnessSession {
   }
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
     const key = String(requestId);
+    const permission = this.permissions.get(key);
+    if (permission) {
+      if (permission.turnId !== this.active?.id) throw new Error(`${this.name} 原生权限请求已失效`);
+      const allowed = permissionAllowed(answer);
+      this.permissions.delete(key);
+      this.native().respond(permission.id, this.permissionResponse(permission.options, allowed));
+      return;
+    }
     const pending = this.questions.get(key);
     if (!pending || pending.turnId !== this.active?.id)
       throw new Error(`${this.name} 原生问题已失效`);
@@ -405,12 +444,20 @@ class AcpSession implements HarnessSession {
   /** ACP form declines carry no reason. */
   rejectQuestion(requestId: HarnessRequestId) {
     const key = String(requestId);
+    const permission = this.permissions.get(key);
+    if (permission) {
+      this.permissions.delete(key);
+      if (!this.closed)
+        this.native().respond(permission.id, this.permissionResponse(permission.options, false));
+      return;
+    }
     const pending = this.questions.get(key);
     this.questions.delete(key);
     if (pending && !this.closed) this.native().respond(pending.id, { action: 'decline' });
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
+    this.expirePermissions(undefined, true);
     this.closed = true;
     this.active?.fail(new Error(`${this.name} 连接已关闭，输入结果待核对`));
     this.questions.clear();
@@ -421,6 +468,7 @@ class AcpSession implements HarnessSession {
   private exit(error: Error) {
     if (this.exitReported) return;
     this.exitReported = true;
+    this.expirePermissions();
     this.active?.fail(error);
     this.output.exit(error);
   }
@@ -428,22 +476,40 @@ class AcpSession implements HarnessSession {
     const active = this.active;
     if (method === 'session/request_permission') {
       const request = permissionRequestSchema.safeParse(params);
-      if (!request.success || request.data.sessionId !== this.sessionId) {
+      if (
+        !request.success ||
+        request.data.sessionId !== this.sessionId ||
+        !active ||
+        request.data.toolCall.title === 'AskUserQuestion' ||
+        !request.data.options.some((option) => option.kind === 'allow_once')
+      ) {
         this.native().respond(id, { outcome: { outcome: 'cancelled' } });
         return;
       }
-      active?.accept();
-      // Isles runs Agents with full access. Questions arrive as forms; the permission
-      // fallback for a question would otherwise select an answer for the user.
-      const option =
-        request.data.toolCall.title === 'AskUserQuestion'
-          ? undefined
-          : (request.data.options.find((candidate) => candidate.kind === 'allow_once') ??
-            request.data.options.find((candidate) => candidate.kind === 'allow_always'));
-      this.native().respond(id, {
-        outcome: option
-          ? { outcome: 'selected', optionId: option.optionId }
-          : { outcome: 'cancelled' },
+      active.accept();
+      const key = String(id);
+      this.permissions.set(key, {
+        id,
+        turnId: active.id,
+        toolCallId: request.data.toolCall.toolCallId,
+        options: request.data.options,
+      });
+      this.output.question({
+        sessionId: this.sessionId!,
+        turnId: active.id,
+        requestId: key,
+        questions: permissionQuestions(
+          this.harness.redactor.output(
+            [
+              request.data.toolCall.title ?? request.data.toolCall.toolCallId,
+              request.data.toolCall.rawInput === undefined
+                ? ''
+                : JSON.stringify(request.data.toolCall.rawInput),
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          ),
+        ),
       });
       return;
     }
@@ -514,6 +580,13 @@ class AcpSession implements HarnessSession {
     const parsed = sessionUpdateSchema.safeParse(params);
     if (!parsed.success || parsed.data.sessionId !== this.sessionId) return;
     const update = parsed.data.update;
+    if (
+      update.sessionUpdate === 'tool_call_update' &&
+      ['completed', 'failed'].includes(String(update.status))
+    ) {
+      for (const [id, permission] of this.permissions)
+        if (permission.toolCallId === update.toolCallId) this.expirePermissions(id);
+    }
     if (update.sessionUpdate === 'usage_update') {
       const usage = usageUpdateSchema.safeParse(update);
       if (usage.success)
@@ -573,6 +646,33 @@ class AcpSession implements HarnessSession {
         text: plan.data.entries
           .map((entry) => `${entry.status === 'completed' ? '[x]' : '[ ]'} ${entry.content}`)
           .join('\n'),
+      });
+    }
+  }
+  private permissionResponse(
+    options: z.infer<typeof permissionRequestSchema>['options'],
+    allowed: boolean,
+  ) {
+    const option = options.find(
+      (option) => option.kind === (allowed ? 'allow_once' : 'reject_once'),
+    );
+    return {
+      outcome: option
+        ? { outcome: 'selected', optionId: option.optionId }
+        : { outcome: 'cancelled' },
+    };
+  }
+  private expirePermissions(id?: string, deny = false) {
+    for (const [key, permission] of this.permissions) {
+      if (id !== undefined && key !== id) continue;
+      this.permissions.delete(key);
+      if (deny && this.client && !this.closed)
+        this.client.respond(permission.id, this.permissionResponse(permission.options, false));
+      this.output.event({
+        type: 'question_expired',
+        sessionId: this.sessionId!,
+        turnId: permission.turnId,
+        requestId: key,
       });
     }
   }

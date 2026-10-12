@@ -45,6 +45,7 @@ async function fixture() {
     threadCreationAttempted: false,
     canCreateGroups: false,
     steerEnabled: false,
+    dangerFullAccess: false,
     desiredState: 'running',
     status: 'creating',
     error: null,
@@ -224,6 +225,7 @@ describe('DSH native SDK adapter', () => {
       params: {
         sessionId: id,
         cwd: f.agent.workspace,
+        dangerFullAccess: false,
         selection: { provider: 'fixture', model: 'nested/model', reasoningEffort: 'high' },
       },
     });
@@ -233,6 +235,90 @@ describe('DSH native SDK adapter', () => {
     expect(f.native.calls.filter((call) => call.method === 'isles/session/create')).toHaveLength(1);
     expect(f.native.calls.filter((call) => call.method === 'isles/session/submit')).toEqual([]);
     expect(f.events).toEqual([]);
+  });
+
+  it('overlays native defaults and explicitly passes each Agent full-access choice when opening a session', async () => {
+    const f = await fixture();
+    f.agent.dangerFullAccess = true;
+    const session = await f.connect();
+    await session.createSession(() => {});
+    expect(
+      f.native.calls.find((call) => call.method === 'isles/session/create')?.params
+        .dangerFullAccess,
+    ).toBe(true);
+    const patch = JSON.parse(await readFile(f.native.runtimes.at(-1)!.runtime.args[3]!, 'utf8'));
+    expect(patch).toContainEqual({
+      id: 'sandbox-policy',
+      config: { mode: 'danger-full-access', workspaceRoot: f.agent.workspace },
+    });
+    expect(patch).toContainEqual({ id: 'approval', config: { policy: 'never' } });
+    expect(patch).toContainEqual({
+      id: 'permission',
+      config: expect.objectContaining({ defaultPreset: 'danger-full-access' }),
+    });
+    expect(patch).toContainEqual(
+      expect.objectContaining({
+        id: 'sandbox',
+        config: { sharedDir: f.environment.workspace.sharedDir },
+      }),
+    );
+  });
+
+  it('presents a one-shot permission form, validates fixed decisions and ignores expired answers', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    f.startInput(id);
+    const { turnId } = await session.submit(f.input(id));
+    const notify = (requestId: string, sessionId = id) =>
+      f.native.notify('isles/permission', {
+        sessionId,
+        turnId,
+        requestId,
+        text: 'Write outside workspace',
+      });
+    notify('foreign', 'other-session');
+    notify('permit');
+    expect(f.questions).toHaveLength(1);
+    expect(f.questions[0]!.questions[0]).toMatchObject({
+      id: 'permission',
+      isOther: false,
+      options: [{ label: '允许本次' }, { label: '拒绝' }],
+    });
+    expect(() =>
+      session.answer('permit', { answers: { permission: { answers: ['custom'] } } }),
+    ).toThrow('请选择');
+    session.answer('permit', { answers: { permission: { answers: ['允许本次'] } } });
+    session.answer('permit', { answers: { permission: { answers: ['允许本次'] } } });
+    await vi.waitFor(() =>
+      expect(
+        f.native.calls.filter((call) => call.method === 'isles/permission/answer'),
+      ).toHaveLength(1),
+    );
+    expect(
+      f.native.calls.find((call) => call.method === 'isles/permission/answer')?.params,
+    ).toEqual({ sessionId: id, expectedTurnId: turnId, requestId: 'permit', allow: true });
+    expect(f.events.some((event) => event.type === 'question_expired')).toBe(false);
+    notify('expired');
+    f.native.event(id, { type: 'question_expired', turnId, requestId: 'expired' });
+    session.answer('expired', { answers: { permission: { answers: ['允许本次'] } } });
+    expect(f.native.calls.filter((call) => call.method === 'isles/permission/answer')).toHaveLength(
+      1,
+    );
+    expect(f.events).toContainEqual({
+      type: 'question_expired',
+      sessionId: id,
+      turnId,
+      requestId: 'expired',
+    });
+    notify('close');
+    await session.close();
+    expect(f.events).toContainEqual({
+      type: 'question_expired',
+      sessionId: id,
+      turnId,
+      requestId: 'close',
+    });
   });
 
   it('refuses a missing persisted session without creating another one', async () => {

@@ -27,7 +27,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function fixture() {
+async function fixture(dangerFullAccess = false) {
   const root = await mkdtemp(join(tmpdir(), 'isles-codex-adapter-'));
   roots.push(root);
   const config = new ConfigManager({
@@ -49,6 +49,7 @@ async function fixture() {
     threadId: null,
     threadCreationAttempted: false,
     canCreateGroups: false,
+    dangerFullAccess,
     steerEnabled: false,
     desiredState: 'running',
     status: 'creating',
@@ -125,6 +126,139 @@ async function fixture() {
 }
 
 describe('Codex adapter protocol boundary', () => {
+  it.each([false, true])(
+    'applies native permissions for create, resume and every turn (full=%s)',
+    async (full) => {
+      const f = await fixture(full);
+      await f.session.createSession(() => {});
+      await f.session.resumeSession('session-one');
+      await f.session.submit(f.input);
+      for (const call of f.calls.filter((call) =>
+        ['thread/start', 'thread/resume'].includes(call.method),
+      )) {
+        expect(call.params).toMatchObject({
+          sandbox: full ? 'danger-full-access' : 'workspace-write',
+          approvalPolicy: full ? 'never' : 'on-request',
+        });
+        if (!full)
+          expect(call.params.config).toMatchObject({
+            'sandbox_workspace_write.writable_roots': [f.environment.workspace.sharedDir],
+          });
+      }
+      expect(
+        f.calls.find((call) => call.method === 'turn/start')?.params.sandboxPolicy,
+      ).toMatchObject(
+        full
+          ? { type: 'dangerFullAccess' }
+          : {
+              type: 'workspaceWrite',
+              writableRoots: [f.agent.workspace, f.environment.workspace.sharedDir],
+            },
+      );
+    },
+  );
+
+  it.each([
+    'item/commandExecution/requestApproval',
+    'item/fileChange/requestApproval',
+    'item/permissions/requestApproval',
+  ])(
+    'routes %s to native allow and deny responses without extending the session',
+    async (method) => {
+      const f = await fixture();
+      await f.session.createSession(() => {});
+      await f.session.submit(f.input);
+      const permissions = { network: null, fileSystem: { read: null, write: ['/outside'] } };
+      const request = {
+        threadId: 'session-one',
+        turnId: 'turn-one',
+        itemId: 'item',
+        command: 'fixture command',
+        permissions,
+      };
+      if (method === 'item/fileChange/requestApproval')
+        f.wire.notification('item/started', {
+          threadId: 'session-one',
+          turnId: 'turn-one',
+          item: {
+            id: 'item',
+            type: 'fileChange',
+            changes: [{ path: '/outside/file.txt', kind: { type: 'add' }, diff: '+fixture' }],
+          },
+        });
+      f.wire.request(100, method, request);
+      expect(f.native.respond).not.toHaveBeenCalled();
+      expect(f.output.question).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: 100,
+          questions: [expect.objectContaining({ id: 'permission', isOther: false })],
+        }),
+      );
+      if (method === 'item/fileChange/requestApproval')
+        expect(vi.mocked(f.output.question).mock.calls[0]![0].questions[0]!.question).toContain(
+          '/outside/file.txt',
+        );
+      f.session.answer(100, { answers: { permission: { answers: ['允许本次'] } } });
+      expect(f.native.respond).toHaveBeenLastCalledWith(
+        100,
+        method.includes('/permissions/')
+          ? { permissions: { fileSystem: permissions.fileSystem }, scope: 'turn' }
+          : { decision: 'accept' },
+      );
+      f.wire.request(101, method, request);
+      f.session.answer(101, { answers: { permission: { answers: ['拒绝'] } } });
+      expect(f.native.respond).toHaveBeenLastCalledWith(
+        101,
+        method.includes('/permissions/')
+          ? { permissions: {}, scope: 'turn' }
+          : { decision: 'decline' },
+      );
+      expect(() =>
+        f.session.answer(101, { answers: { permission: { answers: ['允许本次'] } } }),
+      ).toThrow('已失效');
+    },
+  );
+
+  it('rejects unknown threads and expires approvals resolved elsewhere or on stop', async () => {
+    const f = await fixture();
+    await f.session.createSession(() => {});
+    await f.session.submit(f.input);
+    const request = { threadId: 'session-one', turnId: 'turn-one', itemId: 'item' };
+    f.wire.request('unknown', 'item/fileChange/requestApproval', {
+      ...request,
+      threadId: 'unknown',
+    });
+    expect(f.native.respond).toHaveBeenLastCalledWith('unknown', { decision: 'decline' });
+    expect(f.output.question).not.toHaveBeenCalled();
+    f.wire.notification('thread/started', {
+      thread: { id: 'child', parentThreadId: 'session-one' },
+    });
+    f.wire.request('child-request', 'item/fileChange/requestApproval', {
+      ...request,
+      threadId: 'child',
+      turnId: 'child-turn',
+    });
+    f.wire.notification('serverRequest/resolved', {
+      threadId: 'child',
+      requestId: 'child-request',
+    });
+    expect(f.output.event).toHaveBeenCalledWith({
+      type: 'question_expired',
+      sessionId: 'session-one',
+      turnId: 'turn-one',
+      requestId: 'child-request',
+    });
+    expect(() =>
+      f.session.answer('child-request', { answers: { permission: { answers: ['允许本次'] } } }),
+    ).toThrow('已失效');
+    f.wire.request('stop', 'item/fileChange/requestApproval', request);
+    await f.session.interrupt('session-one', 'turn-one');
+    expect(f.native.respond).toHaveBeenLastCalledWith('stop', { decision: 'decline' });
+    expect(() =>
+      f.session.answer('stop', { answers: { permission: { answers: ['允许本次'] } } }),
+    ).toThrow('已失效');
+  });
+
   it('isolates message and command deltas while retaining discrete tool and completion boundaries', async () => {
     const { wire, output } = await fixture();
     const identity = { threadId: 'session-one', turnId: 'turn-one' };
@@ -247,7 +381,7 @@ describe('Codex adapter protocol boundary', () => {
     expect(calls[0]!.params).toMatchObject({
       threadId: 'original-session',
       cwd: agent.workspace,
-      approvalPolicy: 'never',
+      approvalPolicy: 'on-request',
       config: { 'mcp_servers.isles': { bearer_token_env_var: 'ISLES_MCP_TOKEN' } },
     });
     setRequest(async () => ({ thread: { id: 'replacement' }, instructionSources: [] }));
@@ -258,7 +392,7 @@ describe('Codex adapter protocol boundary', () => {
   });
 
   it('maps semantic submission and control operations, and preserves uncertain errors', async () => {
-    const { session, input, calls, native, wire, setRequest } = await fixture();
+    const { session, input, calls, native, wire, setRequest, environment } = await fixture();
     await expect(session.submit(input)).resolves.toEqual({ turnId: 'turn-one' });
     expect(calls[0]).toEqual({
       method: 'turn/start',
@@ -269,8 +403,14 @@ describe('Codex adapter protocol boundary', () => {
         model: input.model,
         effort: input.reasoningEffort,
         cwd: input.workspace,
-        approvalPolicy: 'never',
-        sandboxPolicy: { type: 'dangerFullAccess' },
+        approvalPolicy: 'on-request',
+        sandboxPolicy: {
+          type: 'workspaceWrite',
+          writableRoots: [input.workspace, environment.workspace.sharedDir],
+          networkAccess: true,
+          excludeTmpdirEnvVar: false,
+          excludeSlashTmp: false,
+        },
       },
     });
     const refusal = new NativeRpcError('input rejected');

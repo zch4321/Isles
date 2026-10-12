@@ -36,7 +36,7 @@ const models = [
   { value: 'kimi-code/k3', name: 'K3', thinking: ['low', 'high', 'max'] },
   { value: 'kimi-code/fast', name: 'Fast', thinking: settings().restrictedThinking ? ['on', 'max'] : [] },
 ];
-const modes = ['default', 'plan', 'auto', 'yolo'];
+const modes = settings().modes ?? ['default', 'plan', 'auto', 'yolo'];
 const state = new Map();
 const options = (s) => {
   const model = models.find((entry) => entry.value === s.model);
@@ -48,7 +48,7 @@ const options = (s) => {
 };
 // Like Kimi, model, thinking and mode are per process and reset on resume.
 const open = (id, cwd, mcpServers) => {
-  const s = { id, cwd, mcpServers, model: 'kimi-code/k3', thinking: settings().initialThinking ?? 'max', mode: 'default' };
+  const s = { id, cwd, mcpServers, model: 'kimi-code/k3', thinking: settings().initialThinking ?? 'max', mode: settings().initialMode ?? 'default' };
   state.set(id, s);
   return { configOptions: options(s), modes: { currentModeId: s.mode, availableModes: modes.map((id) => ({ id, name: id })) } };
 };
@@ -99,7 +99,7 @@ const begin = (frame) => {
     const permissionOptions = text === 'permission'
       ? [{ optionId: 'approve_always', name: 'Always', kind: 'allow_always' }, { optionId: 'approve_once', name: 'Once', kind: 'allow_once' }, { optionId: 'reject', name: 'Reject', kind: 'reject_once' }]
       : [{ optionId: 'q0_opt_0', name: 'One', kind: 'allow_once' }, { optionId: 'q0_skip', name: 'Skip', kind: 'reject_once' }];
-    ask('session/request_permission', { sessionId, toolCall: { toolCallId: 't1:perm', title: text === 'permission' ? 'Shell' : 'AskUserQuestion' }, options: permissionOptions }, (result) => {
+    ask('session/request_permission', { sessionId, toolCall: { toolCallId: 't1:perm', title: text === 'permission' ? 'Shell' : 'AskUserQuestion' }, options: config.permissionAlwaysOnly ? permissionOptions.filter(option => option.kind !== 'allow_once') : permissionOptions }, (result) => {
       chunk(sessionId, 'Permission: ' + JSON.stringify(result.outcome));
       end('end_turn');
     });
@@ -146,7 +146,7 @@ const begin = (frame) => {
   end('end_turn');
 };
 const handlers = {
-  initialize: () => ({ protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true, audio: false, embeddedContext: true }, sessionCapabilities: settings().noResume ? { delete: {} } : { list: {}, resume: {}, close: {}, delete: {} }, mcpCapabilities: { http: !settings().noHttpMcp, sse: true } }, authMethods: [{ id: 'login', type: 'terminal', name: 'Login with Kimi account' }], agentInfo: { name: 'Kimi Code CLI', version: '2.1.1' } }),
+  initialize: () => ({ protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true, audio: false, embeddedContext: true }, sessionCapabilities: settings().noResume ? { delete: {} } : { list: {}, resume: {}, close: {}, delete: {}, ...(settings().noAdditionalDirectories ? {} : { additionalDirectories: {} }) }, mcpCapabilities: { http: !settings().noHttpMcp, sse: true } }, authMethods: [{ id: 'login', type: 'terminal', name: 'Login with Kimi account' }], agentInfo: { name: 'Kimi Code CLI', version: '2.1.1' } }),
   authenticate: () => { if (settings().unauthenticated) throw { code: -32000, message: 'Authentication required' }; return {}; },
   'session/new': ({ cwd, mcpServers }) => {
     const id = 'session_' + crypto.randomUUID();

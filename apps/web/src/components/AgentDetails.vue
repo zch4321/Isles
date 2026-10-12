@@ -11,6 +11,7 @@ import StatusBadge from './StatusBadge.vue';
 import EditAgentDialog from './EditAgentDialog.vue';
 import DeleteAgentDialog from './DeleteAgentDialog.vue';
 import AgentContextDialog from './AgentContextDialog.vue';
+import ExecutionAccessSetting from './ExecutionAccessSetting.vue';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { channelTitle, type Directory } from '@/lib/channels';
@@ -58,6 +59,17 @@ const steering = useMutation({
 const steerEnabled = computed({
   get: () => (steering.isPending.value ? steering.variables.value! : props.agent.steerEnabled),
   set: (value: boolean) => steering.mutate(value),
+});
+const executionAccess = useMutation({
+  mutationFn: (dangerFullAccess: boolean) => updateAgent(props.agent.id, { dangerFullAccess }),
+  onSettled: () => invalidateAll(queryClient),
+});
+const dangerFullAccess = computed({
+  get: () =>
+    executionAccess.isPending.value
+      ? executionAccess.variables.value!
+      : props.agent.dangerFullAccess,
+  set: (value: boolean) => executionAccess.mutate(value),
 });
 
 function inputs(run: Run) {
@@ -152,7 +164,16 @@ function inputs(run: Run) {
       </p>
     </section>
     <section v-if="agent.status !== 'deleted'" class="border-b border-line p-4">
-      <h3 class="text-[13px] font-semibold">收信与协作</h3>
+      <h3 class="text-[13px] font-semibold">执行与协作</h3>
+      <ExecutionAccessSetting
+        :id="`full-access-${agent.id}`"
+        v-model="dangerFullAccess"
+        class="mt-3"
+        :disabled="executionAccess.isPending.value"
+      />
+      <p v-if="executionAccess.error.value" role="alert" class="mt-2 text-xs text-st-error">
+        {{ executionAccess.error.value.message }}
+      </p>
       <div class="mt-3 flex items-start gap-3">
         <div class="min-w-0 flex-1">
           <p :id="`steer-${agent.id}`" class="text-[13px] font-medium">忙碌时实时接收（steer）</p>

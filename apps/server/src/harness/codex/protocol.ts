@@ -45,6 +45,25 @@ export const inputRequestSchema = z.object({
   isBlocking: z.boolean(),
 });
 
+export const approvalRequestSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    itemId: z.string().min(1),
+    command: z.string().nullish(),
+    cwd: z.string().nullish(),
+    reason: z.string().nullish(),
+    grantRoot: z.string().nullish(),
+    permissions: z
+      .object({
+        network: z.record(z.string(), z.unknown()).nullish(),
+        fileSystem: z.record(z.string(), z.unknown()).nullish(),
+      })
+      .optional(),
+    additionalPermissions: z.record(z.string(), z.unknown()).nullish(),
+  })
+  .passthrough();
+
 export interface NativeHandlers {
   notification: (method: string, params: Record<string, unknown>) => void;
   request: (id: RequestId, method: string, params: Record<string, unknown>) => void;

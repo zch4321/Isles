@@ -14,11 +14,13 @@ import {
 import { DshCatalog } from './catalog.js';
 import { DshClient, type DshClientFactory, type DshConnection } from './client.js';
 import type { DshEnvironment } from './environment.js';
+import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import {
   admissionSchema,
   catalogSchema,
   eventSchema,
   modelSelection,
+  permissionRequestSchema,
   questionSchema,
   rejectionSchema,
   sessionSchema,
@@ -86,6 +88,7 @@ class DshSession implements HarnessSession {
   private stopped = false;
   private events = new Set<string>();
   private questions = new Set<string>();
+  private permissions = new Set<string>();
   private admissions = new Set<Promise<unknown>>();
   constructor(
     private environment: DshEnvironment,
@@ -140,6 +143,7 @@ class DshSession implements HarnessSession {
         await this.native().request(`isles/session/${mode}`, {
           sessionId,
           cwd: this.agent.workspace,
+          dangerFullAccess: this.agent.dangerFullAccess,
           selection: modelSelection(this.agent.model, this.agent.reasoningEffort),
         }),
       ),
@@ -242,9 +246,30 @@ class DshSession implements HarnessSession {
   }
   private notification(method: string, params: unknown) {
     if (this.closing) return;
+    if (method === 'isles/permission') {
+      const permission = permissionRequestSchema.parse(params);
+      if (
+        this.stopped ||
+        permission.sessionId !== this.sessionId ||
+        permission.turnId !== this.active?.turnId ||
+        this.active.ended ||
+        this.questions.has(permission.requestId)
+      )
+        return;
+      this.questions.add(permission.requestId);
+      this.permissions.add(permission.requestId);
+      this.handlers.question({
+        sessionId: permission.sessionId,
+        turnId: permission.turnId,
+        requestId: permission.requestId,
+        questions: permissionQuestions(this.environment.redactor.output(permission.text)),
+      });
+      return;
+    }
     if (method === 'isles/question') {
       const question = questionSchema.parse(params);
       if (
+        this.stopped ||
         question.sessionId !== this.sessionId ||
         question.turnId !== this.active?.turnId ||
         this.active.ended ||
@@ -263,6 +288,13 @@ class DshSession implements HarnessSession {
       this.events.add(frame.eventId);
     }
     const event = frame.event;
+    if (event.type === 'question_expired') {
+      if (event.turnId === this.active?.turnId && this.questions.delete(event.requestId)) {
+        this.permissions.delete(event.requestId);
+        this.handlers.event({ ...event, sessionId: frame.sessionId });
+      }
+      return;
+    }
     if (event.type === 'context_usage') {
       this.handlers.event({
         type: 'context_usage',
@@ -320,6 +352,7 @@ class DshSession implements HarnessSession {
     if (this.active !== active || !active.turnId || !active.ended || active.inputs.size) return;
     this.active = undefined;
     this.questions.clear();
+    this.permissions.clear();
     this.handlers.event({
       type: 'turn_completed',
       sessionId: this.sessionId!,
@@ -328,25 +361,36 @@ class DshSession implements HarnessSession {
     });
   }
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
-    if (!this.questions.delete(String(requestId))) return;
+    if (this.closing || !this.questions.has(String(requestId))) return;
+    const allow = this.permissions.has(String(requestId)) ? permissionAllowed(answer) : undefined;
+    this.questions.delete(String(requestId));
+    const permission = this.permissions.delete(String(requestId));
     void this.native()
-      .request('isles/question/answer', {
+      .request(permission ? 'isles/permission/answer' : 'isles/question/answer', {
         sessionId: this.sessionId,
+        expectedTurnId: this.active?.turnId,
         requestId,
-        answers: answer.answers,
+        ...(permission ? { allow } : { answers: answer.answers }),
       })
-      .then((value) => this.checked(value))
+      // An expired question is an ordinary race, not a connection failure.
       .catch((error: unknown) => this.fail(error as Error));
   }
   rejectQuestion(requestId: HarnessRequestId, reason: string) {
     if (this.closing || !this.questions.delete(String(requestId))) return;
+    const permission = this.permissions.delete(String(requestId));
     void this.native()
-      .request('isles/question/reject', { sessionId: this.sessionId, requestId, reason })
+      .request(permission ? 'isles/permission/reject' : 'isles/question/reject', {
+        sessionId: this.sessionId,
+        expectedTurnId: this.active?.turnId,
+        requestId,
+        reason,
+      })
       .catch((error: unknown) => this.fail(error as Error));
   }
   async interrupt(sessionId: string, turnId: string) {
     if (sessionId !== this.sessionId || turnId !== this.active?.turnId) return;
     this.stopped = true;
+    this.expireQuestions();
     await Promise.allSettled(this.admissions);
     this.checked(
       await this.native().request('isles/session/interrupt', { sessionId, expectedTurnId: turnId }),
@@ -362,10 +406,23 @@ class DshSession implements HarnessSession {
     this.handlers.exit(new Error(this.environment.redactor.text(error)));
     void this.close();
   }
+  private expireQuestions() {
+    if (this.sessionId && this.active?.turnId)
+      for (const requestId of this.questions)
+        this.handlers.event({
+          type: 'question_expired',
+          sessionId: this.sessionId,
+          turnId: this.active.turnId,
+          requestId,
+        });
+    this.questions.clear();
+    this.permissions.clear();
+  }
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closing = Promise.resolve().then(async () => {
       this.stopped = true;
+      this.expireQuestions();
       for (const pending of this.active?.inputs.values() ?? []) {
         clearTimeout(pending.timer);
         pending.reject(new Error('DSH 连接已关闭'));

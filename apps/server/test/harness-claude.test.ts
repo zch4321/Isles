@@ -37,11 +37,15 @@ async function fixture() {
   const environment = new ClaudeEnvironment(config, workspace);
   const received: ClaudeFrame[] = [];
   let emit!: (frame: ClaudeFrame) => void;
+  let requestNative!: (id: string, request: ClaudeFrame) => void;
+  let cancelNative!: (id: string) => void;
   const adapter = new ClaudeAdapter(
     environment,
     undefined,
     (command, args, cwd, env, handlers, log) => {
       emit = handlers.event;
+      requestNative = handlers.request;
+      cancelNative = handlers.cancel;
       return new ClaudeClient(
         command,
         args,
@@ -71,6 +75,7 @@ async function fixture() {
     threadId: null,
     threadCreationAttempted: false,
     canCreateGroups: false,
+    dangerFullAccess: false,
     steerEnabled: false,
     desiredState: 'running',
     status: 'creating',
@@ -112,10 +117,134 @@ async function fixture() {
     connect,
     input,
     emit: (frame: ClaudeFrame) => emit(frame),
+    requestNative: (id: string, request: ClaudeFrame) => requestNative(id, request),
+    cancelNative: (id: string) => cancelNative(id),
   };
 }
 
 describe('Claude CLI adapter', () => {
+  it('keeps native dedicated interactions distinct from one-time tool approvals', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    f.emit({
+      type: 'assistant',
+      session_id: id,
+      user_message_uuid: input.runId,
+      message: {
+        content: [
+          { type: 'tool_use', id: 'interactive-tool', name: 'NativeInteraction', input: {} },
+        ],
+      },
+    });
+    f.requestNative('interactive', {
+      subtype: 'can_use_tool',
+      tool_name: 'NativeInteraction',
+      tool_use_id: 'interactive-tool',
+      input: {},
+      requires_user_interaction: true,
+    });
+    expect(f.questions).toHaveLength(0);
+    await vi.waitFor(async () => {
+      const response = (await f.cli.records()).find(
+        (frame) =>
+          frame.type === 'control_response' &&
+          (frame.response as ClaudeFrame)?.request_id === 'interactive',
+      );
+      expect((response?.response as ClaudeFrame)?.response).toEqual({
+        behavior: 'deny',
+        message: '该原生请求需要专用交互，请在 Claude Code 会话中处理。',
+      });
+    });
+  });
+  it('expires externally cancelled approvals and denies tool requests without a matching active tool', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    const request = {
+      subtype: 'can_use_tool',
+      tool_name: 'Bash',
+      tool_use_id: 'native-tool',
+      input: { command: 'echo fixture' },
+    };
+    f.requestNative('unassociated', request);
+    expect(f.questions).toHaveLength(0);
+    f.emit({
+      type: 'assistant',
+      session_id: id,
+      user_message_uuid: input.runId,
+      message: {
+        content: [{ type: 'tool_use', id: 'native-tool', name: 'Bash', input: request.input }],
+      },
+    });
+    f.requestNative('approval', request);
+    expect(f.questions).toHaveLength(1);
+    f.cancelNative('approval');
+    expect(f.events).toContainEqual({
+      type: 'question_expired',
+      sessionId: id,
+      turnId: input.runId,
+      requestId: 'approval',
+    });
+    expect(() =>
+      session.answer('approval', { answers: { permission: { answers: ['允许本次'] } } }),
+    ).toThrow('已失效');
+    expect(f.output.exit).not.toHaveBeenCalled();
+  });
+  it.each([false, true])(
+    'uses native mode and shared directory when creating and restoring (full=%s)',
+    async (full) => {
+      const f = await fixture();
+      f.agent.dangerFullAccess = full;
+      const session = await f.connect();
+      const id = await session.createSession(() => {});
+      await session.close();
+      const restored = await f.connect();
+      await restored.resumeSession(id);
+      const launches = (await f.cli.records()).filter((frame) => frame.type === 'launch');
+      expect(launches).toHaveLength(2);
+      for (const launch of launches) {
+        const args = launch.args as string[];
+        expect(args.includes('--dangerously-skip-permissions')).toBe(full);
+        expect(args).toContain('--add-dir');
+        if (!full) expect(args).toContain('acceptEdits');
+      }
+    },
+  );
+
+  it.each(['允许本次', '拒绝'])(
+    'answers native tool permission with %s and no persistent grant',
+    async (decision) => {
+      const f = await fixture();
+      const session = await f.connect();
+      const id = await session.createSession(() => {});
+      await session.submit(f.input('permission', id));
+      await vi.waitFor(() => expect(f.questions).toHaveLength(1));
+      const question = f.questions[0]!;
+      expect(question.questions[0]).toMatchObject({ id: 'permission', isOther: false });
+      session.answer(question.requestId, { answers: { permission: { answers: [decision] } } });
+      await vi.waitFor(async () => {
+        const response = (await f.cli.records()).find(
+          (frame) =>
+            frame.type === 'control_response' &&
+            (frame.response as ClaudeFrame)?.request_id === question.requestId,
+        );
+        expect((response?.response as ClaudeFrame)?.response).toEqual(
+          decision === '允许本次'
+            ? { behavior: 'allow', updatedInput: { command: 'echo fixture' } }
+            : { behavior: 'deny', message: '用户拒绝本次执行' },
+        );
+      });
+      expect(() =>
+        session.answer(question.requestId, { answers: { permission: { answers: ['允许本次'] } } }),
+      ).toThrow('已失效');
+    },
+  );
+
   it('ignores partial stream frames and publishes complete assistant and tool snapshots', async () => {
     const f = await fixture();
     const session = await f.connect();
@@ -301,7 +430,9 @@ describe('Claude CLI adapter', () => {
     });
     const launch = frames.find((frame) => frame.type === 'launch')!;
     const args = launch.args as string[];
-    expect(args).toContain('--dangerously-skip-permissions');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(args).toContain('acceptEdits');
+    expect(args).toContain('--add-dir');
     expect(args).toContain('--permission-prompt-tool');
     expect(args).not.toContain('--bare');
     expect(args).not.toContain('--strict-mcp-config');

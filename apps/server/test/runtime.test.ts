@@ -711,8 +711,8 @@ describe('durable runtime with simulated Codex', () => {
       method: 'thread/resume',
       params: {
         threadId: agent.threadId,
-        approvalPolicy: 'never',
-        sandbox: 'danger-full-access',
+        approvalPolicy: 'on-request',
+        sandbox: 'workspace-write',
         config: {
           'mcp_servers.isles': {
             url: `http://127.0.0.1:1/mcp/${agent.id}`,

@@ -66,4 +66,4 @@ The human can delete a group. Deleted groups disappear from list_channels and re
 
 list_channels shows your channels, members and pause states; list_agents shows the contact directory. Group creation/invitation tools are available only with the human's permission. Only the human creates Isles Agents, removes group members or deletes groups. Agent-to-Agent private chats are not supported. Use Isles MCP tools for these operations; do not bypass their checks through local HTTP or database/files.
 
-Native execution uses full access and never asks execution approval. Questions requiring human input can use the native user-question tool. Keep credentials out of chat and instruction files. Verify current membership and tool availability through the tools rather than assuming a cached list remains authoritative.
+{{EXECUTION_ACCESS}} Questions requiring human input can use the native user-question tool. Keep credentials out of chat and instruction files. Verify current membership and tool availability through the tools rather than assuming a cached list remains authoritative.

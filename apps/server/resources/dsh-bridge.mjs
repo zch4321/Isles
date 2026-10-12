@@ -22,7 +22,7 @@ const [
 ]);
 
 export const name = 'isles-dsh-bridge';
-export const inject = ['agents', 'llm', 'tools', 'sdkAppStartup'];
+export const inject = ['agents', 'llm', 'tools', 'sdkAppStartup', 'permissionPresets', 'approval'];
 
 const inputId = (message) =>
   message.source?.kind === 'user' &&
@@ -49,6 +49,7 @@ export function apply(ctx, config = {}) {
   );
   const sessions = new Map();
   const questions = new Map();
+  const permissions = new Map();
   const creations = new Map();
   const disposers = [];
   let stopping = false;
@@ -112,6 +113,57 @@ export function apply(ctx, config = {}) {
     const rec = sessions.get(String(agent.session.id));
     return rec?.agent === agent ? rec : undefined;
   };
+  // Native ownership, rather than durable fork lineage, identifies live children.
+  const ownedRecord = (agent) => {
+    const seen = new Set();
+    for (let current = agent; current && !seen.has(current);) {
+      seen.add(current);
+      const rec = record(current);
+      if (rec) return rec;
+      current = ctx.agents.list().find((parent) => ctx.agents.isOwnedBy(current.id, parent));
+    }
+  };
+  const setPermissions = (rec, agent) =>
+    ctx.permissionPresets.set(
+      agent.session,
+      rec.dangerFullAccess ? 'danger-full-access' : 'workspace-write',
+    );
+  const expireInteractions = (rec, turnId) => {
+    for (const pending of [...permissions.values()])
+      if (pending.rec === rec && pending.turnId === turnId) pending.finish('cancelled', true);
+    for (const pending of [...questions.values()])
+      if (pending.rec === rec && pending.turnId === turnId)
+        pending.finish(new UserQuestionError('问题已取消', 'ASK_ABORTED'), undefined, true);
+  };
+  disposers.push(
+    ctx.on(
+      'agent/created',
+      ({ agent }) => {
+        const rec = ownedRecord(agent);
+        if (rec) setPermissions(rec, agent);
+      },
+      { global: true },
+    ),
+    ctx.on(
+      'agent/disposed',
+      ({ agent }) => {
+        for (const pending of [...permissions.values()])
+          if (pending.agent === agent) pending.finish('cancelled', true);
+      },
+      { global: true },
+    ),
+  );
+  ctx.inject(['systemPrompt'], (scope) => {
+    scope.systemPrompt.context({
+      name: 'isles:shared-permissions',
+      order: scope.systemPrompt.getContextOrder('SANDBOX_POLICY') + 1,
+      text: ({ agent }) => {
+        const rec = agent && ownedRecord(agent);
+        if (!rec || rec.dangerFullAccess) return '';
+        return `Isles shared workspace is writable under workspace-write mode: ${JSON.stringify(config.sharedDir)}. For a denied operation outside the writable roots, retry with sandbox_permissions and justification to request approval in Isles.`;
+      },
+    });
+  });
   const rejectInput = (rec, id, reason, eventId) => {
     const receipt = rec.inputs.get(id);
     if (!receipt || receipt.status === 'accepted' || receipt.status === 'rejected') return;
@@ -171,6 +223,7 @@ export function apply(ctx, config = {}) {
           emit(rec, { type: 'turn_started', turnId: rec.activeTurn }, eventId);
         } else if (nativeEvent.type === 'turn/end') {
           const turnId = String(data.turn);
+          expireInteractions(rec, turnId);
           // A steer can remain queued when the current turn aborts or closes.
           // Cancel it durably before publishing completion; it must not silently
           // become input for a later native turn.
@@ -336,6 +389,53 @@ export function apply(ctx, config = {}) {
     ),
   );
 
+  // DSH owns the approval/asked + approval/decided audit pair and the one-shot
+  // sandbox grant. Isles answers the standard waterfall without replacing it.
+  disposers.push(
+    ctx.on(
+      'approval/request',
+      (request, next) => {
+        const rec = ownedRecord(request.agent);
+        if (!rec || rec.activeTurn === undefined || rec.interrupting || stopping) return next();
+        const requestId = randomUUID();
+        const turnId = rec.activeTurn;
+        return new Promise((resolveAnswer) => {
+          const finish = (outcome, expired = false) => {
+            if (!permissions.delete(requestId)) return;
+            request.signal?.removeEventListener('abort', aborted);
+            if (expired) emit(rec, { type: 'question_expired', turnId, requestId });
+            resolveAnswer(outcome);
+          };
+          const aborted = () => finish('cancelled', true);
+          permissions.set(requestId, { rec, agent: request.agent, turnId, finish });
+          request.signal?.addEventListener('abort', aborted, { once: true });
+          if (request.signal?.aborted) return aborted();
+          const reason =
+            request.displayReason?.zh ?? request.reason ?? `允许本次 ${request.toolName} 操作`;
+          const call =
+            request.callId === undefined
+              ? undefined
+              : request.agent.session
+                  .snapshotEvents()
+                  .findLast(
+                    (event) =>
+                      event.type === 'tool/call' &&
+                      String(event.data.callId) === String(request.callId),
+                  );
+          transport.notify('isles/permission', {
+            sessionId: rec.id,
+            turnId,
+            requestId,
+            text:
+              `${reason}\n\n工具：${request.toolName}` +
+              (call ? `\n操作：${JSON.stringify(call.data.arguments)}` : ''),
+          });
+        });
+      },
+      { global: true },
+    ),
+  );
+
   // The standard native question waterfall remains the owner of the tool wait.
   disposers.push(
     ctx.on(
@@ -346,15 +446,18 @@ export function apply(ctx, config = {}) {
         const requestId = randomUUID();
         return new Promise((resolveAnswer, rejectAnswer) => {
           const hold = new globalThis.AbortController();
-          const finish = (error, answer) => {
+          const turnId = rec.activeTurn;
+          const finish = (error, answer, expired = false) => {
             if (!questions.delete(requestId)) return;
             hold.abort();
             request.signal?.removeEventListener('abort', aborted);
+            if (expired) emit(rec, { type: 'question_expired', turnId, requestId });
             if (error) rejectAnswer(error);
             else resolveAnswer(answer);
           };
-          const aborted = () => finish(new UserQuestionError('问题已取消', 'ASK_ABORTED'));
-          questions.set(requestId, { rec, nativeQuestions: request.questions, finish });
+          const aborted = () =>
+            finish(new UserQuestionError('问题已取消', 'ASK_ABORTED'), undefined, true);
+          questions.set(requestId, { rec, turnId, nativeQuestions: request.questions, finish });
           request.signal?.addEventListener('abort', aborted, { once: true });
           if (request.signal?.aborted) {
             aborted();
@@ -465,10 +568,13 @@ export function apply(ctx, config = {}) {
       return rejection('Isles MCP 尚未就绪，请检查 Isles 服务与连接配置');
     if (typeof params.sessionId !== 'string' || !params.sessionId)
       throw new Error('缺少 sessionId');
+    if (typeof params.dangerFullAccess !== 'boolean') throw new Error('缺少 DSH 权限模式');
     const existing = sessions.get(params.sessionId);
     if (existing?.handle) {
       if (existing.cwd !== resolve(params.cwd))
         throw new Error('DSH 会话工作目录与 Agent 工作目录不一致');
+      existing.dangerFullAccess = params.dangerFullAccess;
+      setPermissions(existing, existing.agent);
       return sessionInfo(existing);
     }
     if (creations.has(params.sessionId)) return creations.get(params.sessionId);
@@ -478,6 +584,7 @@ export function apply(ctx, config = {}) {
       const rec = {
         id: params.sessionId,
         cwd: resolve(params.cwd),
+        dangerFullAccess: params.dangerFullAccess,
         selection,
         inputs: new Map(),
         streams: new Map(),
@@ -501,6 +608,7 @@ export function apply(ctx, config = {}) {
         rec.handle = await (resume
           ? ctx.agents.resume({ ...options, resumeSessionId: rec.id })
           : ctx.agents.create({ ...options, sessionId: rec.id, meta: { cwd: rec.cwd } }));
+        setPermissions(rec, rec.agent);
         return sessionInfo(rec);
       } catch (error) {
         sessions.delete(rec.id);
@@ -578,6 +686,7 @@ export function apply(ctx, config = {}) {
     if (!rec || rec.activeTurn === undefined || rec.activeTurn !== params.expectedTurnId)
       return rejection('目标执行已经结束');
     rec.interrupting = true;
+    expireInteractions(rec, rec.activeTurn);
     clearOwnPending(rec);
     rec.agent.cancel({ kind: 'user' }, { keepInbox: true });
     try {
@@ -591,6 +700,8 @@ export function apply(ctx, config = {}) {
     const question = questions.get(String(params.requestId));
     if (!question) return rejection('问题已经结束');
     if (params.sessionId !== question.rec.id) return rejection('问题不属于该 DSH 会话');
+    if (params.expectedTurnId !== question.turnId || question.rec.activeTurn !== question.turnId)
+      return rejection('问题所属执行已经结束');
     if (reject)
       question.finish(new UserQuestionError(params.reason ?? '用户取消了问题', 'ASK_ABORTED'));
     else {
@@ -619,12 +730,29 @@ export function apply(ctx, config = {}) {
     }
     return {};
   }
+  function answerPermission(params, reject) {
+    const pending = permissions.get(String(params.requestId));
+    if (!pending) return rejection('权限请求已经结束');
+    if (params.sessionId !== pending.rec.id) return rejection('权限请求不属于该 DSH 会话');
+    if (
+      params.expectedTurnId !== pending.turnId ||
+      pending.rec.activeTurn !== pending.turnId ||
+      pending.rec.interrupting ||
+      stopping ||
+      ctx.agents.get(pending.agent.id) !== pending.agent
+    )
+      return rejection('权限请求所属执行已经结束');
+    if (!reject && typeof params.allow !== 'boolean') return rejection('请选择允许本次或拒绝');
+    pending.finish(reject ? 'rejected' : params.allow ? 'allowed-once' : 'rejected');
+    return {};
+  }
   async function shutdown() {
     return (shutdownTask ??= (async () => {
       stopping = true;
       await Promise.allSettled([...creations.values()]);
       for (const question of [...questions.values()])
-        question.finish(new UserQuestionError('DSH 已关闭', 'ASK_ABORTED'));
+        question.finish(new UserQuestionError('DSH 已关闭', 'ASK_ABORTED'), undefined, true);
+      for (const pending of [...permissions.values()]) pending.finish('cancelled', true);
       for (const rec of sessions.values()) if (rec.agent) clearOwnPending(rec);
       await Promise.all([...sessions.values()].map((rec) => rec.handle?.dispose()));
       sessions.clear();
@@ -668,6 +796,10 @@ export function apply(ctx, config = {}) {
         return answerQuestion(params, false);
       case 'isles/question/reject':
         return answerQuestion(params, true);
+      case 'isles/permission/answer':
+        return answerPermission(params, false);
+      case 'isles/permission/reject':
+        return answerPermission(params, true);
       case 'shutdown': {
         const result = await shutdown();
         setImmediate(() => {

@@ -6,6 +6,7 @@ import type {
 } from '@isles/contracts';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
+import { relative } from 'node:path';
 import { z } from 'zod';
 import type { AgentRecord } from '../../storage/store.js';
 import {
@@ -27,6 +28,7 @@ import {
   type OpenCodeStream,
 } from './client.js';
 import type { OpenCodeEnvironment } from './environment.js';
+import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import {
   eventEnvelopeSchema,
   durableEventSchema,
@@ -36,12 +38,18 @@ import {
   modelRef,
   modelRefSchema,
   sessionResponseSchema,
+  sessionListSchema,
+  permissionRequestSchema,
+  permissionReplySchema,
+  permissionListSchema,
   contextResponseSchema,
   modelsResponseSchema,
   modelKey,
   type OpenCodeModelRef,
   type OpenCodeEvent,
   type OpenCodeForm,
+  type OpenCodePermissionRequest,
+  type OpenCodePermissionRule,
 } from './protocol.js';
 
 const connectedFrame = z.object({
@@ -49,7 +57,24 @@ const connectedFrame = z.object({
   id: z.string().startsWith('evt_'),
   data: z.object({}),
 });
-const permissions = [{ action: '*', resource: '*', effect: 'allow' }];
+function sessionPermissions(agent: AgentRecord, sharedDir: string): OpenCodePermissionRule[] {
+  if (agent.dangerFullAccess) return [{ action: '*', resource: '*', effect: 'allow' }];
+  const slash = (path: string) => path.replaceAll('\\', '/');
+  const sharedRelative = slash(relative(agent.workspace, sharedDir));
+  // Core uses Location-relative resources inside its project worktree, absolute ones outside.
+  // Keep shell, read and other actions on their native configured policy.
+  return [
+    { action: 'edit', resource: '*', effect: 'allow' },
+    { action: 'edit', resource: '../*', effect: 'ask' },
+    { action: 'edit', resource: '/*', effect: 'ask' },
+    { action: 'edit', resource: '?:/*', effect: 'ask' },
+    { action: 'edit', resource: `${slash(sharedDir)}/*`, effect: 'allow' },
+    ...(sharedRelative
+      ? [{ action: 'edit', resource: `${sharedRelative}/*`, effect: 'allow' as const }]
+      : []),
+    { action: 'external_directory', resource: `${slash(sharedDir)}/*`, effect: 'allow' },
+  ];
+}
 const inputRef = z.object({ sessionID: z.string(), inboxID: z.string() });
 const textData = z.object({
   assistantMessageID: z.string(),
@@ -116,6 +141,10 @@ interface Active {
   submitted: Set<string>;
   ended?: { status: 'completed' | 'failed' | 'interrupted'; error: string | null };
 }
+interface PendingPermission {
+  request: OpenCodePermissionRequest;
+  turnId?: string;
+}
 
 /** Maps one native execution interval to a platform turn, using durable log identities. */
 class OpenCodeSession implements HarnessSession {
@@ -129,6 +158,7 @@ class OpenCodeSession implements HarnessSession {
   private nativeSeq = -1;
   private forms = new Map<string, OpenCodeForm>();
   private publishedForms = new Set<string>();
+  private permissions = new Map<string, PendingPermission>();
   private ownedInputs = new Set<string>();
   private admissions = new Set<Promise<unknown>>();
   private toolNames = new Map<string, string>();
@@ -217,11 +247,12 @@ class OpenCodeSession implements HarnessSession {
         title: this.agent.name,
         location: { directory: this.agent.workspace },
         model: modelRef(this.agent.model, this.agent.reasoningEffort),
-        permissions,
+        permissions: sessionPermissions(this.agent, this.environment.workspace.sharedDir),
       }),
     ).data;
     if (session.id !== id) throw new Error('OpenCode 创建返回了不同 session');
     await this.bind(session);
+    await this.readPermissions(id);
     return id;
   }
   async resumeSession(id: string) {
@@ -235,10 +266,40 @@ class OpenCodeSession implements HarnessSession {
     if (inbox.data.length) throw new Error('OpenCode 原生会话有待处理输入，请先核对原生收件箱。');
     await this.native().request('PATCH', `/api/session/${id}`, {
       title: this.agent.name,
-      permissions,
+      permissions: sessionPermissions(this.agent, this.environment.workspace.sharedDir),
     });
     await this.bind(session);
+    await this.restoreChildren(id);
+    for (const descendant of this.descendants) await this.readPermissions(descendant);
     return id;
+  }
+  private async restoreChildren(parentID: string, visited = new Set<string>([parentID])) {
+    let cursor: string | undefined;
+    do {
+      const query = new URLSearchParams({ parentID });
+      if (cursor) query.set('cursor', cursor);
+      const page = sessionListSchema.parse(
+        await this.native().request('GET', `/api/session?${query}`),
+      );
+      for (const child of page.data) {
+        if (child.parentID !== parentID || visited.has(child.id)) continue;
+        visited.add(child.id);
+        if ((await realpath(child.location.directory)) !== (await realpath(this.agent.workspace)))
+          throw new Error('OpenCode 子 session 的工作目录与 Agent 不一致');
+        await this.native().request('PATCH', `/api/session/${child.id}`, {
+          permissions: sessionPermissions(this.agent, this.environment.workspace.sharedDir),
+        });
+        this.descendants.add(child.id);
+        await this.restoreChildren(child.id, visited);
+      }
+      cursor = page.cursor?.next;
+    } while (cursor);
+  }
+  private async readPermissions(sessionID: string) {
+    const { data } = permissionListSchema.parse(
+      await this.native().request('GET', `/api/session/${sessionID}/permission`),
+    );
+    for (const request of data) await this.receivePermission(request);
   }
   private async bind(session: z.infer<typeof sessionResponseSchema>['data']) {
     if ((await realpath(session.location.directory)) !== (await realpath(this.agent.workspace)))
@@ -452,6 +513,7 @@ class OpenCodeSession implements HarnessSession {
       active.turnId = event.id;
       this.handlers.event({ type: 'turn_started', sessionId: this.sessionId!, turnId: event.id });
       for (const form of this.forms.values()) this.question(form);
+      for (const pending of this.permissions.values()) this.permissionQuestion(pending);
       return;
     }
     if (event.type === 'session.inbox.delivered' || event.type === 'session.inbox.cancelled') {
@@ -479,6 +541,8 @@ class OpenCodeSession implements HarnessSession {
         'session.execution.interrupted',
       ].includes(event.type)
     ) {
+      void this.clearPermissions().catch((error: unknown) => this.fail(error as Error));
+      this.expireForms();
       active.ended = {
         status: event.type.endsWith('succeeded')
           ? 'completed'
@@ -494,8 +558,9 @@ class OpenCodeSession implements HarnessSession {
   }
   private finish(active: Active) {
     if (this.active !== active || !active.turnId || !active.ended || active.inputs.size) return;
+    void this.clearPermissions().catch((error: unknown) => this.fail(error as Error));
+    this.expireForms();
     this.active = undefined;
-    this.forms.clear();
     this.publishedForms.clear();
     this.toolNames.clear();
     this.handlers.event({
@@ -558,6 +623,20 @@ class OpenCodeSession implements HarnessSession {
   }
   private live(frame: unknown) {
     const event = eventEnvelopeSchema.parse(frame);
+    if (event.type === 'permission.asked') {
+      void this.receivePermission(permissionRequestSchema.parse(event.data)).catch(
+        (error: unknown) => this.fail(error as Error),
+      );
+      return;
+    }
+    if (event.type === 'permission.replied') {
+      const reply = permissionReplySchema.parse(event.data);
+      if (this.permissions.get(reply.requestID)?.request.sessionID === reply.sessionID) {
+        if (reply.reply === 'reject') this.expireSessionPermissions(reply.sessionID);
+        else this.expirePermission(reply.requestID);
+      }
+      return;
+    }
     if (
       event.type === 'session.created' &&
       typeof event.data.parentID === 'string' &&
@@ -603,8 +682,93 @@ class OpenCodeSession implements HarnessSession {
       event.data.sessionID !== this.sessionId &&
       typeof event.data.sessionID === 'string' &&
       this.descendants.has(event.data.sessionID)
-    )
+    ) {
+      if (
+        [
+          'session.execution.succeeded',
+          'session.execution.failed',
+          'session.execution.interrupted',
+        ].includes(event.type)
+      ) {
+        this.expireForms(event.data.sessionID);
+        void this.clearPermissions(event.data.sessionID).catch((error: unknown) =>
+          this.fail(error as Error),
+        );
+      }
       this.item(event);
+    }
+  }
+  private async receivePermission(request: OpenCodePermissionRequest) {
+    if (this.permissions.has(request.id)) return;
+    if (
+      !this.descendants.has(request.sessionID) ||
+      !this.active ||
+      this.active.ended ||
+      this.stopped ||
+      this.closing
+    ) {
+      await this.replyPermission(request, 'reject');
+      return;
+    }
+    const pending: PendingPermission = { request };
+    this.permissions.set(request.id, pending);
+    this.permissionQuestion(pending);
+  }
+  private permissionQuestion(pending: PendingPermission) {
+    if (!this.active?.turnId || pending.turnId) return;
+    pending.turnId = this.active.turnId;
+    const request = pending.request;
+    const text = this.environment.redactor.output(
+      [request.message, `OpenCode 请求执行 ${request.action}`, ...request.resources]
+        .filter(Boolean)
+        .join('\n'),
+    );
+    this.handlers.question({
+      sessionId: this.sessionId!,
+      turnId: pending.turnId,
+      requestId: request.id,
+      questions: permissionQuestions(text),
+    });
+  }
+  private expirePermission(id: string) {
+    const pending = this.permissions.get(id);
+    if (!pending) return;
+    this.permissions.delete(id);
+    if (pending.turnId)
+      this.handlers.event({
+        type: 'question_expired',
+        sessionId: this.sessionId!,
+        turnId: pending.turnId,
+        requestId: id,
+      });
+  }
+  private expireSessionPermissions(sessionID: string) {
+    for (const [id, pending] of this.permissions)
+      if (pending.request.sessionID === sessionID) this.expirePermission(id);
+  }
+  private async replyPermission(request: OpenCodePermissionRequest, decision: 'once' | 'reject') {
+    if (!this.client) return;
+    try {
+      await this.client.request(
+        'POST',
+        `/api/session/${request.sessionID}/permission/${request.id}/reply`,
+        {
+          decision,
+        },
+      );
+    } catch (error) {
+      // A native client or interruption may settle the request before our HTTP reply arrives.
+      if (!(error instanceof OpenCodeHttpError && error.status === 404)) throw error;
+    }
+  }
+  private async clearPermissions(sessionID?: string) {
+    const requests = new Map<string, OpenCodePermissionRequest>();
+    for (const [id, pending] of this.permissions) {
+      if (sessionID && pending.request.sessionID !== sessionID) continue;
+      requests.set(pending.request.sessionID, pending.request);
+      this.expirePermission(id);
+    }
+    for (const request of requests.values()) await this.replyPermission(request, 'reject');
   }
   private question(form: OpenCodeForm) {
     if (!this.active?.turnId || this.publishedForms.has(form.id)) return;
@@ -629,7 +793,31 @@ class OpenCodeSession implements HarnessSession {
       questions,
     });
   }
+  private expireForms(sessionID?: string) {
+    for (const [id, form] of this.forms) {
+      if (sessionID && form.sessionID !== sessionID) continue;
+      this.forms.delete(id);
+      if (this.publishedForms.delete(id) && this.active?.turnId)
+        this.handlers.event({
+          type: 'question_expired',
+          sessionId: this.sessionId!,
+          turnId: this.active.turnId,
+          requestId: id,
+        });
+    }
+  }
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
+    const pending = this.permissions.get(String(requestId));
+    if (pending) {
+      const decision = permissionAllowed(answer) ? 'once' : 'reject';
+      // Runtime records this answered question; only other released requests expire.
+      this.permissions.delete(pending.request.id);
+      if (decision === 'reject') this.expireSessionPermissions(pending.request.sessionID);
+      void this.replyPermission(pending.request, decision).catch((error: unknown) =>
+        this.fail(error as Error),
+      );
+      return;
+    }
     const form = this.forms.get(String(requestId));
     if (!form || !this.active?.turnId) return;
     const values: Record<string, string | string[]> = {};
@@ -647,6 +835,14 @@ class OpenCodeSession implements HarnessSession {
       .catch((error: unknown) => this.fail(error as Error));
   }
   rejectQuestion(requestId: HarnessRequestId, reason: string) {
+    const pending = this.permissions.get(String(requestId));
+    if (pending) {
+      this.expireSessionPermissions(pending.request.sessionID);
+      void this.replyPermission(pending.request, 'reject').catch((error: unknown) =>
+        this.fail(error as Error),
+      );
+      return;
+    }
     const form = this.forms.get(String(requestId));
     if (!form || this.closing) return;
     this.forms.delete(form.id);
@@ -660,6 +856,8 @@ class OpenCodeSession implements HarnessSession {
   async interrupt(sessionId: string, turnId: string) {
     if (sessionId !== this.sessionId || this.active?.turnId !== turnId) return;
     this.stopped = true;
+    this.expireForms();
+    await this.clearPermissions();
     await this.clearInputs();
     await this.native().request('POST', `/api/session/${sessionId}/interrupt?resume=false`);
   }
@@ -702,12 +900,14 @@ class OpenCodeSession implements HarnessSession {
     if (this.closing) return this.closing;
     this.closing = Promise.resolve().then(async () => {
       this.stopped = true;
+      this.expireForms();
       for (const input of this.active?.inputs.values() ?? []) {
         clearTimeout(input.timer);
         input.reject(new Error('OpenCode 连接已关闭'));
       }
       this.active?.inputs.clear();
       try {
+        await this.clearPermissions();
         await this.clearInputs();
       } catch (error) {
         this.environment.log.warn({ err: error }, 'OpenCode pending input cleanup failed');

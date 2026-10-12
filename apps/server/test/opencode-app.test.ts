@@ -59,6 +59,83 @@ async function fixture(injectAdapter = true) {
 }
 
 describe('OpenCode application integration', () => {
+  it('answers native permissions through Isles REST and expires replies made by another client', async () => {
+    const { app, native, create, send } = await fixture();
+    const agent = await create();
+    const sessionID = app.isles.store.publicAgent(agent.id).threadId!;
+    let inboxID = '';
+    native.onRequest = ({ path, body }) => {
+      if (!path.endsWith('/prompt')) return;
+      const receipt = inboxReceipt(sessionID, 'permissions', (body as { id: string }).id);
+      inboxID = receipt.data.id;
+      return receipt;
+    };
+    await send(agent, 'edit a reference file');
+    await vi.waitFor(() => expect(inboxID).not.toBe(''));
+    native.execution(sessionID);
+    native.deliver(sessionID, inboxID);
+    native.emit(
+      native.frame(sessionID, 'permission.asked', {
+        id: 'per_rest',
+        action: 'edit',
+        resources: ['/reference/document.txt'],
+      }),
+    );
+    await vi.waitFor(() => expect(app.isles.store.agentDetail(agent.id).questions).toHaveLength(1));
+    const question = app.isles.store.agentDetail(agent.id).questions[0]!;
+    const answer = { answers: { permission: { answers: ['允许本次'] } } };
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agent.id}/questions/${question.id}/answer`,
+      payload: answer,
+    });
+    expect(response.statusCode).toBe(200);
+    await vi.waitFor(() =>
+      expect(native.calls).toContainEqual({
+        method: 'POST',
+        path: `/api/session/${sessionID}/permission/per_rest/reply`,
+        body: { decision: 'once' },
+      }),
+    );
+    expect(app.isles.store.getQuestion(question.id).status).toBe('answered');
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/api/agents/${agent.id}/questions/${question.id}/answer`,
+          payload: answer,
+        })
+      ).statusCode,
+    ).toBe(409);
+    native.emit(
+      native.frame(sessionID, 'permission.asked', {
+        id: 'per_other_client',
+        action: 'shell',
+        resources: ['git push'],
+      }),
+    );
+    const external = app.isles.store
+      .agentDetail(agent.id)
+      .questions.find((value) => value.status === 'pending')!;
+    native.emit(
+      native.frame(sessionID, 'permission.replied', {
+        requestID: 'per_other_client',
+        reply: 'once',
+      }),
+    );
+    expect(app.isles.store.getQuestion(external.id).status).toBe('expired');
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/api/agents/${agent.id}/questions/${external.id}/answer`,
+          payload: answer,
+        })
+      ).statusCode,
+    ).toBe(409);
+    native.emit(native.frame(sessionID, 'session.execution.succeeded'));
+  });
+
   it('registers OpenCode in the default harness directory with native capabilities', async () => {
     const { app } = await fixture(false);
     const response = await app.inject('/api/harnesses');

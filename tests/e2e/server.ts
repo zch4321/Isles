@@ -148,8 +148,24 @@ harness.onTurn = (client) => {
     }
     client.complete();
   };
-  if (receiveDuringTurn || targets.some((t) => t.message.body === '请向我提问')) {
-    setTimeout(() => client.question(), 30);
+  const nativePermission = targets.some((t) => t.message.body === '请请求原生执行授权');
+  if (
+    receiveDuringTurn ||
+    nativePermission ||
+    targets.some((t) => t.message.body === '请向我提问')
+  ) {
+    setTimeout(() => {
+      if (nativePermission)
+        client.handlers.request(701, 'item/commandExecution/requestApproval', {
+          threadId: client.threadId,
+          turnId: client.turnId,
+          itemId: 'native-command',
+          command: 'write outside workspace',
+          cwd: client.agent.workspace,
+          reason: '原生执行请求授权',
+        });
+      else client.question();
+    }, 30);
     const respond = client.respond.bind(client);
     client.respond = (id, result) => {
       respond(id, result);

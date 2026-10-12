@@ -15,6 +15,7 @@ import {
 } from '../types.js';
 import type { Logger } from '../../logging.js';
 import type { AgentRecord } from '../../storage/store.js';
+import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import { ClaudeCatalog } from './catalog.js';
 import {
   ClaudeClient,
@@ -135,6 +136,7 @@ class ClaudeSession implements HarnessSession {
   private startupError: Error | undefined;
   private exitReported = false;
   private questions = new Map<string, PendingQuestion>();
+  private approvals = new Map<string, { input: ClaudeFrame; turnId: string }>();
   private toolRuns = new Map<string, string>();
   constructor(
     private agent: AgentRecord,
@@ -163,7 +165,11 @@ class ClaudeSession implements HarnessSession {
     const args = [
       resume ? `--resume=${sessionId}` : `--session-id=${sessionId}`,
       ...(this.agent.model === 'default' ? [] : ['--model', this.agent.model]),
-      '--dangerously-skip-permissions',
+      ...(this.agent.dangerFullAccess
+        ? ['--dangerously-skip-permissions']
+        : ['--permission-mode', 'acceptEdits']),
+      '--add-dir',
+      this.environment.workspace.sharedDir,
       '--permission-prompt-tool',
       'stdio',
       ...(this.agent.reasoningEffort === 'default' ? [] : ['--effort', this.agent.reasoningEffort]),
@@ -186,7 +192,7 @@ class ClaudeSession implements HarnessSession {
       {
         event: (frame) => this.event(frame),
         request: (id, request) => this.request(id, request),
-        cancel: (id) => this.questions.delete(id),
+        cancel: (id) => this.expireRequests(id),
         exit: (error) => this.exit(this.startupError ?? this.error(error)),
       },
       this.environment.log.child({ agentId: this.agent.id }),
@@ -386,10 +392,24 @@ class ClaudeSession implements HarnessSession {
   async interrupt(sessionId: string, turnId: string) {
     if (sessionId !== this.sessionId || this.active?.id !== turnId) return;
     this.active.interrupted = true;
+    this.expireRequests(undefined, true);
     await this.native().control('interrupt', { cancel_queued: true });
   }
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
     const key = String(requestId);
+    const approval = this.approvals.get(key);
+    if (approval) {
+      if (approval.turnId !== this.active?.id) throw new Error('Claude Code 原生权限请求已失效');
+      const allowed = permissionAllowed(answer);
+      this.approvals.delete(key);
+      this.native().respond(
+        key,
+        allowed
+          ? { behavior: 'allow', updatedInput: approval.input }
+          : { behavior: 'deny', message: '用户拒绝本次执行' },
+      );
+      return;
+    }
     const pending = this.questions.get(key);
     if (!pending || pending.turnId !== this.active?.id)
       throw new Error('Claude Code 原生问题已失效');
@@ -403,10 +423,12 @@ class ClaudeSession implements HarnessSession {
   rejectQuestion(requestId: HarnessRequestId, reason: string) {
     const key = String(requestId);
     this.questions.delete(key);
+    this.approvals.delete(key);
     if (!this.closed) this.native().respond(key, { behavior: 'deny', message: reason });
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
+    this.expireRequests(undefined, true);
     this.closed = true;
     this.active?.finish(new Error('Claude Code 连接已关闭'));
     this.questions.clear();
@@ -416,6 +438,7 @@ class ClaudeSession implements HarnessSession {
   private exit(error: Error) {
     if (this.exitReported) return;
     this.exitReported = true;
+    this.expireRequests();
     this.active?.finish(error);
     this.output.exit(error);
   }
@@ -437,7 +460,6 @@ class ClaudeSession implements HarnessSession {
     }
     if (
       request.subtype !== 'can_use_tool' ||
-      request.tool_name !== 'AskUserQuestion' ||
       !this.active ||
       this.active.bootstrap ||
       typeof request.tool_use_id !== 'string' ||
@@ -446,6 +468,38 @@ class ClaudeSession implements HarnessSession {
       this.native().respond(id, {
         behavior: 'deny',
         message: 'Isles cannot accept this native request in the current run',
+      });
+      return;
+    }
+    if (request.tool_name !== 'AskUserQuestion') {
+      if (request.requires_user_interaction === true) {
+        this.native().respond(id, {
+          behavior: 'deny',
+          message: '该原生请求需要专用交互，请在 Claude Code 会话中处理。',
+        });
+        return;
+      }
+      const input = object(request.input);
+      if (!input || typeof request.tool_name !== 'string') {
+        this.native().respond(id, { behavior: 'deny', message: '原生权限请求无效' });
+        return;
+      }
+      this.approvals.set(id, { input, turnId: this.active.id });
+      this.output.question({
+        sessionId: this.sessionId!,
+        turnId: this.active.id,
+        requestId: id,
+        questions: permissionQuestions(
+          this.environment.redactor.output(
+            [
+              request.tool_name,
+              typeof request.decision_reason === 'string' ? request.decision_reason : '',
+              JSON.stringify(input),
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          ),
+        ),
       });
       return;
     }
@@ -622,6 +676,7 @@ class ClaudeSession implements HarnessSession {
       [...active.steers.values()].some((batch) => !batch.accepted)
     )
       return;
+    this.expireRequests();
     this.active = undefined;
     active.finish(active.failure);
     this.questions.clear();
@@ -633,6 +688,21 @@ class ClaudeSession implements HarnessSession {
       status: active.interrupted ? 'interrupted' : active.failure ? 'failed' : 'completed',
       error: active.failure?.message ?? null,
     });
+  }
+  private expireRequests(id?: string, deny = false) {
+    for (const [key, pending] of [...this.questions, ...this.approvals]) {
+      if (id !== undefined && key !== id) continue;
+      this.questions.delete(key);
+      this.approvals.delete(key);
+      if (deny && this.client && !this.closed)
+        this.client.respond(key, { behavior: 'deny', message: '执行已结束' });
+      this.output.event({
+        type: 'question_expired',
+        sessionId: this.sessionId!,
+        turnId: pending.turnId,
+        requestId: key,
+      });
+    }
   }
   private item(item: RunItem) {
     if (!this.active || this.active.bootstrap) return;

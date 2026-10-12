@@ -23,6 +23,33 @@ export const sessionInfoSchema = z
   })
   .passthrough();
 export const sessionResponseSchema = z.object({ data: sessionInfoSchema });
+export const sessionListSchema = z.object({
+  data: z.array(sessionInfoSchema.extend({ parentID: z.string().optional() })),
+  cursor: z.object({ next: z.string().optional() }).optional(),
+});
+export const permissionRuleSchema = z.object({
+  action: z.string(),
+  resource: z.string(),
+  effect: z.enum(['allow', 'deny', 'ask']),
+});
+export type OpenCodePermissionRule = z.infer<typeof permissionRuleSchema>;
+export const permissionRequestSchema = z.object({
+  id: z.string().startsWith('per_'),
+  sessionID: z.string().startsWith('ses_'),
+  action: z.string(),
+  resources: z.array(z.string()),
+  save: z.array(z.string()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  source: z.object({ type: z.literal('tool'), messageID: z.string(), id: z.string() }).optional(),
+  message: z.string().optional(),
+});
+export type OpenCodePermissionRequest = z.infer<typeof permissionRequestSchema>;
+export const permissionListSchema = z.object({ data: z.array(permissionRequestSchema) });
+export const permissionReplySchema = z.object({
+  sessionID: z.string().startsWith('ses_'),
+  requestID: z.string().startsWith('per_'),
+  reply: z.enum(['once', 'always', 'reject']),
+});
 export const inboxItemSchema = z.object({
   id: z.string().startsWith('msg_'),
   sessionID: z.string().startsWith('ses_'),

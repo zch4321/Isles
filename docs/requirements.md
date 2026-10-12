@@ -26,7 +26,7 @@ Isles 是面向人类与多个 Agent 的聊天协作产品。用户像使用聊�
 - **以原生接口为主**。Codex 使用 app-server，Claude Code 使用本机 CLI 的双向 stream-json；2026-10-08 用户恢复并授权 Claude CLI 接入，创建时发送一条中性用户消息使 session 落盘。Kimi Code 于 2026-10-08 通过通用 ACP adapter 接入，2026-10-10 用户确认改为本地 `kimi web` 的 REST/WebSocket 接口，保留原 session、模型与共享登录，增加 steer 和原生子代理进度。2026-10-09 授权先集中适配器目录，再接 OpenCode 原生 v2 接口；同日用户完成 review 后授权 DeepSeek Harness（DSH），并确认使用原生桥接插件保留 steer、复用桌面登录。
 - Electron 桌面端和 IM 接入留待后续考虑，不纳入首版交付范围。
 - **首版采用单用户、单机部署**：Web 服务与所有 harness 在同一台电脑或服务器上运行，不要求跨机器调度执行。
-- M1 只监听本机，管理页面和 HTTP API 暂不做登录鉴权；Codex 使用 `danger-full-access` 与 `approvalPolicy: never`。远程访问与后续用户鉴权另行设计。
+- M1 只监听本机，管理页面和 HTTP API 暂不做登录鉴权；执行权限默认采用 harness 原生策略，个人与共享工作区按原生能力授权。每个 Agent 可开启完整访问。远程访问与后续用户鉴权另行设计。
 
 ### 1.2 首次发布前的数据政策
 
@@ -316,7 +316,9 @@ M1 采用忙碌时持久排队；2026-10-04 增加按 Agent 配置的 steer，�
 
 共享内容需要能够被消息准确引用。不可变版本、内容哈希、共享目录的写入规则和跨机器传输方式均为待设计事项。
 
-独立目录是文件归属约定。本轮不增加操作系统权限隔离或沙箱层，继续使用 `danger-full-access` 与 `approvalPolicy: never`。
+每个 Agent 的完整访问设置默认关闭。关闭时采用 harness 原生权限策略，为支持目录授权的 harness 提供个人与共享工作区；原生发出的执行授权请求复用 Isles 问答界面。开启时使用对应 harness 的完整访问模式。创建与恢复会话都会应用配置，执行期间修改在下一次执行时生效，保持原有会话和工作目录。
+
+Isles 只接入原生权限能力与请求，不为其他 harness 增加操作系统沙盒、工具路径解析或独立授权记录。DSH 的原生沙盒通过 Isles 桥接扩展可写目录，保留个人目录并允许 shared；文件工具与命令工具采用同一目录范围。OpenCode、Claude 与 Kimi 的 Shell、MCP、子代理及既存原生授权继续按各自规则处理；文件工具路径授权不等同于对任意 Shell 脚本写入的隔离。
 
 ## 8. Harness 与 MCP 接入
 

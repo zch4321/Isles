@@ -128,6 +128,7 @@ export class DshEnvironment {
       {
         id: 'isles-dsh-bridge',
         name: fileURLToPath(new URL('../../../resources/dsh-bridge.mjs', import.meta.url)),
+        config: { sharedDir: this.workspace.sharedDir },
       },
       {
         id: 'isles-user-question-tool',
@@ -153,11 +154,35 @@ export class DshEnvironment {
     const patch = join(dir, 'dsh-overlay.json');
     // JSON is a YAML subset: the native --patch loader owns composition. Only
     // Isles-owned files contain this overlay; the native home stays user-owned.
-    await writeFile(
-      patch,
-      JSON.stringify([{ id: 'sdk-jsonrpc-server', disabled: true }, { insert: inserted }]),
-      { mode: 0o600 },
-    );
+    const permissions = agent?.dangerFullAccess ? 'danger-full-access' : 'workspace-write';
+    const rows: Record<string, unknown>[] = [
+      { id: 'sdk-jsonrpc-server', disabled: true },
+      { id: 'sandbox-policy', config: { mode: permissions, workspaceRoot: cwd } },
+      { id: 'approval', config: { policy: agent?.dangerFullAccess ? 'never' : 'ask' } },
+      {
+        id: 'permission',
+        config: {
+          defaultPreset: permissions,
+          presets: {
+            'read-only': { sandbox: 'read-only', approval: 'ask' },
+            'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
+            'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
+          },
+        },
+      },
+      {
+        id: 'fs-sandbox',
+        name: fileURLToPath(new URL('../../../resources/dsh-fs-shared.mjs', import.meta.url)),
+        config: { cwd, sharedDir: this.workspace.sharedDir },
+      },
+      {
+        id: 'sandbox',
+        name: fileURLToPath(new URL('../../../resources/dsh-sandbox-shared.mjs', import.meta.url)),
+        config: { sharedDir: this.workspace.sharedDir },
+      },
+      { insert: inserted },
+    ];
+    await writeFile(patch, JSON.stringify(rows), { mode: 0o600 });
     return { args: ['--profile', 'sdk', '--patch', patch], env };
   }
 }

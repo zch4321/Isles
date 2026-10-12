@@ -2,6 +2,7 @@ import type { QuestionAnswer, RunItem } from '@isles/contracts';
 import { realpath } from 'node:fs/promises';
 import { z } from 'zod';
 import type { AgentRecord } from '../../storage/store.js';
+import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import {
   HarnessSubmissionRejected,
   type HarnessAdapter,
@@ -82,6 +83,7 @@ interface Tool {
 interface ApprovalForm {
   id: string;
   labels: string[];
+  permission?: boolean;
 }
 
 export class KimiWebAdapter implements HarnessAdapter {
@@ -199,6 +201,11 @@ class KimiWebSession implements HarnessSession {
       'POST',
       `/api/v1/workspaces/${encodeURIComponent(workspace.id)}/trust`,
     );
+    await this.native().request(
+      'POST',
+      `/api/v1/workspaces/${encodeURIComponent(workspace.id)}/add-dir`,
+      { path: this.environment.workspace.sharedDir, persist: false },
+    );
   }
   async createSession(onCreated: (sessionId: string) => void) {
     await this.trustWorkspace();
@@ -277,7 +284,7 @@ class KimiWebSession implements HarnessSession {
   }
   private configuration() {
     return {
-      permission_mode: 'yolo',
+      permission_mode: this.agent.dangerFullAccess ? 'yolo' : 'manual',
       ...(this.agent.model === 'default' ? {} : { model: this.agent.model }),
       ...(this.agent.reasoningEffort === 'default' ? {} : { thinking: this.agent.reasoningEffort }),
     };
@@ -703,12 +710,18 @@ class KimiWebSession implements HarnessSession {
         });
         return;
       }
-      // Isles grants tools full access. Interactive AskUserQuestion remains its own event family.
-      void this.native()
-        .request('POST', this.path(`approvals/${encodeURIComponent(approval.approval_id)}`), {
-          decision: 'approved',
-        })
-        .catch((error: unknown) => this.fail(this.error(error)));
+      const requestId = `approval:${approval.approval_id}`;
+      this.approvals.set(requestId, { id: approval.approval_id, labels: [], permission: true });
+      this.handlers.question({
+        sessionId: this.sessionId!,
+        turnId: active.id,
+        requestId,
+        questions: permissionQuestions(
+          this.environment.redactor.output(
+            [approval.tool_name, approval.action, kimiText(approval.tool_input_display)].join('\n'),
+          ),
+        ),
+      });
       return;
     }
     this.detail(active.id, agentId, phaseId, frame);
@@ -964,6 +977,17 @@ class KimiWebSession implements HarnessSession {
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
     const approval = this.approvals.get(String(requestId));
     if (approval) {
+      if (approval.permission) {
+        if (!this.active?.id) throw new Error('Kimi Code 原生权限请求已失效');
+        const allowed = permissionAllowed(answer);
+        this.approvals.delete(String(requestId));
+        void this.native()
+          .request('POST', this.path(`approvals/${encodeURIComponent(approval.id)}`), {
+            decision: allowed ? 'approved' : 'rejected',
+          })
+          .catch((error: unknown) => this.fail(this.error(error)));
+        return;
+      }
       const values = answer.answers.approval?.answers;
       if (values?.length !== 1) throw new Error('Kimi Code 计划请选择一个答案');
       const label = values[0]!;
@@ -979,6 +1003,7 @@ class KimiWebSession implements HarnessSession {
         .catch((error: unknown) => this.fail(this.error(error)));
       return;
     }
+    if (answer.answers.permission) throw new Error('Kimi Code 原生权限请求已失效');
     const question = this.questions.get(String(requestId));
     if (!question || !this.active?.id) throw new Error('Kimi Code 原生问题已失效');
     const answers: Record<string, unknown> = {};

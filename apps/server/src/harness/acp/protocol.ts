@@ -29,6 +29,7 @@ export const initializeResultSchema = z
             resume: z.object({}).passthrough().nullish(),
             close: z.object({}).passthrough().nullish(),
             delete: z.object({}).passthrough().nullish(),
+            additionalDirectories: z.object({}).passthrough().nullish(),
           })
           .passthrough()
           .optional(),
@@ -120,7 +121,13 @@ export const planSchema = z
 export const permissionRequestSchema = z
   .object({
     sessionId: z.string(),
-    toolCall: z.object({ toolCallId: z.string(), title: z.string().nullish() }).passthrough(),
+    toolCall: z
+      .object({
+        toolCallId: z.string(),
+        title: z.string().nullish(),
+        rawInput: z.unknown().optional(),
+      })
+      .passthrough(),
     options: z.array(z.object({ optionId: z.string(), kind: z.string() }).passthrough()),
   })
   .passthrough();

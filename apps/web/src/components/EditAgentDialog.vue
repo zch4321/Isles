@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { NativeSelect } from '@/components/ui/native-select';
 import { Switch } from '@/components/ui/switch';
+import ExecutionAccessSetting from './ExecutionAccessSetting.vue';
 
 const props = defineProps<{ agent: Agent }>();
 const open = defineModel<boolean>('open', { required: true });
@@ -34,6 +35,7 @@ const form = ref({
   reasoningEffort: '',
   canCreateGroups: false,
   steerEnabled: false,
+  dangerFullAccess: false,
 });
 const validationError = ref('');
 const current = computed(() =>
@@ -56,6 +58,8 @@ const changes = computed<UpdateAgent>(() => {
     result.canCreateGroups = form.value.canCreateGroups;
   if (form.value.steerEnabled !== props.agent.steerEnabled)
     result.steerEnabled = form.value.steerEnabled;
+  if (form.value.dangerFullAccess !== props.agent.dangerFullAccess)
+    result.dangerFullAccess = form.value.dangerFullAccess;
   return result;
 });
 const hasChanges = computed(() => Object.keys(changes.value).length > 0);
@@ -77,6 +81,7 @@ watch(
       reasoningEffort: props.agent.reasoningEffort,
       canCreateGroups: props.agent.canCreateGroups,
       steerEnabled: props.agent.steerEnabled,
+      dangerFullAccess: props.agent.dangerFullAccess,
     };
     validationError.value = '';
     save.reset();
@@ -196,6 +201,12 @@ function focusName(event: Event) {
         <p v-if="current?.description" class="-mt-1 text-xs leading-relaxed text-muted-foreground">
           {{ current.description }}
         </p>
+        <ExecutionAccessSetting
+          id="edit-agent-full-access"
+          v-model="form.dangerFullAccess"
+          class="rounded-md border px-3 py-2.5"
+          :disabled="save.isPending.value"
+        />
         <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
           <div class="min-w-0 flex-1">
             <p id="edit-agent-groups" class="text-[13px] font-medium">允许拉群</p>

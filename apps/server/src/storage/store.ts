@@ -35,7 +35,10 @@ import {
   steerBatches,
 } from './schema.js';
 
-export type AgentRecord = typeof agents.$inferSelect & { channelId: string };
+export type AgentRecord = typeof agents.$inferSelect & {
+  channelId: string;
+  dangerFullAccess: boolean;
+};
 export type ChannelRecord = typeof channels.$inferSelect;
 type AgentUpdate = Partial<
   Pick<
@@ -47,6 +50,7 @@ type AgentUpdate = Partial<
     | 'threadCreationAttempted'
     | 'canCreateGroups'
     | 'steerEnabled'
+    | 'dangerFullAccess'
     | 'name'
     | 'model'
     | 'reasoningEffort'
@@ -62,6 +66,7 @@ export interface NewAgent {
   reasoningEffort: string;
   canCreateGroups: boolean;
   steerEnabled?: boolean;
+  dangerFullAccess?: boolean;
   /** Native storage scope of the Agent's fixed session. */
   nativeHome: string;
 }
@@ -108,10 +113,30 @@ function deliveryRefs(refs: MessageRef[]) {
 
 export class Store {
   private emitter = new EventEmitter();
+  /** Native execution policy is Agent configuration, recorded by the existing event log. */
+  private executionAccess = new Map<string, boolean>();
   constructor(
     readonly database: IslesDatabase,
     private workspaceDir: string,
-  ) {}
+  ) {
+    for (const row of this.db
+      .select({ agentId: events.agentId, data: events.data })
+      .from(events)
+      .where(
+        and(
+          eq(events.type, 'agent'),
+          sql`json_type(${events.data}, '$.dangerFullAccess') in ('true', 'false')`,
+        ),
+      )
+      .orderBy(asc(events.id))
+      .all()) {
+      if (row.agentId)
+        this.executionAccess.set(
+          row.agentId,
+          (JSON.parse(row.data) as { dangerFullAccess: boolean }).dangerFullAccess,
+        );
+    }
+  }
   private get db() {
     return this.database.db;
   }
@@ -120,7 +145,15 @@ export class Store {
   private change<T>(fn: () => T): T {
     const cursor = this.cursor();
     const result = this.database.sqlite.transaction(fn)();
-    for (const event of this.eventsAfter(cursor)) this.emitter.emit('event', event);
+    const committed = this.eventsAfter(cursor);
+    for (const event of committed)
+      if (
+        event.type === 'agent' &&
+        event.agentId &&
+        typeof event.data.dangerFullAccess === 'boolean'
+      )
+        this.executionAccess.set(event.agentId, event.data.dangerFullAccess);
+    for (const event of committed) this.emitter.emit('event', event);
     return result;
   }
   private event(
@@ -166,7 +199,11 @@ export class Store {
     const agent = this.db.select().from(agents).where(eq(agents.id, id)).get();
     const channel = this.db.select().from(channels).where(eq(channels.agentId, id)).get();
     if (!agent || !channel) throw new HttpError(404, 'Agent 不存在');
-    return { ...agent, channelId: channel.id };
+    return {
+      ...agent,
+      channelId: channel.id,
+      dangerFullAccess: this.executionAccess.get(id) ?? false,
+    };
   }
   publicAgent(id: string): Agent {
     return agentSchema.parse(this.getAgent(id));
@@ -183,13 +220,14 @@ export class Store {
   createAgent(input: NewAgent): AgentRecord {
     const id = randomUUID();
     const channelId = randomUUID();
+    const { dangerFullAccess = false, ...record } = input;
     return this.change(() => {
       const root = join(this.workspaceDir, 'agents', id);
       this.db
         .insert(agents)
         .values({
           id,
-          ...input,
+          ...record,
           status: 'creating',
           workspace: join(root, 'workspace'),
           createdAt: now(),
@@ -211,17 +249,19 @@ export class Store {
         .insert(channelMembers)
         .values({ channelId, agentId: id, addedBy: USER, joinedAt: now() })
         .run();
-      this.event('agent', { agentId: id }, { status: 'creating' });
+      this.event('agent', { agentId: id }, { status: 'creating', dangerFullAccess });
       this.event('channel', { channelId }, { created: true });
-      return this.getAgent(id);
+      return { ...this.getAgent(id), dangerFullAccess };
     });
   }
   updateAgent(id: string, update: AgentUpdate) {
+    const record = { ...update };
+    delete record.dangerFullAccess;
     this.change(() => {
       if (this.getAgent(id).status === 'deleted') throw new HttpError(410, '该 Agent 已删除');
       this.db
         .update(agents)
-        .set({ ...update, updatedAt: now() })
+        .set({ ...record, updatedAt: now() })
         .where(eq(agents.id, id))
         .run();
       this.event('agent', { agentId: id }, update);

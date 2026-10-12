@@ -15,7 +15,9 @@ import type { AgentRecord } from '../../storage/store.js';
 import { NativeCatalog } from './catalog.js';
 import { StdioClient } from './client.js';
 import type { NativeEnvironment } from './environment.js';
+import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import {
+  approvalRequestSchema,
   inputRequestSchema,
   NativeRpcError,
   threadResponseSchema,
@@ -109,6 +111,18 @@ class CodexSession implements HarnessSession {
   private closing: Promise<void> | undefined;
   private submissions = new Map<string, { accepted: boolean }>();
   private pendingRejections: { id: HarnessRequestId; reason: string }[] = [];
+  private approvals = new Map<
+    HarnessRequestId,
+    {
+      method: string;
+      threadId: string;
+      turnId: string;
+      permissions?: z.infer<typeof approvalRequestSchema>['permissions'];
+    }
+  >();
+  private children = new Set<string>();
+  private mainTurnId: string | undefined;
+  private fileChanges = new Map<string, string>();
   readonly handlers: NativeHandlers;
   constructor(
     private agent: AgentRecord,
@@ -119,7 +133,10 @@ class CodexSession implements HarnessSession {
     this.handlers = {
       notification: (method, params) => this.notification(method, params),
       request: (id, method, params) => this.question(id, method, params),
-      exit: (error) => output.exit(new Error(environment.redactor.text(error))),
+      exit: (error) => {
+        this.expireApprovals();
+        output.exit(new Error(environment.redactor.text(error)));
+      },
     };
   }
   get connected() {
@@ -138,9 +155,17 @@ class CodexSession implements HarnessSession {
     return {
       model: this.agent.model,
       cwd: this.agent.workspace,
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
-      config: this.environment.threadConfig(this.agent, this.baseUrl),
+      approvalPolicy: this.agent.dangerFullAccess ? 'never' : 'on-request',
+      sandbox: this.agent.dangerFullAccess ? 'danger-full-access' : 'workspace-write',
+      config: {
+        ...this.environment.threadConfig(this.agent, this.baseUrl),
+        ...(!this.agent.dangerFullAccess
+          ? {
+              'sandbox_workspace_write.writable_roots': [this.environment.workspace.sharedDir],
+              'sandbox_workspace_write.network_access': true,
+            }
+          : {}),
+      },
     };
   }
   private verifyGuidance(response: unknown) {
@@ -197,10 +222,19 @@ class CodexSession implements HarnessSession {
           model: input.model,
           effort: input.reasoningEffort,
           cwd: input.workspace,
-          approvalPolicy: 'never',
-          sandboxPolicy: { type: 'dangerFullAccess' },
+          approvalPolicy: this.agent.dangerFullAccess ? 'never' : 'on-request',
+          sandboxPolicy: this.agent.dangerFullAccess
+            ? { type: 'dangerFullAccess' }
+            : {
+                type: 'workspaceWrite',
+                writableRoots: [this.agent.workspace, this.environment.workspace.sharedDir],
+                networkAccess: true,
+                excludeTmpdirEnvVar: false,
+                excludeSlashTmp: false,
+              },
         }),
       );
+      this.mainTurnId = response.turn.id;
       return { turnId: response.turn.id };
     } catch (error) {
       if (error instanceof NativeRpcError && !submission.accepted)
@@ -212,6 +246,7 @@ class CodexSession implements HarnessSession {
     }
   }
   async interrupt(sessionId: string, turnId: string) {
+    this.expireApprovals(undefined, true);
     await this.native().request('turn/interrupt', { threadId: sessionId, turnId });
   }
   async steer(input: HarnessSteerInput) {
@@ -238,13 +273,28 @@ class CodexSession implements HarnessSession {
     }
   }
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
+    const approval = this.approvals.get(requestId);
+    if (approval) {
+      const allowed = permissionAllowed(answer);
+      this.approvals.delete(requestId);
+      this.native().respond(requestId, this.approvalResponse(approval, allowed));
+      return;
+    }
+    if (answer.answers.permission) throw new Error('Codex 原生权限请求已失效');
     this.native().respond(requestId, answer);
   }
   rejectQuestion(requestId: HarnessRequestId, reason: string) {
+    const approval = this.approvals.get(requestId);
+    if (approval) {
+      this.approvals.delete(requestId);
+      this.native().respond(requestId, this.approvalResponse(approval, false));
+      return;
+    }
     if (this.client) this.client.reject(requestId, reason);
     else this.pendingRejections.push({ id: requestId, reason });
   }
   async close() {
+    this.expireApprovals(undefined, true);
     this.closing ??= this.client?.close() ?? Promise.resolve();
     await this.closing;
   }
@@ -253,6 +303,23 @@ class CodexSession implements HarnessSession {
     if (submission) submission.accepted = true;
   }
   private notification(method: string, params: Record<string, unknown>) {
+    if (method === 'thread/started') {
+      const thread = z
+        .object({ id: z.string(), parentThreadId: z.string().nullish() })
+        .safeParse(params.thread);
+      if (
+        thread.success &&
+        (thread.data.parentThreadId === this.sessionId ||
+          (thread.data.parentThreadId && this.children.has(thread.data.parentThreadId)))
+      )
+        this.children.add(thread.data.id);
+      return;
+    }
+    if (method === 'serverRequest/resolved') {
+      if (typeof params.requestId === 'string' || typeof params.requestId === 'number')
+        this.expireApprovals(undefined, false, params.requestId);
+      return;
+    }
     if (method === 'thread/tokenUsage/updated') {
       const parsed = tokenUsageNotificationSchema.safeParse(params);
       if (!parsed.success || parsed.data.threadId !== this.sessionId) return;
@@ -268,6 +335,13 @@ class CodexSession implements HarnessSession {
       const parsed = turnNotificationSchema.safeParse(params);
       if (!parsed.success) return;
       const { threadId: sessionId, turn } = parsed.data;
+      if (sessionId === this.sessionId && method === 'turn/started') this.mainTurnId = turn.id;
+      if (method === 'turn/completed') {
+        if (sessionId === this.sessionId) {
+          this.expireApprovals();
+          this.fileChanges.clear();
+        } else this.expireApprovals(sessionId, false, undefined, turn.id);
+      }
       this.accepted(sessionId);
       this.output.event(
         method === 'turn/started'
@@ -311,6 +385,8 @@ class CodexSession implements HarnessSession {
         .safeParse(params.item);
       if (!parsed.success) return;
       const item = parsed.data;
+      if (item.type === 'fileChange' && Array.isArray(item.changes))
+        this.fileChanges.set(`${sessionId}:${item.id}`, JSON.stringify(item.changes));
       if (method === 'item/started' && (item.type === 'agentMessage' || item.type === 'reasoning'))
         return;
       const detail: string[] = [];
@@ -341,6 +417,53 @@ class CodexSession implements HarnessSession {
     }
   }
   private question(id: HarnessRequestId, method: string, params: Record<string, unknown>) {
+    if (
+      [
+        'item/commandExecution/requestApproval',
+        'item/fileChange/requestApproval',
+        'item/permissions/requestApproval',
+      ].includes(method)
+    ) {
+      const parsed = approvalRequestSchema.safeParse(params);
+      if (
+        !parsed.success ||
+        (parsed.data.threadId !== this.sessionId && !this.children.has(parsed.data.threadId)) ||
+        (method === 'item/permissions/requestApproval' && !parsed.data.permissions)
+      ) {
+        this.native().respond(
+          id,
+          method === 'item/permissions/requestApproval'
+            ? { permissions: {}, scope: 'turn' }
+            : { decision: 'decline' },
+        );
+        return;
+      }
+      const request = parsed.data;
+      this.approvals.set(id, { method, ...request });
+      this.accepted(request.threadId);
+      this.output.question({
+        requestId: id,
+        sessionId: request.threadId,
+        turnId: request.turnId,
+        questions: permissionQuestions(
+          this.environment.redactor.output(
+            [
+              request.command ??
+                (method === 'item/fileChange/requestApproval' ? '文件修改' : '扩展执行权限'),
+              request.reason,
+              request.cwd,
+              request.grantRoot,
+              request.permissions ? JSON.stringify(request.permissions) : '',
+              request.additionalPermissions ? JSON.stringify(request.additionalPermissions) : '',
+              this.fileChanges.get(`${request.threadId}:${request.itemId}`),
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          ),
+        ),
+      });
+      return;
+    }
     const parsed = inputRequestSchema.safeParse(params);
     if (method !== 'item/tool/requestUserInput' || !parsed.success) {
       this.rejectQuestion(id, 'Isles does not support this native request');
@@ -364,5 +487,49 @@ class CodexSession implements HarnessSession {
           })) ?? null,
       })),
     });
+  }
+  private approvalResponse(
+    approval: {
+      method: string;
+      permissions?: z.infer<typeof approvalRequestSchema>['permissions'];
+    },
+    allowed: boolean,
+  ) {
+    if (approval.method !== 'item/permissions/requestApproval')
+      return { decision: allowed ? 'accept' : 'decline' };
+    return {
+      permissions: allowed
+        ? {
+            ...(approval.permissions?.network ? { network: approval.permissions.network } : {}),
+            ...(approval.permissions?.fileSystem
+              ? { fileSystem: approval.permissions.fileSystem }
+              : {}),
+          }
+        : {},
+      scope: 'turn',
+    };
+  }
+  private expireApprovals(
+    threadId?: string,
+    deny = false,
+    requestId?: HarnessRequestId,
+    turnId?: string,
+  ) {
+    for (const [id, approval] of this.approvals) {
+      if (
+        (threadId && approval.threadId !== threadId) ||
+        (turnId && approval.turnId !== turnId) ||
+        (requestId !== undefined && id !== requestId)
+      )
+        continue;
+      this.approvals.delete(id);
+      if (deny && this.client) this.client.respond(id, this.approvalResponse(approval, false));
+      this.output.event({
+        type: 'question_expired',
+        sessionId: this.sessionId!,
+        turnId: this.mainTurnId ?? approval.turnId,
+        requestId: id,
+      });
+    }
   }
 }

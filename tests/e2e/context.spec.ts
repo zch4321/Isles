@@ -19,6 +19,7 @@ async function contextFixture(page: Page) {
       threadId: 'session-before',
       canCreateGroups: false,
       steerEnabled: false,
+      dangerFullAccess: false,
       desiredState: 'running',
       status: 'ready',
       error: null,

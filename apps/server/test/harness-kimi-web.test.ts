@@ -45,6 +45,7 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
     threadId: null,
     threadCreationAttempted: false,
     canCreateGroups: false,
+    dangerFullAccess: false,
     steerEnabled: true,
     desiredState: 'running',
     status: 'creating',
@@ -125,6 +126,93 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
 }
 
 describe('Kimi Code local Web adapter', () => {
+  it('expires a native tool approval resolved elsewhere without sending a second reply', async () => {
+    const f = await fixture();
+    await f.cli.set({ manualOutput: true, holdTurn: true });
+    const { session, id } = await f.created();
+    const { turnId } = await session.submit(f.input('permission', id));
+    await f.cli.emit(id, 'event.approval.requested', {
+      turnId: Number(turnId),
+      approval_id: 'external-tool',
+      tool_name: 'Bash',
+      action: 'Run fixture',
+      tool_input_display: { kind: 'command', command: 'echo fixture' },
+    });
+    await vi.waitFor(() => expect(f.questions).toHaveLength(1));
+    await f.cli.emit(id, 'event.approval.resolved', {
+      turnId: Number(turnId),
+      approval_id: 'external-tool',
+      decision: 'rejected',
+    });
+    await vi.waitFor(() =>
+      expect(f.events).toContainEqual({
+        type: 'question_expired',
+        sessionId: id,
+        turnId,
+        requestId: 'approval:external-tool',
+      }),
+    );
+    expect(() =>
+      session.answer('approval:external-tool', {
+        answers: { permission: { answers: ['允许本次'] } },
+      }),
+    ).toThrow('已失效');
+    expect(await f.requests('/approvals/external-tool')).toHaveLength(0);
+  });
+  it('registers shared context without persistence before cold snapshot and restores manual after full access', async () => {
+    const f = await fixture({ dangerFullAccess: true });
+    const first = await f.created();
+    expect((await f.requests('/profile')).at(-1)?.body).toMatchObject({
+      agent_config: { permission_mode: 'yolo' },
+    });
+    await first.session.close();
+    f.agent.dangerFullAccess = false;
+    const restored = await f.connect();
+    await restored.resumeSession(first.id);
+    expect((await f.requests('/profile')).at(-1)?.body).toMatchObject({
+      agent_config: { permission_mode: 'manual' },
+    });
+    const records = await f.cli.records();
+    const adds = records.filter((record) => record.path?.endsWith('/add-dir'));
+    expect(adds).toHaveLength(2);
+    expect(adds[0]?.body).toEqual({ path: f.workspace.sharedDir, persist: false });
+    expect(records.indexOf(adds[0]!)).toBeLessThan(
+      records.findIndex((record) => record.path?.endsWith('/snapshot')),
+    );
+  });
+
+  it.each(['允许本次', '拒绝'])(
+    'forwards native tool approval %s without adding session rules',
+    async (decision) => {
+      const f = await fixture();
+      await f.cli.set({ manualOutput: true, holdTurn: true });
+      const { session, id } = await f.created();
+      const { turnId } = await session.submit(f.input('permission', id));
+      await f.cli.emit(id, 'event.approval.requested', {
+        turnId: Number(turnId),
+        approval_id: 'native-tool',
+        tool_name: 'Bash',
+        action: 'Run fixture',
+        tool_input_display: { kind: 'command', command: 'echo fixture' },
+      });
+      await vi.waitFor(() => expect(f.questions).toHaveLength(1));
+      expect(await f.requests('/approvals/native-tool')).toHaveLength(0);
+      session.answer(f.questions[0]!.requestId, {
+        answers: { permission: { answers: [decision] } },
+      });
+      await vi.waitFor(async () =>
+        expect((await f.requests('/approvals/native-tool'))[0]?.body).toEqual({
+          decision: decision === '允许本次' ? 'approved' : 'rejected',
+        }),
+      );
+      expect(() =>
+        session.answer(f.questions[0]!.requestId, {
+          answers: { permission: { answers: ['允许本次'] } },
+        }),
+      ).toThrow('已失效');
+    },
+  );
+
   it('reads thinking metadata and auth without creating a native session or changing global settings', async () => {
     const f = await fixture();
     const nativeConfig = 'default_model = "kimi-code/k3"\n';
@@ -194,7 +282,9 @@ describe('Kimi Code local Web adapter', () => {
       body: { metadata: { cwd: f.agent.workspace } },
     });
     expect((await f.requests('/profile'))[0]).toMatchObject({
-      body: { agent_config: { model: 'kimi-code/k3', thinking: 'high', permission_mode: 'yolo' } },
+      body: {
+        agent_config: { model: 'kimi-code/k3', thinking: 'high', permission_mode: 'manual' },
+      },
     });
     expect(JSON.parse(await readFile(join(dir, 'mcp.json'), 'utf8'))).toEqual({
       label: 'personal',
@@ -227,7 +317,7 @@ describe('Kimi Code local Web adapter', () => {
     const defaults = await fixture({ model: 'default', reasoningEffort: 'default' });
     await defaults.created();
     expect((await defaults.requests('/profile'))[0]!.body).toEqual({
-      agent_config: { permission_mode: 'yolo' },
+      agent_config: { permission_mode: 'manual' },
     });
   });
 
@@ -340,7 +430,7 @@ describe('Kimi Code local Web adapter', () => {
         content: [{ type: 'text', text: 'waiting' }],
         model: input.model,
         thinking: input.reasoningEffort,
-        permission_mode: 'yolo',
+        permission_mode: 'manual',
       },
     });
     expect(accepted).toBe(false);

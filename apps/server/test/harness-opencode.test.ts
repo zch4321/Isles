@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenCodeAdapter } from '../src/harness/opencode/adapter.js';
 import { OpenCodeHttpError, readSse } from '../src/harness/opencode/client.js';
 import { OpenCodeEnvironment } from '../src/harness/opencode/environment.js';
+import type { OpenCodePermissionRule } from '../src/harness/opencode/protocol.js';
 import {
   HarnessSubmissionRejected,
   type HarnessEvent,
@@ -43,6 +44,7 @@ async function fixture() {
     threadCreationAttempted: false,
     canCreateGroups: false,
     steerEnabled: false,
+    dangerFullAccess: false,
     desiredState: 'running',
     status: 'creating',
     error: null,
@@ -122,6 +124,313 @@ describe('OpenCode native SSE', () => {
 });
 
 describe('OpenCode v2 adapter', () => {
+  async function runningFixture() {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    f.native.onRequest = ({ path, body }) => {
+      if (!path.endsWith('/prompt')) return;
+      const receipt = inboxReceipt(id, 'permission', (body as { id: string }).id);
+      f.native.execution(id);
+      f.native.deliver(id, receipt.data.id);
+      return receipt;
+    };
+    const { turnId } = await session.submit(f.input(id));
+    return { ...f, session, id, turnId };
+  }
+  function ask(f: Awaited<ReturnType<typeof runningFixture>>, requestID: string, sessionID = f.id) {
+    f.native.emit(
+      f.native.frame(sessionID, 'permission.asked', {
+        id: requestID,
+        action: 'edit',
+        resources: ['/external/document.txt'],
+        save: ['*'],
+        source: { type: 'tool', messageID: 'message', id: 'write' },
+      }),
+    );
+  }
+  function decide(allowed: boolean) {
+    return { answers: { permission: { answers: [allowed ? '允许本次' : '拒绝'] } } };
+  }
+  it('allows own and shared file tools, asks about other paths and preserves native non-edit policies', async () => {
+    const f = await fixture();
+    f.agent.workspace = join(f.root, 'workspace', 'agents', f.agent.id, 'workspace');
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const rules = f.native.sessions.get(id)!.permissions as OpenCodePermissionRule[];
+    // OpenCode v2 wildcard evaluation: last whole-resource match wins, '*' includes '/'.
+    const match = (value: string, pattern: string) =>
+      new RegExp(
+        `^${pattern
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+          .replaceAll('*', '.*')
+          .replaceAll('?', '.')}$`,
+      ).test(value);
+    const effect = (action: string, resource: string) =>
+      rules.findLast((rule) => match(action, rule.action) && match(resource, rule.resource))
+        ?.effect;
+    expect(effect('edit', 'notes/draft.txt')).toBe('allow');
+    expect(effect('edit', '../../agents/other/file.txt')).toBe('ask');
+    expect(effect('edit', '/external/document.txt')).toBe('ask');
+    expect(effect('edit', 'C:/external/document.txt')).toBe('ask');
+    expect(effect('edit', join(f.config.current.sharedDir, 'report.txt'))).toBe('allow');
+    expect(
+      effect('edit', join(relative(f.agent.workspace, f.config.current.sharedDir), 'report.txt')),
+    ).toBe('allow');
+    expect(effect('external_directory', `${f.config.current.sharedDir}/*`)).toBe('allow');
+    expect(effect('shell', 'python script.py')).toBeUndefined();
+    expect(effect('read', '/reference/readme.txt')).toBeUndefined();
+    expect(effect('external_directory', '/other/*')).toBeUndefined();
+  });
+  it('sets full access only for the configured Agent session', async () => {
+    const f = await fixture();
+    f.agent.dangerFullAccess = true;
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    expect(f.native.sessions.get(id)!.permissions).toEqual([
+      { action: '*', resource: '*', effect: 'allow' },
+    ]);
+    expect(JSON.parse(f.native.env.OPENCODE_CONFIG_CONTENT!).permissions).toBeUndefined();
+  });
+  it('approves a native child permission once, then refuses duplicate answers', async () => {
+    const f = await runningFixture();
+    const child = 'ses_permission_child';
+    f.native.emit(f.native.frame(child, 'session.created', { parentID: f.id }));
+    ask(f, 'per_child', child);
+    expect(f.questions).toMatchObject([
+      {
+        sessionId: f.id,
+        turnId: f.turnId,
+        requestId: 'per_child',
+        questions: [{ id: 'permission', options: [{ label: '允许本次' }, { label: '拒绝' }] }],
+      },
+    ]);
+    f.session.answer('per_child', decide(true));
+    f.session.answer('per_child', decide(true));
+    await vi.waitFor(() =>
+      expect(f.native.calls).toContainEqual({
+        method: 'POST',
+        path: `/api/session/${child}/permission/per_child/reply`,
+        body: { decision: 'once' },
+      }),
+    );
+    expect(
+      f.native.calls.filter((call) => call.path.endsWith('/permission/per_child/reply')),
+    ).toHaveLength(1);
+    expect(f.events).not.toContainEqual({
+      type: 'question_expired',
+      sessionId: f.id,
+      turnId: f.turnId,
+      requestId: 'per_child',
+    });
+  });
+  it('rejects all pending permissions in the same native session without granting a child request', async () => {
+    const f = await runningFixture();
+    const child = 'ses_permission_child';
+    f.native.emit(f.native.frame(child, 'session.created', { parentID: f.id }));
+    ask(f, 'per_first');
+    ask(f, 'per_second');
+    ask(f, 'per_child', child);
+    f.session.answer('per_first', decide(false));
+    f.session.answer('per_second', decide(true));
+    await vi.waitFor(() =>
+      expect(f.native.calls).toContainEqual({
+        method: 'POST',
+        path: `/api/session/${f.id}/permission/per_first/reply`,
+        body: { decision: 'reject' },
+      }),
+    );
+    expect(
+      f.native.calls.filter((call) => call.path.includes('/permission/per_second/reply')),
+    ).toEqual([]);
+    expect(
+      f.events.filter((event) => event.type === 'question_expired').map((event) => event.requestId),
+    ).toEqual(['per_second']);
+    expect(f.native.permissions.has('per_child')).toBe(true);
+  });
+  it('expires permissions settled by another native client and ignores a late Isles answer', async () => {
+    const f = await runningFixture();
+    ask(f, 'per_external');
+    f.native.emit(
+      f.native.frame(f.id, 'permission.replied', { requestID: 'per_external', reply: 'once' }),
+    );
+    f.session.answer('per_external', decide(true));
+    expect(
+      f.native.calls.filter((call) => call.path.includes('/permission/per_external/reply')),
+    ).toEqual([]);
+    expect(f.events).toContainEqual({
+      type: 'question_expired',
+      sessionId: f.id,
+      turnId: f.turnId,
+      requestId: 'per_external',
+    });
+  });
+  it('expires native rejected siblings and permissions owned by an ended child only', async () => {
+    const f = await runningFixture();
+    const child = 'ses_permission_child';
+    f.native.emit(f.native.frame(child, 'session.created', { parentID: f.id }));
+    ask(f, 'per_first');
+    ask(f, 'per_second');
+    ask(f, 'per_child', child);
+    f.native.emit(
+      f.native.frame(child, 'form.created', {
+        form: {
+          id: 'frm_child_pending',
+          sessionID: child,
+          title: 'Child question',
+          fields: [{ key: 'text', type: 'string', title: 'Next step' }],
+        },
+      }),
+    );
+    f.native.emit(
+      f.native.frame(f.id, 'permission.replied', { requestID: 'per_first', reply: 'reject' }),
+    );
+    f.session.answer('per_second', decide(true));
+    expect(
+      f.native.calls.filter((call) => call.path.includes('/permission/per_second/reply')),
+    ).toEqual([]);
+    f.native.emit(f.native.frame(child, 'session.execution.interrupted'));
+    await vi.waitFor(() =>
+      expect(f.native.calls).toContainEqual({
+        method: 'POST',
+        path: `/api/session/${child}/permission/per_child/reply`,
+        body: { decision: 'reject' },
+      }),
+    );
+    expect(
+      f.events.filter((event) => event.type === 'question_expired').map((event) => event.requestId),
+    ).toEqual(['per_first', 'per_second', 'frm_child_pending', 'per_child']);
+    f.session.answer('frm_child_pending', { answers: { text: { answers: ['late'] } } });
+    expect(
+      f.native.calls.filter((call) => call.path.endsWith('/form/frm_child_pending/reply')),
+    ).toEqual([]);
+    expect(f.events.some((event) => event.type === 'turn_completed')).toBe(false);
+  });
+  it('publishes an early permission once after execution starts and rejects dismissal', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    f.native.onRequest = ({ path, body }) => {
+      if (!path.endsWith('/prompt')) return;
+      f.native.emit(
+        f.native.frame(id, 'permission.asked', {
+          id: 'per_early',
+          action: 'shell',
+          resources: ['git push'],
+        }),
+      );
+      expect(f.questions).toEqual([]);
+      f.native.execution(id);
+      f.native.emit(
+        f.native.frame(id, 'permission.asked', {
+          id: 'per_early',
+          action: 'shell',
+          resources: ['git push'],
+        }),
+      );
+      const receipt = inboxReceipt(id, 'early', (body as { id: string }).id);
+      f.native.deliver(id, receipt.data.id);
+      return receipt;
+    };
+    await session.submit(f.input(id));
+    expect(f.questions).toHaveLength(1);
+    expect(() =>
+      session.answer('per_early', { answers: { permission: { answers: ['always'] } } }),
+    ).toThrow('请选择');
+    session.rejectQuestion('per_early', 'dismissed');
+    await vi.waitFor(() =>
+      expect(f.native.calls).toContainEqual({
+        method: 'POST',
+        path: `/api/session/${id}/permission/per_early/reply`,
+        body: { decision: 'reject' },
+      }),
+    );
+  });
+  it.each(['finish', 'interrupt', 'close'] as const)(
+    'rejects and expires pending permissions on %s',
+    async (operation) => {
+      const f = await runningFixture();
+      ask(f, 'per_cleanup');
+      if (operation === 'finish')
+        f.native.emit(f.native.frame(f.id, 'session.execution.succeeded'));
+      if (operation === 'interrupt') await f.session.interrupt(f.id, f.turnId);
+      if (operation === 'close') await f.session.close();
+      await vi.waitFor(() =>
+        expect(f.native.calls).toContainEqual({
+          method: 'POST',
+          path: `/api/session/${f.id}/permission/per_cleanup/reply`,
+          body: { decision: 'reject' },
+        }),
+      );
+      expect(f.events).toContainEqual({
+        type: 'question_expired',
+        sessionId: f.id,
+        turnId: f.turnId,
+        requestId: 'per_cleanup',
+      });
+      f.session.answer('per_cleanup', decide(true));
+      expect(
+        f.native.calls.filter((call) => call.path.endsWith('/permission/per_cleanup/reply')),
+      ).toHaveLength(1);
+    },
+  );
+  it('rejects unknown-session permissions and permissions outside an active turn', async () => {
+    const f = await runningFixture();
+    ask(f, 'per_unknown', 'ses_unowned');
+    f.native.emit(f.native.frame(f.id, 'session.execution.succeeded'));
+    ask(f, 'per_idle');
+    await vi.waitFor(() =>
+      expect(
+        f.native.calls.filter(
+          (call) => call.path.includes('/permission/') && call.path.endsWith('/reply'),
+        ),
+      ).toHaveLength(2),
+    );
+    expect(f.questions).toEqual([]);
+    expect(f.native.permissions.size).toBe(0);
+  });
+  it('updates existing descendants on resume, follows pagination and rejects recovered pending permissions', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const info = f.native.sessions.get(id)!;
+    const child = {
+      ...info,
+      id: 'ses_child_existing',
+      parentID: id,
+      permissions: [{ action: '*', resource: '*', effect: 'allow' }],
+    };
+    const next = { ...child, id: 'ses_child_next' };
+    const grandchild = { ...child, id: 'ses_grandchild', parentID: child.id };
+    for (const value of [child, next, grandchild]) f.native.sessions.set(value.id, value);
+    f.native.permissions.set('per_recovered', {
+      id: 'per_recovered',
+      sessionID: grandchild.id,
+      action: 'shell',
+      resources: ['git push'],
+    });
+    f.native.onRequest = ({ method, path }) => {
+      if (method !== 'GET' || !path.startsWith('/api/session?')) return;
+      const query = new URLSearchParams(path.split('?')[1]);
+      if (query.get('parentID') !== id) return;
+      return query.has('cursor')
+        ? { data: [next], cursor: {} }
+        : { data: [child], cursor: { next: 'page2' } };
+    };
+    await session.resumeSession(id);
+    for (const value of [child, next, grandchild]) {
+      expect(f.native.sessions.get(value.id)!.permissions).toEqual(
+        f.native.sessions.get(id)!.permissions,
+      );
+    }
+    expect(f.native.calls).toContainEqual({
+      method: 'POST',
+      path: `/api/session/${grandchild.id}/permission/per_recovered/reply`,
+      body: { decision: 'reject' },
+    });
+    expect(f.questions).toEqual([]);
+  });
+
   it('ignores output fragments without context reads and publishes ended snapshots and tool boundaries', async () => {
     const f = await fixture();
     const session = await f.connect();

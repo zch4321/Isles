@@ -16,6 +16,9 @@ export async function prepareGuidance(agent: AgentRecord, sharedDir: string) {
     AGENT_NAME: quote(agent.name),
     WORKSPACE: quote(agent.workspace),
     SHARED_DIR: quote(sharedDir),
+    EXECUTION_ACCESS: agent.dangerFullAccess
+      ? 'Native execution uses full access.'
+      : "Native execution uses the harness's native permissions. The personal and shared workspace directories are supplied to the harness. Follow its native permission prompts for operations that require approval.",
   };
   const content = template.replace(/\{\{([A-Z_]+)\}\}/g, (_match, key: string) => {
     if (values[key] === undefined) throw new Error(`Unknown guidance placeholder: ${key}`);

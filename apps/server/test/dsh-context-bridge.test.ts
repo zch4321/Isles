@@ -24,6 +24,7 @@ async function bridgeFixture() {
     }
     start() {}
     close() {}
+    async flush() {}
   }
   // Replace the carrier package loader; execute the unchanged native plugin body.
   // The meter is the native service boundary, not Isles' reconstruction of usage.
@@ -58,7 +59,15 @@ async function bridgeFixture() {
   );
   const listeners = new Map<string, (...args: unknown[]) => void>();
   const session = { id: 'root-session', header: { cwd: root }, snapshotEvents: () => [] };
-  const agent = { id: 'root-agent', session, inbox: { nextStep: [], nextTurn: [] } };
+  const agent = {
+    id: 'root-agent',
+    session,
+    inbox: { nextStep: [], nextTurn: [] },
+    cancel: vi.fn(),
+    whenIdle: vi.fn(async () => {}),
+  };
+  const children = new Map<typeof agent, typeof agent>();
+  const setPermissions = vi.fn();
   let measured = { totalTokens: 600, baseline: { kind: 'usage' }, surfaceDeltaTokens: 0 };
   const measure = vi.fn(() => measured);
   const warnings = vi.fn();
@@ -69,13 +78,29 @@ async function bridgeFixture() {
       return undefined;
     },
     logger: { warn: warnings },
+    permissionPresets: { set: setPermissions },
+    root: { fiber: { dispose: async () => {} } },
+    inject(_names: string[], callback: (scope: unknown) => void) {
+      callback({
+        systemPrompt: {
+          getContextOrder: () => 10,
+          context: (section: { order: number }) => {
+            if (!Number.isFinite(section.order))
+              throw new TypeError('prompt context order must be finite');
+          },
+        },
+      });
+    },
     tools: { get: () => ({}) },
     llm: {
       resolveCallConfig: vi.fn(async (selection: unknown) => selection),
       resolveModelInfo: vi.fn(async () => ({ context: { contextWindow: 4000 } })),
     },
     agents: {
-      get: () => agent,
+      get: (id: string) => [agent, ...children.keys()].find((entry) => entry.id === id),
+      list: () => [agent, ...children.keys()],
+      isOwnedBy: (id: string, parent: typeof agent) =>
+        [...children].some(([child, owner]) => child.id === id && owner === parent),
       resume: async ({ setup }: { setup: (ctx: unknown, agent: unknown) => void }) => {
         setup(ctx, agent);
         return { dispose: async () => {} };
@@ -88,7 +113,7 @@ async function bridgeFixture() {
     effect() {},
   };
   const module = await import(pathToFileURL(path).href);
-  module.apply(ctx);
+  module.apply(ctx, { sharedDir: join(root, 'shared'), exit: vi.fn() });
   const emit = (nativeSession: unknown, event: Record<string, unknown>) =>
     listeners.get('session/event')!(nativeSession, event);
   return {
@@ -102,6 +127,17 @@ async function bridgeFixture() {
     emit,
     push,
     interruptedBlocks,
+    agent,
+    setPermissions,
+    approval(params: Record<string, unknown>) {
+      return listeners.get('approval/request')!({ agent, ...params }, () => 'unavailable');
+    },
+    childApproval(params: Record<string, unknown>) {
+      const child = { ...agent, id: 'child-agent', session: { ...session, id: 'child-session' } };
+      children.set(child, agent);
+      listeners.get('agent/created')!({ agent: child });
+      return listeners.get('approval/request')!({ agent: child, ...params }, () => 'unavailable');
+    },
     stream(frame: Record<string, unknown>) {
       listeners.get('agent/assistant-stream')!({ agent, frame });
     },
@@ -117,6 +153,7 @@ describe('DSH bridge native context meter', () => {
     const opened = await f.request('isles/session/resume', {
       sessionId: f.session.id,
       cwd: f.root,
+      dangerFullAccess: false,
       selection: { provider: 'fixture', model: 'model' },
     });
     expect(opened).toMatchObject({
@@ -174,6 +211,7 @@ describe('DSH bridge native context meter', () => {
     const opened = await f.request('isles/session/resume', {
       sessionId: f.session.id,
       cwd: f.root,
+      dangerFullAccess: false,
       selection: { provider: 'fixture', model: 'model', reasoningEffort: 'high' },
     });
     expect(opened).toMatchObject({
@@ -198,6 +236,7 @@ describe('DSH bridge native context meter', () => {
     const params = {
       sessionId: f.session.id,
       cwd: f.root,
+      dangerFullAccess: false,
       selection: { provider: 'fixture', model: 'model' },
     };
     expect(await f.request('isles/session/resume', params)).toMatchObject({
@@ -214,12 +253,112 @@ describe('DSH bridge native context meter', () => {
   });
 });
 
+describe('DSH bridge native permissions', () => {
+  async function open(f: Awaited<ReturnType<typeof bridgeFixture>>, dangerFullAccess = false) {
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      dangerFullAccess,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    f.emit(f.session, { type: 'turn/start', seq: 1, data: { turn: 'turn-1' } });
+  }
+
+  it('pins Isles mode for restored root and spawned children independently of native defaults', async () => {
+    const f = await bridgeFixture();
+    await open(f, true);
+    expect(f.setPermissions).toHaveBeenCalledWith(f.session, 'danger-full-access');
+    const pending = f.childApproval({ toolName: 'write' });
+    expect(f.setPermissions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 'child-session' }),
+      'danger-full-access',
+    );
+    const frame = f.frames.find((entry) => entry.method === 'isles/permission')!;
+    await f.request('isles/permission/reject', {
+      sessionId: f.session.id,
+      requestId: frame.params.requestId,
+      expectedTurnId: 'turn-1',
+    });
+    await expect(pending).resolves.toBe('rejected');
+  });
+
+  it('grants one operation, checks owner and turn, and consumes the approval only once', async () => {
+    const f = await bridgeFixture();
+    await open(f);
+    const pending = f.approval({ toolName: 'bash', callId: 'call-1', reason: 'Exact operation' });
+    const frame = f.frames.find((entry) => entry.method === 'isles/permission')!;
+    const params = {
+      sessionId: f.session.id,
+      requestId: frame.params.requestId,
+      expectedTurnId: 'turn-1',
+      allow: true,
+    };
+    expect(
+      await f.request('isles/permission/answer', { ...params, sessionId: 'other-session' }),
+    ).toMatchObject({ rejected: true });
+    expect(
+      await f.request('isles/permission/answer', { ...params, expectedTurnId: 'old-turn' }),
+    ).toMatchObject({ rejected: true });
+    expect(await f.request('isles/permission/answer', { ...params, allow: 'yes' })).toMatchObject({
+      rejected: true,
+    });
+    expect(await f.request('isles/permission/answer', params)).toEqual({});
+    await expect(pending).resolves.toBe('allowed-once');
+    expect(await f.request('isles/permission/answer', params)).toMatchObject({ rejected: true });
+    expect(
+      f.frames.some(
+        (entry) => (entry.params.event as { type?: string })?.type === 'question_expired',
+      ),
+    ).toBe(false);
+    expect(f.setPermissions).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['abort', 'end', 'interrupt', 'close'])(
+    'expires pending approvals on %s and refuses late answers',
+    async (kind) => {
+      const f = await bridgeFixture();
+      await open(f);
+      const controller = new AbortController();
+      const pending = f.approval({ toolName: 'write', signal: controller.signal });
+      const frame = f.frames.find((entry) => entry.method === 'isles/permission')!;
+      if (kind === 'abort') controller.abort();
+      else if (kind === 'end')
+        f.emit(f.session, {
+          type: 'turn/end',
+          seq: 2,
+          data: { turn: 'turn-1', reason: { kind: 'completed' } },
+        });
+      else if (kind === 'interrupt')
+        await f.request('isles/session/interrupt', {
+          sessionId: f.session.id,
+          expectedTurnId: 'turn-1',
+        });
+      else await f.request('shutdown', {});
+      await expect(pending).resolves.toBe('cancelled');
+      expect(
+        f.frames.filter(
+          (entry) => (entry.params.event as { type?: string })?.type === 'question_expired',
+        ),
+      ).toHaveLength(1);
+      expect(
+        await f.request('isles/permission/answer', {
+          sessionId: f.session.id,
+          requestId: frame.params.requestId,
+          expectedTurnId: 'turn-1',
+          allow: true,
+        }),
+      ).toMatchObject({ rejected: true });
+    },
+  );
+});
+
 describe('DSH bridge assistant streams', () => {
   it('forwards only raw text and reasoning deltas and persists the native final snapshot once', async () => {
     const f = await bridgeFixture();
     await f.request('isles/session/resume', {
       sessionId: f.session.id,
       cwd: f.root,
+      dangerFullAccess: false,
       selection: { provider: 'fixture', model: 'model' },
     });
     const measuredBeforeStream = f.measure.mock.calls.length;
@@ -316,6 +455,7 @@ describe('DSH bridge assistant streams', () => {
     await f.request('isles/session/resume', {
       sessionId: f.session.id,
       cwd: f.root,
+      dangerFullAccess: false,
       selection: { provider: 'fixture', model: 'model' },
     });
     const chunk = (attemptId: string, revision: number, type: string, text: string) =>
@@ -398,6 +538,7 @@ describe('DSH bridge assistant streams', () => {
     await f.request('isles/session/resume', {
       sessionId: f.session.id,
       cwd: f.root,
+      dangerFullAccess: false,
       selection: { provider: 'fixture', model: 'model' },
     });
     f.stream({ type: 'start', attemptId: 'with-reasoning', turn: 1, step: 2, revision: 0 });
@@ -473,6 +614,7 @@ describe('DSH bridge assistant streams', () => {
     await f.request('isles/session/resume', {
       sessionId: f.session.id,
       cwd: f.root,
+      dangerFullAccess: false,
       selection: { provider: 'fixture', model: 'model' },
     });
     f.stream({ type: 'start', attemptId: 'attempt-2', turn: 3, step: 1, revision: 0 });

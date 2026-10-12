@@ -186,6 +186,11 @@ export function kimiBrowserAdapter(
         const root = path.split('?')[0]!;
         if (root === '/api/v1/workspaces') return { id: `wd-${cwd}`, root: cwd };
         if (root.includes('/workspaces/') && root.endsWith('/trust')) return { trusted: true };
+        if (root.includes('/workspaces/') && root.endsWith('/add-dir')) {
+          if (method !== 'POST' || value?.path !== workspace.sharedDir || value.persist !== false)
+            throw new Error('Browser Kimi shared directory configuration is invalid');
+          return { path: workspace.sharedDir };
+        }
         if (root === '/api/v1/models')
           return { items: [{ model: 'test-kimi-model', max_context_size: 262144 }] };
         if (root === '/api/v1/sessions' && method === 'POST') {

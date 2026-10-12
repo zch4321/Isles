@@ -156,6 +156,7 @@ const server = http.createServer(async (req,res) => {
   if (route === '/api/v1/meta') return envelope(res,{ server_version: '2.1.1', server_id: 'fixture', capabilities: { websocket: true, mcp: true }, started_at: now() });
   if (req.method === 'POST' && route === '/api/v1/workspaces') return envelope(res,workspace(body.root));
   if (/^\/api\/v1\/workspaces\/[^/]+\/trust$/.test(route)) return envelope(res,{ trusted: true });
+  if (/^\/api\/v1\/workspaces\/[^/]+\/add-dir$/.test(route)) return envelope(res,{ additional_dirs: [body.path], persisted: false });
   if (route === '/api/v1/sessions' && req.method === 'POST') {
     const s = { id: 'session_' + crypto.randomUUID(), title: body.title ?? 'Fixture', metadata: body.metadata, agent_config: body.agent_config ?? { model: 'kimi-code/k3' }, created_at: now(), seq: 0, epoch: 'epoch-' + crypto.randomUUID(), turn: 0, active: null, queue: [], questions: [] };
     save(s);
@@ -224,6 +225,11 @@ const server = http.createServer(async (req,res) => {
     s.queue = s.queue.filter(q => q.prompt_id !== id);
     emit(s,'prompt.steered',{ activePromptId: s.active.prompt_id, promptIds: [id], messageId: p.user_message_id, content: p.content, steeredAt: now() });
     return envelope(res,{ steered: true, prompt_ids: [id] });
+  }
+  if (/^\/approvals\/[^/]+$/.test(tail)) {
+    emit(s,'event.approval.resolved',{ turnId: s.turn, approval_id: tail.split('/').at(-1), decision: body.decision });
+    if (!settings().holdTurn && s.active) finish(s);
+    return envelope(res,{ resolved: true, resolved_at: now() });
   }
   if (tail === '/questions') return envelope(res,{ items: s.questions });
   const questionAction = tail.match(/^\/questions\/([^/:]+)(?::(dismiss|resolve))?$/);

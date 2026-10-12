@@ -118,6 +118,7 @@ export class DshFixture implements DshConnection {
     if (
       method === 'isles/session/interrupt' ||
       method.startsWith('isles/question/') ||
+      method.startsWith('isles/permission/') ||
       method === 'shutdown'
     )
       return {};

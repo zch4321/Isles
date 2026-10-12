@@ -5,6 +5,7 @@ import { computed, ref, watch } from 'vue';
 import { createAgent, fetchHarnesses, fetchHarnessStatus, fetchModels } from '@/api/isles';
 import { invalidateAll } from '@/api/queries';
 import HarnessPathSettings from '@/components/HarnessPathSettings.vue';
+import ExecutionAccessSetting from './ExecutionAccessSetting.vue';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -32,6 +33,7 @@ const form = ref({
   reasoningEffort: '',
   canCreateGroups: false,
   steerEnabled: false,
+  dangerFullAccess: false,
 });
 const selectedHarness = computed(() =>
   harnesses.data.value?.harnesses.find((harness) => harness.id === form.value.harness),
@@ -126,6 +128,7 @@ const create = useMutation({
     form.value.name = '';
     form.value.canCreateGroups = false;
     form.value.steerEnabled = false;
+    form.value.dangerFullAccess = false;
   },
 });
 watch(open, (value) => {
@@ -256,6 +259,12 @@ function focusName(event: Event) {
         <p v-if="current?.description" class="-mt-1 text-xs leading-relaxed text-muted-foreground">
           {{ current.description }}
         </p>
+        <ExecutionAccessSetting
+          id="agent-full-access"
+          v-model="form.dangerFullAccess"
+          class="rounded-md border px-3 py-2.5"
+          :disabled="create.isPending.value"
+        />
         <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
           <div class="min-w-0 flex-1">
             <p id="agent-groups" class="text-[13px] font-medium">允许拉群</p>

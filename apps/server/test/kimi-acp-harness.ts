@@ -23,6 +23,7 @@ export class KimiAcpHarness extends KimiEnvironment implements AcpHarness {
   };
   readonly args = ['acp'];
   readonly sessionMode = 'yolo';
+  readonly defaultSessionMode = 'default';
   async prepare(agent: AgentRecord) {
     await this.workspace.prepareWorkspace(agent);
     return this.workspace.token(agentRoot(this.workspace.dataDir, agent));

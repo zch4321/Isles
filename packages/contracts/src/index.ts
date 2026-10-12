@@ -69,6 +69,7 @@ export const createAgentSchema = z
     reasoningEffort: z.string().min(1).max(24),
     canCreateGroups: z.boolean().default(false),
     steerEnabled: z.boolean().default(false),
+    dangerFullAccess: z.boolean().default(false),
   })
   .strict();
 export const updateAgentSchema = z
@@ -78,6 +79,7 @@ export const updateAgentSchema = z
     reasoningEffort: z.string().trim().min(1).max(24).optional(),
     canCreateGroups: z.boolean().optional(),
     steerEnabled: z.boolean().optional(),
+    dangerFullAccess: z.boolean().optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, { message: '请至少修改一个字段' });
@@ -118,6 +120,7 @@ export const agentSchema = z.object({
   threadId: z.string().nullable(),
   canCreateGroups: z.boolean(),
   steerEnabled: z.boolean(),
+  dangerFullAccess: z.boolean(),
   desiredState: z.enum(['running', 'stopped']),
   status: agentStatusSchema,
   error: z.string().nullable(),

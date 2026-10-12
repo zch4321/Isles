@@ -45,6 +45,11 @@ export const eventSchema = z.object({
     z.object({ type: z.literal('context_usage'), usage: contextUsageSchema }),
     z.object({ type: z.literal('turn_started'), turnId }),
     z.object({
+      type: z.literal('question_expired'),
+      turnId,
+      requestId: z.string().min(1),
+    }),
+    z.object({
       type: z.literal('turn_completed'),
       turnId,
       status: z.enum(['completed', 'failed', 'interrupted']),
@@ -66,6 +71,12 @@ export const questionSchema = z.object({
   turnId,
   requestId: z.union([z.string(), z.number()]),
   questions: z.array(questionDefinitionSchema).min(1),
+});
+export const permissionRequestSchema = z.object({
+  sessionId: z.string().min(1),
+  turnId,
+  requestId: z.string().min(1),
+  text: z.string().min(1),
 });
 export function modelSelection(model: string, effort: string) {
   const slash = model.indexOf('/');
