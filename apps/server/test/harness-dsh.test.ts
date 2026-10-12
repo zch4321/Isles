@@ -256,12 +256,20 @@ describe('DSH native SDK adapter', () => {
       id: 'permission',
       config: expect.objectContaining({ defaultPreset: 'danger-full-access' }),
     });
-    expect(patch).toContainEqual(
-      expect.objectContaining({
-        id: 'sandbox',
-        config: { sharedDir: f.environment.workspace.sharedDir },
-      }),
-    );
+    expect(patch).toContainEqual({ id: 'fs-sandbox', disabled: true });
+    expect(patch).toContainEqual({ id: 'sandbox', disabled: true });
+    expect(patch).toContainEqual({
+      insert: expect.arrayContaining([
+        expect.objectContaining({
+          id: 'isles-fs-shared',
+          config: { cwd: f.agent.workspace, sharedDir: f.environment.workspace.sharedDir },
+        }),
+        expect.objectContaining({
+          id: 'isles-sandbox-shared',
+          config: { sharedDir: f.environment.workspace.sharedDir },
+        }),
+      ]),
+    });
   });
 
   it('presents a one-shot permission form, validates fixed decisions and ignores expired answers', async () => {

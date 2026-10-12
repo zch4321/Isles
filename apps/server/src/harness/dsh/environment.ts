@@ -126,6 +126,16 @@ export class DshEnvironment {
     await mkdir(dir, { recursive: true });
     const inserted: Record<string, unknown>[] = [
       {
+        id: 'isles-fs-shared',
+        name: fileURLToPath(new URL('../../../resources/dsh-fs-shared.mjs', import.meta.url)),
+        config: { cwd, sharedDir: this.workspace.sharedDir },
+      },
+      {
+        id: 'isles-sandbox-shared',
+        name: fileURLToPath(new URL('../../../resources/dsh-sandbox-shared.mjs', import.meta.url)),
+        config: { sharedDir: this.workspace.sharedDir },
+      },
+      {
         id: 'isles-dsh-bridge',
         name: fileURLToPath(new URL('../../../resources/dsh-bridge.mjs', import.meta.url)),
         config: { sharedDir: this.workspace.sharedDir },
@@ -170,16 +180,10 @@ export class DshEnvironment {
           },
         },
       },
-      {
-        id: 'fs-sandbox',
-        name: fileURLToPath(new URL('../../../resources/dsh-fs-shared.mjs', import.meta.url)),
-        config: { cwd, sharedDir: this.workspace.sharedDir },
-      },
-      {
-        id: 'sandbox',
-        name: fileURLToPath(new URL('../../../resources/dsh-sandbox-shared.mjs', import.meta.url)),
-        config: { sharedDir: this.workspace.sharedDir },
-      },
+      // Native patch names assert the existing plugin identity; they cannot
+      // replace it. Disable the originals and insert the shared providers.
+      { id: 'fs-sandbox', disabled: true },
+      { id: 'sandbox', disabled: true },
       { insert: inserted },
     ];
     await writeFile(patch, JSON.stringify(rows), { mode: 0o600 });

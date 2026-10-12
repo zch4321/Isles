@@ -48,6 +48,12 @@ SDK profile 仅包含问答服务，Isles overlay 另行加载官方 `dsh-tool-a
 - 本机 Windows 桌面版 `0.2.0-rc.2` 安装于 `E:\program\dsh`，源码与构建产物均自动检测成功，真实 SDK 桥接返回 4 个模型。验证使用隔离 Isles 数据目录，只读取目录，未调用模型。与 OpenCode 共用的报告保存在 `%LOCALAPPDATA%\Temp\isles-windows-discovery-9RZdRU\report.json`。
 - 完整 `pnpm check` 通过，435 项测试通过、1 项条件跳过；OpenCode、DSH 与目录切换的 5 项 Chrome 浏览器验证通过。本轮同时修正 Windows 权限断言、Codex 模拟器分片发送顺序，以及 Runtime 在连接退出后等待原生进程清理的竞态。
 
+## 共享工作区沙盒加载回归（2026-10-12）
+
+- 修复 overlay 的 provider 加载：原生 patch 的 `name` 用于核对已有插件名称，名称不同会跳过整条配置。现在禁用原 `fs-sandbox`、`sandbox` 条目，再以独立 ID 插入共享目录扩展。
+- 回归测试使用原生 base/SDK 配置与 Isles 实际生成的 overlay，通过原生配置合成和 Loader 加载文件工具与沙盒 provider，确认扩展实例实际生效。旧配置准确复现两条 `name mismatch`；修复后原生文件工具与 macOS Seatbelt 均能写入 shared，其他 Agent 目录、越界符号链接与只读模式写入继续被拒绝。
+- 验证使用隔离目录，无需启动 Agent 或调用模型；原生登录和会话保持在各自目录。
+
 ## 来源
 
 - [官方 DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
