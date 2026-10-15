@@ -4,6 +4,7 @@ import {
   addMembersSchema,
   answerQuestionSchema,
   createAgentSchema,
+  createAgentsSchema,
   cliConfigurationUpdateSchema,
   createGroupSchema,
   sendMessageSchema,
@@ -175,6 +176,11 @@ export async function buildApp(options: AppOptions) {
   });
   app.post('/api/agents', async (request, reply) =>
     reply.code(201).send(await runtime.createAgent(createAgentSchema.parse(request.body))),
+  );
+  app.post('/api/agents/batch', async (request, reply) =>
+    reply
+      .code(201)
+      .send({ agents: await runtime.createAgents(createAgentsSchema.parse(request.body)) }),
   );
   app.get<{ Params: { id: string } }>('/api/agents/:id', (request) =>
     store.agentDetail(request.params.id),

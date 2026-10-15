@@ -72,6 +72,9 @@ export const createAgentSchema = z
     dangerFullAccess: z.boolean().default(false),
   })
   .strict();
+export const createAgentsSchema = createAgentSchema.extend({
+  count: z.number().int().min(1).max(50).default(1),
+});
 export const updateAgentSchema = z
   .object({
     name: z.string().trim().min(1).max(80).optional(),
@@ -281,6 +284,7 @@ export type AgentDetail = z.infer<typeof agentDetailSchema>;
 export type ContextUsage = z.infer<typeof contextUsageSchema>;
 export type ChannelDetail = z.infer<typeof channelDetailSchema>;
 export type CreateAgent = z.input<typeof createAgentSchema>;
+export type CreateAgents = z.input<typeof createAgentsSchema>;
 export type UpdateAgent = z.infer<typeof updateAgentSchema>;
 export type CreateGroup = z.infer<typeof createGroupSchema>;
 export type SendMessage = z.infer<typeof sendMessageSchema>;

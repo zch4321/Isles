@@ -10,6 +10,7 @@ import {
   messageSchema,
   modelSchema,
   type CreateAgent,
+  type CreateAgents,
   type CreateGroup,
   type QuestionAnswer,
   type SendMessage,
@@ -101,6 +102,8 @@ export const fetchAgents = (includeDeleted = false) =>
   );
 export const fetchAgentDetail = (id: string) => api(`/agents/${id}`, agentDetailSchema);
 export const createAgent = (input: CreateAgent) => api('/agents', agentSchema, input);
+export const createAgents = (input: CreateAgents) =>
+  api('/agents/batch', z.object({ agents: z.array(agentSchema).min(1) }), input);
 export const updateAgent = (id: string, input: UpdateAgent) =>
   api(`/agents/${id}`, agentSchema, input, 'PATCH');
 export const deleteAgent = (id: string) => api(`/agents/${id}`, agentSchema, undefined, 'DELETE');

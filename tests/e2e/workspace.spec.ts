@@ -32,21 +32,29 @@ async function createAgent(
   const [response] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     page.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
   expect(response.request().postDataJSON()).toMatchObject({
     harness: 'codex',
+    name,
+    count: 1,
     steerEnabled,
     dangerFullAccess,
   });
-  const created = (await response.json()) as Agent;
+  const { agents } = (await response.json()) as { agents: Agent[] };
+  expect(agents).toHaveLength(1);
+  const created = agents[0]!;
+  let ready = created;
   await expect
-    .poll(async () => (await (await page.request.get(`/api/agents/${created.id}`)).json()).agent)
+    .poll(async () => {
+      ready = (await (await page.request.get(`/api/agents/${created.id}`)).json()).agent as Agent;
+      return ready;
+    })
     .toMatchObject({ status: 'ready', threadId: expect.any(String) });
   await expect(page.getByTestId('agent-status')).toHaveText('可用');
-  return created;
+  return ready;
 }
 const noHorizontalScroll = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
@@ -80,6 +88,12 @@ test('saves the Codex executable path in the creation dialog and restores automa
   await page.getByRole('button', { name: '保存并检测', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: '路径设置已保存' })).toBeVisible();
   await page.reload();
+  // Earlier management tests may leave a retained chat selected on mobile reload.
+  const back = page.getByRole('button', { name: '返回聊天列表', exact: true });
+  await expect(
+    page.getByRole('button', { name: '新建 Agent', exact: true }).or(back).first(),
+  ).toBeVisible();
+  if (await back.isVisible()) await back.click();
   await page.getByRole('button', { name: '新建 Agent', exact: true }).first().click();
   if (!(await path.isVisible()))
     await page.getByRole('button', { name: 'Codex 路径设置', exact: true }).click();
@@ -205,13 +219,14 @@ test('switches registered harness catalogs and cached selections without applyin
   const [creation] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
   expect(creation.request().postDataJSON()).toEqual({
     harness: 'semantic-test',
     name: 'Semantic catalog test',
+    count: 1,
     model: 'semantic-model',
     reasoningEffort: 'medium',
     canCreateGroups: false,
@@ -228,6 +243,15 @@ test('switches registered harness catalogs and cached selections without applyin
 test('opens the workspace and connects through the Web proxy to SQLite-backed health', async ({
   page,
 }, testInfo) => {
+  // Exercise the empty state independently of retained history from management tests.
+  await page.route(
+    (url) => url.pathname === '/api/channels',
+    async (route) => {
+      const response = await route.fetch();
+      const { cursor } = (await response.json()) as { cursor: number };
+      await route.fulfill({ response, json: { channels: [], cursor } });
+    },
+  );
   await page.goto('/');
   await expect(page.getByRole('heading', { name: '让独立的 AI 一起工作。' })).toBeVisible();
   await expect(page.getByRole('status')).toContainText('服务已连接');
@@ -300,7 +324,7 @@ test('answers native execution approval through the existing question form', asy
   await page.goto('/');
   const agent = await createAgent(page, '原生授权 Agent');
   await send(page, '请请求原生执行授权');
-  await expect(page.getByText('原生授权 Agent 需要你的回答')).toBeVisible();
+  await expect(page.getByText(`${agent.name} 需要你的回答`)).toBeVisible();
   await expect(page.getByText('执行授权', { exact: true })).toBeVisible();
   await page.getByRole('radio', { name: /^允许本次/ }).check();
   const [answered] = await Promise.all([
@@ -316,7 +340,7 @@ test('answers native execution approval through the existing question form', asy
   await expect(page.locator('[data-sender="agent"]').last()).toContainText(
     'MCP 回复：请请求原生执行授权',
   );
-  await expect(page.getByText('原生授权 Agent 需要你的回答')).not.toBeVisible();
+  await expect(page.getByText(`${agent.name} 需要你的回答`)).not.toBeVisible();
   expect((await page.request.delete(`/api/agents/${agent.id}`)).ok()).toBe(true);
 });
 
@@ -326,7 +350,7 @@ test('creates an Agent, publishes MCP replies, persists reload and handles stop/
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
-  await createAgent(page, '浏览器 Agent');
+  const agent = await createAgent(page, '浏览器 Agent');
   await send(page, '第一轮浏览器消息');
   const replies = page.locator('[data-sender="agent"]');
   await expect(replies).toContainText('MCP 回复：第一轮浏览器消息');
@@ -348,11 +372,11 @@ test('creates an Agent, publishes MCP replies, persists reload and handles stop/
   await page.getByRole('button', { name: '恢复 Agent' }).click();
   await expect(replies.last()).toContainText('MCP 回复：停止时排队');
   await send(page, '请向我提问');
-  await expect(page.getByText('浏览器 Agent 需要你的回答')).toBeVisible();
+  await expect(page.getByText(`${agent.name} 需要你的回答`)).toBeVisible();
   await page.getByRole('radio', { name: /^继续/ }).check();
   await page.getByRole('button', { name: '提交回答' }).click();
   await expect(replies.last()).toContainText('MCP 回复：请向我提问');
-  await expect(page.getByText('浏览器 Agent 需要你的回答')).not.toBeVisible();
+  await expect(page.getByText(`${agent.name} 需要你的回答`)).not.toBeVisible();
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.screenshot({ path: testInfo.outputPath('chat-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -409,12 +433,12 @@ test.describe('Markdown chat exports', () => {
     await expect(page.getByRole('alert').filter({ hasText: '导出服务暂时不可用' })).toBeVisible();
     await page.unroute(exportUrl);
     const file = await download(page);
-    expect(file.filename).toMatch(/^私聊-Markdown 导出验证-\d{8}-\d{6}\.md$/);
-    expect(file.markdown).toContain('# 与 Markdown 导出验证 的聊天记录');
+    expect(file.filename).toMatch(/^私聊-Markdown 导出验证-1-\d{8}-\d{6}\.md$/);
+    expect(file.markdown).toContain(`# 与 ${agent.name} 的聊天记录`);
     expect(file.markdown).toContain('- 消息数：105');
     expect(file.markdown).toContain('> 最早隐藏消息\n>\n> ```ts\n> const x = 1;');
     expect(file.markdown).toContain('回复：#1（用户）');
-    expect(file.markdown).toContain('提及：@Markdown 导出验证');
+    expect(file.markdown).toContain(`提及：@${agent.name}`);
     expect(file.markdown).toContain('+08:00');
     expect(file.markdown.match(/^## #\d+/gm)).toHaveLength(105);
     expect(file.markdown).not.toContain('原生详情');
@@ -439,7 +463,7 @@ test.describe('Markdown chat exports', () => {
     const agent = await createAgent(page, '群导出验证 Agent');
     await page.getByRole('button', { name: '新建群聊', exact: true }).click();
     await page.getByLabel('群名').fill('导出/群聊:*?');
-    await page.getByRole('checkbox', { name: /群导出验证 Agent/ }).check();
+    await page.getByRole('checkbox', { name: agent.name }).check();
     const [created] = await Promise.all([
       page.waitForResponse(
         (response) =>
@@ -476,7 +500,7 @@ test('navigates mobile chats, searches contacts and keeps drafts and IME input i
   await page.goto('/');
   const contacts = page.getByRole('navigation', { name: 'Agents', exact: true });
   await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible();
-  await contacts.getByRole('button').filter({ hasText: '浏览器 Agent' }).click();
+  await contacts.getByRole('button').filter({ hasText: '浏览器 Agent-1' }).click();
   await composer(page).fill('这条草稿属于第一个 Agent');
   const messageCount = await page.locator('[data-sender="user"]').count();
   await composer(page).dispatchEvent('keydown', {
@@ -503,7 +527,7 @@ test('navigates mobile chats, searches contacts and keeps drafts and IME input i
   await page.getByRole('button', { name: '清除搜索' }).click();
   await expect(contacts.getByRole('button')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('chat-list-mobile.png'), fullPage: true });
-  await contacts.getByRole('button').filter({ hasText: '浏览器 Agent' }).click();
+  await contacts.getByRole('button').filter({ hasText: '浏览器 Agent-1' }).click();
   await expect(composer(page)).toHaveValue('这条草稿属于第一个 Agent');
   await composer(page).press('Shift+Enter');
   await expect(composer(page)).toHaveValue('这条草稿属于第一个 Agent\n');
@@ -527,8 +551,8 @@ test('runs a group discussion with mentions, pause and member management', async
   await page.goto('/');
   await page.getByRole('button', { name: '新建群聊' }).click();
   await page.getByLabel('群名').fill('方案讨论');
-  await page.getByRole('checkbox', { name: /浏览器 Agent/ }).check();
-  await page.getByRole('checkbox', { name: /第二个 Agent/ }).check();
+  await page.getByRole('checkbox', { name: /浏览器 Agent-1/ }).check();
+  await page.getByRole('checkbox', { name: /第二个 Agent-1/ }).check();
   await page.getByRole('button', { name: '创建群聊', exact: true }).click();
   await expect(page.getByRole('heading', { name: '方案讨论', level: 1 })).toBeVisible();
   const feed = page.locator('[aria-label="群聊消息"]');
@@ -541,14 +565,14 @@ test('runs a group discussion with mentions, pause and member management', async
   await composer(page).pressSequentially('第二');
   await expect(picker.getByRole('option')).toHaveCount(1);
   await composer(page).press('Enter');
-  await expect(composer(page)).toHaveValue('请大家看看，@第二个 Agent ');
+  await expect(composer(page)).toHaveValue('请大家看看，@第二个 Agent-1 ');
   await composer(page).pressSequentially('你怎么看');
   await composer(page).press('Enter');
-  await expect(feed.locator('[data-sender="user"] .mention')).toHaveText('@第二个 Agent');
+  await expect(feed.locator('[data-sender="user"] .mention')).toHaveText('@第二个 Agent-1');
   // Every member is woken, whoever is mentioned; each answers once and the round settles.
   const replies = feed.locator('[data-sender="agent"]');
   await expect(replies).toHaveCount(2);
-  for (const name of ['浏览器 Agent', '第二个 Agent'])
+  for (const name of ['浏览器 Agent-1', '第二个 Agent-1'])
     await expect(feed.getByRole('article', { name: `${name}的消息` })).toHaveCount(1);
 
   await page.getByRole('button', { name: '暂停讨论' }).click();
@@ -565,14 +589,14 @@ test('runs a group discussion with mentions, pause and member management', async
   const inspector = page.getByTestId('inspector');
   const members = inspector.getByRole('list', { name: '群成员' }).getByRole('listitem');
   await expect(members).toHaveCount(2);
-  await inspector.getByRole('button', { name: '查看 第二个 Agent 的详情' }).click();
+  await inspector.getByRole('button', { name: '查看 第二个 Agent-1 的详情' }).click();
   const permission = inspector.getByRole('switch', { name: '允许拉群' });
   await expect(permission).toHaveAttribute('aria-checked', 'false');
   await permission.click();
   await expect(permission).toHaveAttribute('aria-checked', 'true');
   await inspector.getByRole('button', { name: '返回群聊详情' }).click();
   await page.screenshot({ path: testInfo.outputPath('group-desktop.png'), fullPage: true });
-  await inspector.getByRole('button', { name: '将 第二个 Agent 移出群聊' }).click();
+  await inspector.getByRole('button', { name: '将 第二个 Agent-1 移出群聊' }).click();
   await expect(members).toHaveCount(1);
   await expect(feed.locator('[data-sender="system"]').last()).toContainText('移出了群聊');
   await page.setViewportSize({ width: 390, height: 844 });
@@ -586,9 +610,9 @@ test('receives busy input through MCP without creating another native turn or le
   page,
 }) => {
   await page.goto('/');
-  await createAgent(page, '收信 Agent');
+  const agent = await createAgent(page, '收信 Agent');
   await send(page, '请在执行中收信');
-  await expect(page.getByText('收信 Agent 需要你的回答')).toBeVisible();
+  await expect(page.getByText(`${agent.name} 需要你的回答`)).toBeVisible();
   await send(page, '执行中的更新');
   const message = page.locator('[data-sender="user"]').last();
   await expect(message).toContainText('排队中');
@@ -621,13 +645,11 @@ test('edits an Agent without resetting its effort or changing its native convers
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
-  await createAgent(page, '编辑验证 Agent');
+  const original = await createAgent(page, '编辑验证 Agent');
   await send(page, '编辑前的消息');
   await expect(page.locator('[data-sender="agent"]').last()).toContainText(
     'MCP 回复：编辑前的消息',
   );
-  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
-  const original = list.agents.find((agent) => agent.name === '编辑验证 Agent')!;
   expect(original.threadId).toBeTruthy();
   let releaseCatalog!: () => void;
   const catalogReady = new Promise<void>((resolve) => {
@@ -728,9 +750,7 @@ test('edits an Agent without resetting its effort or changing its native convers
 
 test('can edit name and permission when the model catalog is unavailable', async ({ page }) => {
   await page.goto('/');
-  await createAgent(page, '离线编辑 Agent');
-  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
-  const original = list.agents.find((agent) => agent.name === '离线编辑 Agent')!;
+  const original = await createAgent(page, '离线编辑 Agent');
   await page.route('**/api/harnesses/codex/models', (route) =>
     route.fulfill({ status: 503, json: { error: '模型列表暂时不可用' } }),
   );
@@ -769,9 +789,7 @@ test('persists per-Agent steer selected at creation and can disable it without a
   page,
 }) => {
   await page.goto('/');
-  await createAgent(page, '实时收信配置 Agent', true);
-  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
-  const original = list.agents.find((agent) => agent.name === '实时收信配置 Agent')!;
+  const original = await createAgent(page, '实时收信配置 Agent', true);
   expect(original.steerEnabled).toBe(true);
   expect(original.threadId).toBeTruthy();
   await page.route('**/api/harnesses/codex/models', (route) =>
@@ -827,9 +845,7 @@ test('allows switching saved steer off when the current harness directory no lon
   page,
 }) => {
   await page.goto('/');
-  await createAgent(page, '原生能力变化 Agent', true);
-  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
-  const original = list.agents.find((agent) => agent.name === '原生能力变化 Agent')!;
+  const original = await createAgent(page, '原生能力变化 Agent', true);
   await page.route('**/api/harnesses', async (route) => {
     const response = await route.fetch();
     const directory = (await response.json()) as { harnesses: HarnessDescriptor[] };
@@ -877,25 +893,23 @@ test('deletes an Agent from contacts and groups while retaining read-only histor
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
-  await createAgent(page, '删除验证 Agent');
+  const original = await createAgent(page, '删除验证 Agent');
   await send(page, '保留这条私聊历史');
   await expect(page.locator('[data-sender="agent"]').last()).toContainText(
     'MCP 回复：保留这条私聊历史',
   );
-  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
-  const original = list.agents.find((agent) => agent.name === '删除验证 Agent')!;
   await page.getByRole('button', { name: '新建群聊', exact: true }).click();
   await page.getByLabel('群名').fill('删除验证群');
-  await page.getByRole('checkbox', { name: /删除验证 Agent/ }).check();
+  await page.getByRole('checkbox', { name: original.name }).check();
   await page.getByRole('button', { name: '创建群聊', exact: true }).click();
   await send(page, '保留这条群聊历史');
   const groupFeed = page.locator('[aria-label="群聊消息"]');
-  await expect(groupFeed.getByRole('article', { name: '删除验证 Agent的消息' })).toContainText(
+  await expect(groupFeed.getByRole('article', { name: `${original.name}的消息` })).toContainText(
     'MCP 回复：保留这条群聊历史',
   );
   await page.getByRole('button', { name: '群聊详情', exact: true }).click();
   const inspector = page.getByTestId('inspector');
-  await inspector.getByRole('button', { name: '查看 删除验证 Agent 的详情' }).click();
+  await inspector.getByRole('button', { name: `查看 ${original.name} 的详情` }).click();
   await expect(inspector.getByText('可用', { exact: true })).toBeVisible();
   await inspector.getByRole('button', { name: '删除 Agent', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '删除 Agent', exact: true });
@@ -912,7 +926,7 @@ test('deletes an Agent from contacts and groups while retaining read-only histor
   await expect(inspector.getByRole('list', { name: '群成员' }).getByRole('listitem')).toHaveCount(
     1,
   );
-  await inspector.getByRole('button', { name: '查看 删除验证 Agent 的详情' }).click();
+  await inspector.getByRole('button', { name: `查看 ${original.name} 的详情` }).click();
   await inspector.getByRole('button', { name: '删除 Agent', exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await noHorizontalScroll(page)).toBe(false);
@@ -942,7 +956,7 @@ test('deletes an Agent from contacts and groups while retaining read-only histor
   await expect(inspector.getByRole('list', { name: '群成员' }).getByRole('listitem')).toHaveCount(
     0,
   );
-  await expect(groupFeed.getByRole('article', { name: '删除验证 Agent的消息' })).toContainText(
+  await expect(groupFeed.getByRole('article', { name: `${original.name}的消息` })).toContainText(
     'MCP 回复：保留这条群聊历史',
   );
   const active = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
@@ -1001,21 +1015,19 @@ test('deletes a group into read-only history without changing its member Agent',
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
-  await createAgent(page, '群删除验证 Agent');
+  const original = await createAgent(page, '群删除验证 Agent');
   await send(page, '群删除前的私聊');
   await expect(page.locator('[data-sender="agent"]').last()).toContainText(
     'MCP 回复：群删除前的私聊',
   );
-  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
-  const original = list.agents.find((agent) => agent.name === '群删除验证 Agent')!;
 
   await page.getByRole('button', { name: '新建群聊', exact: true }).click();
   await page.getByLabel('群名').fill('待删除的群聊');
-  await page.getByRole('checkbox', { name: /群删除验证 Agent/ }).check();
+  await page.getByRole('checkbox', { name: original.name }).check();
   await page.getByRole('button', { name: '创建群聊', exact: true }).click();
   await send(page, '保留群聊回复');
   const groupFeed = page.locator('[aria-label="群聊消息"]');
-  await expect(groupFeed.getByRole('article', { name: '群删除验证 Agent的消息' })).toContainText(
+  await expect(groupFeed.getByRole('article', { name: `${original.name}的消息` })).toContainText(
     'MCP 回复：保留群聊回复',
   );
   await page.getByRole('button', { name: '群聊详情', exact: true }).click();
@@ -1074,7 +1086,7 @@ test('deletes a group into read-only history without changing its member Agent',
   await expect(composer(page)).toHaveCount(0);
   await expect(page.getByRole('button', { name: '继续讨论', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '暂停讨论', exact: true })).toHaveCount(0);
-  await expect(groupFeed.getByRole('article', { name: '群删除验证 Agent的消息' })).toContainText(
+  await expect(groupFeed.getByRole('article', { name: `${original.name}的消息` })).toContainText(
     'MCP 回复：保留群聊回复',
   );
   await page.getByRole('button', { name: '返回聊天列表', exact: true }).click();
@@ -1096,7 +1108,7 @@ test('deletes a group into read-only history without changing its member Agent',
   await expect(page.getByTestId('group-status')).toHaveText('已删除');
   await expect(composer(page)).toHaveCount(0);
   await expect(page.getByRole('button', { name: '继续讨论', exact: true })).toHaveCount(0);
-  await expect(groupFeed.getByRole('article', { name: '群删除验证 Agent的消息' })).toContainText(
+  await expect(groupFeed.getByRole('article', { name: `${original.name}的消息` })).toContainText(
     'MCP 回复：保留群聊回复',
   );
   expect(await noHorizontalScroll(page)).toBe(false);
@@ -1149,9 +1161,7 @@ test('returns an inspected group member to read-only group details after externa
   page,
 }) => {
   await page.goto('/');
-  await createAgent(page, '外部群删除 Agent');
-  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
-  const agent = list.agents.find((item) => item.name === '外部群删除 Agent')!;
+  const agent = await createAgent(page, '外部群删除 Agent');
   const created = await page.request.post('/api/channels', {
     data: { name: '外部删除群聊', memberIds: [agent.id] },
   });
@@ -1178,9 +1188,7 @@ test('appends busy input through steer and displays pending delivery without sta
   page,
 }, testInfo) => {
   await page.goto('/');
-  await createAgent(page, '忙碌 steer 验证', true);
-  const list = (await (await page.request.get('/api/agents')).json()) as { agents: Agent[] };
-  const agent = list.agents.find((item) => item.name === '忙碌 steer 验证')!;
+  const agent = await createAgent(page, '忙碌 steer 验证', true);
   await send(page, '保持执行以验证 steer');
   await expect(page.getByTestId('agent-status')).toHaveText('执行中');
   await send(page, '忙碌中的追加消息');
@@ -1253,7 +1261,7 @@ test('creates Claude with independent path/model settings and joins a Codex/Clau
   const [created] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
@@ -1263,7 +1271,7 @@ test('creates Claude with independent path/model settings and joins a Codex/Clau
     reasoningEffort: 'high',
     steerEnabled: false,
   });
-  const claude = (await created.json()) as Agent;
+  const claude = ((await created.json()) as { agents: Agent[] }).agents[0]!;
   await expect
     .poll(
       async () => (await (await page.request.get(`/api/agents/${claude.id}`)).json()).agent.status,
@@ -1304,13 +1312,13 @@ test('creates Claude with independent path/model settings and joins a Codex/Clau
     .toBe('ready');
   await page.getByRole('button', { name: '新建群聊', exact: true }).click();
   await page.getByLabel('群名').fill('浏览器混合群');
-  await page.getByRole('checkbox', { name: /Claude 浏览器验证/ }).check();
+  await page.getByRole('checkbox', { name: claude.name }).check();
   await page.getByRole('checkbox', { name: /Codex 混合浏览器验证/ }).check();
   await page.getByRole('button', { name: '创建群聊', exact: true }).click();
   await page.getByRole('textbox', { name: '消息输入' }).fill('混合群浏览器消息');
   await page.getByRole('button', { name: '发送消息' }).click();
   const feed = page.locator('[aria-label="群聊消息"]');
-  await expect(feed.getByRole('article', { name: 'Claude 浏览器验证的消息' })).toContainText(
+  await expect(feed.getByRole('article', { name: `${claude.name}的消息` })).toContainText(
     'Claude MCP 回复：混合群浏览器消息',
   );
   await expect(feed.getByRole('article', { name: 'Codex 混合浏览器验证的消息' })).toContainText(
@@ -1337,11 +1345,11 @@ test('steers Claude busy input through the Web in the original run and persists 
   const [created] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
-  const agent = (await created.json()) as Agent;
+  const agent = ((await created.json()) as { agents: Agent[] }).agents[0]!;
   expect(agent.steerEnabled).toBe(true);
   await expect(page.getByTestId('agent-status')).toHaveText('可用');
   await send(page, '保持执行以验证 Claude steer');
@@ -1404,7 +1412,7 @@ test('creates Kimi Code, queues busy input and answers a native multi-select que
   const [created] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
@@ -1414,7 +1422,7 @@ test('creates Kimi Code, queues busy input and answers a native multi-select que
     reasoningEffort: 'high',
     steerEnabled: false,
   });
-  const kimi = (await created.json()) as Agent;
+  const kimi = ((await created.json()) as { agents: Agent[] }).agents[0]!;
   await expect
     .poll(
       async () => (await (await page.request.get(`/api/agents/${kimi.id}`)).json()).agent.status,
@@ -1444,7 +1452,7 @@ test('creates Kimi Code, queues busy input and answers a native multi-select que
   expect(runs).toHaveLength(3);
   expect(runs.every((run) => run.threadId === binding && run.status === 'completed')).toBe(true);
   await send(page, 'Kimi 多选提问');
-  await expect(page.getByText('Kimi 浏览器验证 需要你的回答')).toBeVisible();
+  await expect(page.getByText(`${kimi.name} 需要你的回答`)).toBeVisible();
   await expect(page.getByRole('button', { name: '提交回答' })).toBeDisabled();
   await page.getByRole('checkbox', { name: '代码', exact: true }).check();
   await page.getByRole('checkbox', { name: '测试', exact: true }).check();
@@ -1460,7 +1468,7 @@ test('creates Kimi Code, queues busy input and answers a native multi-select que
   await expect(page.locator('[data-sender="agent"]').last()).toContainText(
     'Kimi 多选回答：代码、测试',
   );
-  await expect(page.getByText('Kimi 浏览器验证 需要你的回答')).not.toBeVisible();
+  await expect(page.getByText(`${kimi.name} 需要你的回答`)).not.toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -1476,11 +1484,11 @@ test('steers Kimi within its original run and displays child progress and questi
   const [created] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
-  const agent = (await created.json()) as Agent;
+  const agent = ((await created.json()) as { agents: Agent[] }).agents[0]!;
   try {
     expect(agent.steerEnabled).toBe(true);
     await expect(page.getByTestId('agent-status')).toHaveText('可用');
@@ -1509,7 +1517,7 @@ test('steers Kimi within its original run and displays child progress and questi
       (await (await page.request.get(`/api/agents/${agent.id}`)).json()).agent.steerEnabled,
     ).toBe(true);
     await send(page, 'Kimi 子代理提问');
-    await expect(page.getByText('Kimi steer 子代理验证 需要你的回答')).toBeVisible();
+    await expect(page.getByText(`${agent.name} 需要你的回答`)).toBeVisible();
     await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
     const inspector = page.getByTestId('inspector');
     await expect(inspector).toContainText('子代理 页面助手 (agent-browser) · test-kimi-model');
@@ -1527,7 +1535,7 @@ test('steers Kimi within its original run and displays child progress and questi
     await expect(page.locator('[data-sender="agent"]').last()).toContainText(
       'Kimi 子代理回答：文档、测试',
     );
-    await expect(page.getByText('Kimi steer 子代理验证 需要你的回答')).not.toBeVisible();
+    await expect(page.getByText(`${agent.name} 需要你的回答`)).not.toBeVisible();
     await expect(inspector).toContainText('页面检查完成');
     await expect
       .poll(async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs)
@@ -1553,11 +1561,11 @@ test('creates OpenCode with steer off, resumes its fixed session and answers a n
   const [created] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
-  const agent = (await created.json()) as Agent;
+  const agent = ((await created.json()) as { agents: Agent[] }).agents[0]!;
   try {
     expect(created.request().postDataJSON()).toMatchObject({
       harness: 'opencode',
@@ -1583,7 +1591,7 @@ test('creates OpenCode with steer off, resumes its fixed session and answers a n
       binding,
     );
     await send(page, 'OpenCode 多选提问');
-    await expect(page.getByText('OpenCode 浏览器验证 需要你的回答')).toBeVisible();
+    await expect(page.getByText(`${agent.name} 需要你的回答`)).toBeVisible();
     await expect(page.getByRole('button', { name: '提交回答' })).toBeDisabled();
     await page.getByRole('checkbox', { name: '代码', exact: true }).check();
     await page.getByRole('checkbox', { name: '测试', exact: true }).check();
@@ -1621,11 +1629,11 @@ test('steers OpenCode busy input in its original native execution through the We
   const [created] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
-  const agent = (await created.json()) as Agent;
+  const agent = ((await created.json()) as { agents: Agent[] }).agents[0]!;
   try {
     expect(agent.steerEnabled).toBe(true);
     await expect(page.getByTestId('agent-status')).toHaveText('可用');
@@ -1672,11 +1680,11 @@ test('creates DSH with steer off, resumes its fixed session and answers a native
   const [created] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
-  const agent = (await created.json()) as Agent;
+  const agent = ((await created.json()) as { agents: Agent[] }).agents[0]!;
   try {
     expect(created.request().postDataJSON()).toMatchObject({
       harness: 'dsh',
@@ -1705,7 +1713,7 @@ test('creates DSH with steer off, resumes its fixed session and answers a native
       binding,
     );
     await send(page, 'DSH 多选提问');
-    await expect(page.getByText('DSH 浏览器验证 需要你的回答')).toBeVisible();
+    await expect(page.getByText(`${agent.name} 需要你的回答`)).toBeVisible();
     await expect(page.getByRole('button', { name: '提交回答' })).toBeDisabled();
     await page.getByRole('checkbox', { name: '代码', exact: true }).check();
     await page.getByRole('checkbox', { name: '测试', exact: true }).check();
@@ -1713,7 +1721,7 @@ test('creates DSH with steer off, resumes its fixed session and answers a native
     await expect(page.locator('[data-sender="agent"]').last()).toContainText(
       'DSH 多选回答：代码、测试',
     );
-    await expect(page.getByText('DSH 浏览器验证 需要你的回答')).not.toBeVisible();
+    await expect(page.getByText(`${agent.name} 需要你的回答`)).not.toBeVisible();
     await expect
       .poll(async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs)
       .toMatchObject([
@@ -1742,11 +1750,11 @@ test('steers DSH busy input in its original native execution through the Web', a
   const [created] = await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith('/api/agents') && response.request().method() === 'POST',
+        response.url().endsWith('/api/agents/batch') && response.request().method() === 'POST',
     ),
     dialog.getByRole('button', { name: '创建 Agent', exact: true }).click(),
   ]);
-  const agent = (await created.json()) as Agent;
+  const agent = ((await created.json()) as { agents: Agent[] }).agents[0]!;
   try {
     expect(created.request().postDataJSON()).toMatchObject({ harness: 'dsh', steerEnabled: true });
     expect(agent.steerEnabled).toBe(true);

@@ -2,7 +2,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query';
 import { LoaderCircle, Plus, RefreshCw } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
-import { createAgent, fetchHarnesses, fetchHarnessStatus, fetchModels } from '@/api/isles';
+import { createAgents, fetchHarnesses, fetchHarnessStatus, fetchModels } from '@/api/isles';
 import { invalidateAll } from '@/api/queries';
 import HarnessPathSettings from '@/components/HarnessPathSettings.vue';
 import ExecutionAccessSetting from './ExecutionAccessSetting.vue';
@@ -35,6 +35,11 @@ const form = ref({
   steerEnabled: false,
   dangerFullAccess: false,
 });
+const quantity = ref('1');
+const count = computed(() => Number(quantity.value));
+const validCount = computed(
+  () => Number.isInteger(count.value) && count.value >= 1 && count.value <= 50,
+);
 const selectedHarness = computed(() =>
   harnesses.data.value?.harnesses.find((harness) => harness.id === form.value.harness),
 );
@@ -119,20 +124,24 @@ async function recheck() {
 }
 
 const create = useMutation({
-  mutationFn: createAgent,
-  onSuccess: async (created) => {
+  mutationFn: createAgents,
+  onSuccess: async ({ agents: created }) => {
     // The new private chat must be listed before it can be selected.
     await invalidateAll(queryClient);
-    emit('created', created.channelId);
+    emit('created', created[0]!.channelId);
     open.value = false;
     form.value.name = '';
     form.value.canCreateGroups = false;
     form.value.steerEnabled = false;
     form.value.dangerFullAccess = false;
+    quantity.value = '1';
   },
 });
 watch(open, (value) => {
-  if (value) create.reset();
+  if (value) {
+    create.reset();
+    quantity.value = '1';
+  }
 });
 const problem = computed(
   () =>
@@ -147,13 +156,26 @@ function focusName(event: Event) {
   event.preventDefault();
   document.getElementById('agent-name')?.focus();
 }
+function submit() {
+  if (!validCount.value || create.isPending.value) return;
+  create.mutate({ ...form.value, count: count.value });
+}
+function updateOpen(value: boolean) {
+  if (!create.isPending.value) open.value = value;
+}
+function preventBusyClose(event: Event) {
+  if (create.isPending.value) event.preventDefault();
+}
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open" @update:open="updateOpen">
     <DialogContent
       class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md"
+      :class="create.isPending.value && '[&>button]:hidden'"
       @open-auto-focus="focusName"
+      @escape-key-down="preventBusyClose"
+      @interact-outside="preventBusyClose"
     >
       <DialogHeader>
         <DialogTitle>新建 Agent</DialogTitle>
@@ -196,110 +218,152 @@ function focusName(event: Event) {
         :binary-path="status.data.value?.binaryPath ?? null"
       />
 
-      <form class="grid gap-4" @submit.prevent="create.mutate(form)">
-        <div v-if="(harnesses.data.value?.harnesses.length ?? 0) > 1" class="grid gap-2">
-          <Label for="agent-harness">Harness</Label>
-          <NativeSelect id="agent-harness" v-model="form.harness" required>
-            <option
-              v-for="harness in harnesses.data.value?.harnesses"
-              :key="harness.id"
-              :value="harness.id"
-            >
-              {{ harness.displayName }}
-            </option>
-          </NativeSelect>
-        </div>
-        <div class="grid gap-2">
-          <Label for="agent-name">名称</Label>
-          <Input
-            id="agent-name"
-            v-model="form.name"
-            required
-            maxlength="80"
-            autocomplete="off"
-            :placeholder="`例如 ${form.harness || 'agent'}-1`"
-          />
-        </div>
-        <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_8.5rem]">
-          <div class="grid gap-2">
-            <Label for="agent-model">模型</Label>
-            <NativeSelect
-              id="agent-model"
-              v-model="form.model"
-              required
-              :disabled="!models.data.value"
-            >
+      <form @submit.prevent="submit">
+        <fieldset class="grid gap-4" :disabled="create.isPending.value">
+          <div v-if="(harnesses.data.value?.harnesses.length ?? 0) > 1" class="grid gap-2">
+            <Label for="agent-harness">Harness</Label>
+            <NativeSelect id="agent-harness" v-model="form.harness" required>
               <option
-                v-for="model in models.data.value?.models"
-                :key="model.id"
-                :value="model.model"
+                v-for="harness in harnesses.data.value?.harnesses"
+                :key="harness.id"
+                :value="harness.id"
               >
-                {{ model.displayName }}
+                {{ harness.displayName }}
               </option>
             </NativeSelect>
           </div>
-          <div class="grid gap-2">
-            <Label for="agent-effort">推理等级</Label>
-            <NativeSelect
-              id="agent-effort"
-              v-model="form.reasoningEffort"
-              required
-              :disabled="!current"
-            >
-              <option
-                v-for="effort in current?.supportedReasoningEfforts"
-                :key="effort"
-                :value="effort"
+          <div class="grid grid-cols-[minmax(0,1fr)_6rem] gap-4">
+            <div class="grid gap-2">
+              <Label for="agent-name">名称</Label>
+              <Input
+                id="agent-name"
+                v-model="form.name"
+                required
+                maxlength="80"
+                autocomplete="off"
+                aria-describedby="agent-naming"
+                :placeholder="`例如 ${form.harness || 'agent'}`"
+              />
+            </div>
+            <div class="grid gap-2">
+              <Label for="agent-count">创建数量</Label>
+              <Input
+                id="agent-count"
+                v-model="quantity"
+                type="number"
+                min="1"
+                max="50"
+                step="1"
+                required
+                inputmode="numeric"
+              />
+            </div>
+          </div>
+          <p id="agent-naming" class="-mt-1 text-xs leading-relaxed text-muted-foreground">
+            名称作为前缀，自动添加 -1、-2 等编号。已有同名前缀时接着编号。
+          </p>
+          <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_8.5rem]">
+            <div class="grid gap-2">
+              <Label for="agent-model">模型</Label>
+              <NativeSelect
+                id="agent-model"
+                v-model="form.model"
+                required
+                :disabled="!models.data.value"
               >
-                {{ effort }}
-              </option>
-            </NativeSelect>
+                <option
+                  v-for="model in models.data.value?.models"
+                  :key="model.id"
+                  :value="model.model"
+                >
+                  {{ model.displayName }}
+                </option>
+              </NativeSelect>
+            </div>
+            <div class="grid gap-2">
+              <Label for="agent-effort">推理等级</Label>
+              <NativeSelect
+                id="agent-effort"
+                v-model="form.reasoningEffort"
+                required
+                :disabled="!current"
+              >
+                <option
+                  v-for="effort in current?.supportedReasoningEfforts"
+                  :key="effort"
+                  :value="effort"
+                >
+                  {{ effort }}
+                </option>
+              </NativeSelect>
+            </div>
           </div>
-        </div>
-        <p v-if="current?.description" class="-mt-1 text-xs leading-relaxed text-muted-foreground">
-          {{ current.description }}
-        </p>
-        <ExecutionAccessSetting
-          id="agent-full-access"
-          v-model="form.dangerFullAccess"
-          class="rounded-md border px-3 py-2.5"
-          :disabled="create.isPending.value"
-        />
-        <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
-          <div class="min-w-0 flex-1">
-            <p id="agent-groups" class="text-[13px] font-medium">允许拉群</p>
-            <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-              可以创建群聊并邀请已有 Agent。之后可以在 Agent 详情中修改。
-            </p>
-          </div>
-          <Switch v-model="form.canCreateGroups" aria-labelledby="agent-groups" />
-        </div>
-        <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
-          <div class="min-w-0 flex-1">
-            <p id="agent-steer" class="text-[13px] font-medium">忙碌时实时接收（steer）</p>
-            <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-              开启时，新消息追加到当前执行；关闭时，新消息排队。
-            </p>
-            <p v-if="!supportsSteer" class="mt-0.5 text-xs text-muted-foreground">
-              实时接收需要 harness 的 steer 支持。
-            </p>
-          </div>
-          <Switch
-            v-model="form.steerEnabled"
-            aria-labelledby="agent-steer"
-            :disabled="!supportsSteer || create.isPending.value"
-          />
-        </div>
-        <DialogFooter class="pt-1">
-          <Button type="button" variant="outline" @click="open = false">取消</Button>
-          <Button
-            type="submit"
-            :disabled="create.isPending.value || !ready || !form.model || !form.reasoningEffort"
+          <p
+            v-if="current?.description"
+            class="-mt-1 text-xs leading-relaxed text-muted-foreground"
           >
-            <LoaderCircle v-if="create.isPending.value" class="animate-spin" /><Plus v-else />创建
-            Agent
-          </Button>
-        </DialogFooter>
+            {{ current.description }}
+          </p>
+          <ExecutionAccessSetting
+            id="agent-full-access"
+            v-model="form.dangerFullAccess"
+            class="rounded-md border px-3 py-2.5"
+            :disabled="create.isPending.value"
+          />
+          <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
+            <div class="min-w-0 flex-1">
+              <p id="agent-groups" class="text-[13px] font-medium">允许拉群</p>
+              <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                可以创建群聊并邀请已有 Agent。之后可以在 Agent 详情中修改。
+              </p>
+            </div>
+            <Switch v-model="form.canCreateGroups" aria-labelledby="agent-groups" />
+          </div>
+          <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
+            <div class="min-w-0 flex-1">
+              <p id="agent-steer" class="text-[13px] font-medium">忙碌时实时接收（steer）</p>
+              <p class="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                开启时，新消息追加到当前执行；关闭时，新消息排队。
+              </p>
+              <p v-if="!supportsSteer" class="mt-0.5 text-xs text-muted-foreground">
+                实时接收需要 harness 的 steer 支持。
+              </p>
+            </div>
+            <Switch
+              v-model="form.steerEnabled"
+              aria-labelledby="agent-steer"
+              :disabled="!supportsSteer || create.isPending.value"
+            />
+          </div>
+          <DialogFooter class="pt-1">
+            <Button
+              type="button"
+              variant="outline"
+              :disabled="create.isPending.value"
+              @click="open = false"
+              >取消</Button
+            >
+            <Button
+              type="submit"
+              :disabled="
+                create.isPending.value ||
+                !ready ||
+                !form.model ||
+                !form.reasoningEffort ||
+                !validCount ||
+                !form.name.trim()
+              "
+            >
+              <LoaderCircle v-if="create.isPending.value" class="animate-spin" /><Plus v-else />{{
+                create.isPending.value
+                  ? '正在创建…'
+                  : !validCount || count === 1
+                    ? '创建 Agent'
+                    : `创建 ${count} 个 Agent`
+              }}
+            </Button>
+          </DialogFooter>
+        </fieldset>
       </form>
     </DialogContent>
   </Dialog>

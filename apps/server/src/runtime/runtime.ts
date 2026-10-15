@@ -2,6 +2,7 @@ import {
   answerQuestionSchema,
   questionDefinitionSchema,
   type CreateAgent,
+  type CreateAgents,
   type CreateGroup,
   type Message,
   type QuestionAnswer,
@@ -21,7 +22,14 @@ import {
 } from '../harness/types.js';
 import { HttpError } from '../errors.js';
 import type { Logger } from '../logging.js';
-import type { Actor, AgentRecord, ClaimedChannel, MessageInput, Store } from '../storage/store.js';
+import type {
+  Actor,
+  AgentRecord,
+  ClaimedChannel,
+  MessageInput,
+  NewAgent,
+  Store,
+} from '../storage/store.js';
 import { formatMessages, MessageLabels } from './envelope.js';
 import { RunOutputBuffer } from './output.js';
 import type { AgentWorkspace } from './workspace.js';
@@ -86,6 +94,21 @@ export class Runtime {
   }
 
   async createAgent(input: CreateAgent) {
+    const agent = this.store.createAgent(await this.prepareAgent(input));
+    this.startCreatedAgent(agent);
+    return this.store.publicAgent(agent.id);
+  }
+  async createAgents(input: CreateAgents) {
+    const { count = 1, ...configuration } = input;
+    const agents = this.store.createAgents(await this.prepareAgent(configuration), count);
+    for (const agent of agents) this.startCreatedAgent(agent);
+    return agents.map((agent) => this.store.publicAgent(agent.id));
+  }
+  private startCreatedAgent(agent: AgentRecord) {
+    this.log.info({ agentId: agent.id, harness: agent.harness }, 'Agent created');
+    this.kick(agent.id);
+  }
+  private async prepareAgent(input: CreateAgent): Promise<NewAgent> {
     if (!this.baseUrl) throw new HttpError(503, 'Runtime 尚未监听本机端口');
     const adapter = this.harnesses.get(input.harness);
     this.validateSteer(adapter.descriptor.capabilities.steer, input.steerEnabled);
@@ -95,16 +118,13 @@ export class Runtime {
     const model = (await adapter.catalog.models()).find((m) => m.model === input.model);
     if (!model || !model.supportedReasoningEfforts.includes(input.reasoningEffort))
       throw new HttpError(400, '请选择实际可用的模型和推理等级');
-    const agent = this.store.createAgent({
+    return {
       ...input,
       canCreateGroups: input.canCreateGroups ?? false,
       steerEnabled: input.steerEnabled ?? false,
       dangerFullAccess: input.dangerFullAccess ?? false,
       nativeHome: adapter.nativeHome,
-    });
-    this.log.info({ agentId: agent.id, harness: agent.harness }, 'Agent created');
-    this.kick(agent.id);
-    return this.store.publicAgent(agent.id);
+    };
   }
   async updateAgent(id: string, update: UpdateAgent) {
     let agent = this.managed(id);

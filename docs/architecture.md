@@ -169,6 +169,8 @@ shadcn-vue 的基础组件与聊天业务组件分别组织，便于检查上游
 
 Agent ID 应独立于显示名称。名称中的 `harness-model-1/2/3` 表达用户看到的实例身份，不宜作为数据库外键、凭据身份或目录定位的唯一依据。
 
+创建窗口调用 `POST /api/agents/batch`，提交名称前缀、数量及共用配置，返回 `{ agents }`。Runtime 统一校验原生模型、推理等级和能力；Store 在同一同步事务内根据全部已有名称分配递增编号并创建记录，事务提交后分别初始化原生会话。并发创建同一前缀时使用最新已提交编号；验证失败时整批不创建。单项 `POST /api/agents` 接收完整名称，编辑沿用完整名称语义。
+
 原生 session ID 需要结合 harness 和原生状态存储范围解释，不能假定不同 harness 返回的 ID 全局唯一。
 
 当前存储与 API 的 `threadId` 字段保留现有命名，表示 adapter 返回的不透明原生 session ID。数据库基线不限制 harness 只能为 Codex；原生 ID 的唯一性按 `(harness, nativeHome, threadId)` 限定。Runtime 通过 Agent 所属 controller 和 adapter 处理事件，同名 session ID 不得串到其他 Agent。创建必须指定已注册 harness，编辑不允许更换它。此轮不增加旧 schema 检测、数据迁移或兼容代码，不清理或搬移已有 Codex 数据。

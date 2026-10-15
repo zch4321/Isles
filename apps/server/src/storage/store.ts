@@ -218,41 +218,65 @@ export class Store {
       .map((r) => this.publicAgent(r.id));
   }
   createAgent(input: NewAgent): AgentRecord {
+    return this.change(() => this.insertAgent(input));
+  }
+  createAgents(input: NewAgent, count: number): AgentRecord[] {
+    if (!Number.isInteger(count) || count < 1 || count > 50)
+      throw new HttpError(400, '创建数量须为 1 到 50 的整数');
+    return this.change(() => {
+      const prefix = `${input.name}-`;
+      let last = 0n;
+      for (const { name } of this.db.select({ name: agents.name }).from(agents).all()) {
+        if (!name.startsWith(prefix)) continue;
+        const suffix = name.slice(prefix.length);
+        if (!/^[1-9][0-9]*$/.test(suffix)) continue;
+        const number = BigInt(suffix);
+        if (number > last) last = number;
+      }
+      const names = Array.from(
+        { length: count },
+        (_, index) => `${prefix}${last + BigInt(index) + 1n}`,
+      );
+      if (names.some((name) => name.length > 80))
+        throw new HttpError(400, '生成的 Agent 名称超过 80 个字符，请缩短名称前缀');
+      return names.map((name) => this.insertAgent({ ...input, name }));
+    });
+  }
+  /** Call only inside change, so a batch publishes events after every Agent is committed. */
+  private insertAgent(input: NewAgent): AgentRecord {
     const id = randomUUID();
     const channelId = randomUUID();
     const { dangerFullAccess = false, ...record } = input;
-    return this.change(() => {
-      const root = join(this.workspaceDir, 'agents', id);
-      this.db
-        .insert(agents)
-        .values({
-          id,
-          ...record,
-          status: 'creating',
-          workspace: join(root, 'workspace'),
-          createdAt: now(),
-          updatedAt: now(),
-        })
-        .run();
-      this.db
-        .insert(channels)
-        .values({
-          id: channelId,
-          kind: 'private',
-          agentId: id,
-          createdBy: USER,
-          createdAt: now(),
-          updatedAt: now(),
-        })
-        .run();
-      this.db
-        .insert(channelMembers)
-        .values({ channelId, agentId: id, addedBy: USER, joinedAt: now() })
-        .run();
-      this.event('agent', { agentId: id }, { status: 'creating', dangerFullAccess });
-      this.event('channel', { channelId }, { created: true });
-      return { ...this.getAgent(id), dangerFullAccess };
-    });
+    const root = join(this.workspaceDir, 'agents', id);
+    this.db
+      .insert(agents)
+      .values({
+        id,
+        ...record,
+        status: 'creating',
+        workspace: join(root, 'workspace'),
+        createdAt: now(),
+        updatedAt: now(),
+      })
+      .run();
+    this.db
+      .insert(channels)
+      .values({
+        id: channelId,
+        kind: 'private',
+        agentId: id,
+        createdBy: USER,
+        createdAt: now(),
+        updatedAt: now(),
+      })
+      .run();
+    this.db
+      .insert(channelMembers)
+      .values({ channelId, agentId: id, addedBy: USER, joinedAt: now() })
+      .run();
+    this.event('agent', { agentId: id }, { status: 'creating', dangerFullAccess });
+    this.event('channel', { channelId }, { created: true });
+    return { ...this.getAgent(id), dangerFullAccess };
   }
   updateAgent(id: string, update: AgentUpdate) {
     const record = { ...update };
