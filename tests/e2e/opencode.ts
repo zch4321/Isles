@@ -16,6 +16,9 @@ export function opencodeBrowserAdapter(
   const persisted = new Map<string, Record<string, unknown>>();
   return new OpenCodeAdapter(new OpenCodeEnvironment(config, workspace), (_command, _cwd, env) => {
     const native = new OpenCodeFixture();
+    // Native event IDs survive process restarts; keep new executions distinct after resume.
+    const frame = native.frame.bind(native);
+    native.frame = (...args) => ({ ...frame(...args), id: `evt_${randomUUID()}` });
     for (const [id, session] of persisted) native.sessions.set(id, session);
     const timers = new Set<NodeJS.Timeout>();
     let active = false;

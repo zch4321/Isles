@@ -151,6 +151,7 @@ export function kimiBrowserAdapter(
           model: 'test-kimi-model',
           description: '检查页面并询问执行范围',
         });
+        emit('turn.started', { agentId: 'agent-browser', turnId: 41 });
         emit('thinking.delta', { agentId: 'agent-browser', turnId: 41, delta: '正在检查页面结构' });
         emit('tool.call.started', {
           agentId: 'agent-browser',
@@ -282,6 +283,7 @@ export function kimiBrowserAdapter(
               toolCallId: 'child-read',
               output: '页面检查完成',
             });
+            emit('turn.ended', { agentId: 'agent-browser', turnId: 41, reason: 'completed' });
             emit('subagent.completed', {
               subagentId: 'agent-browser',
               resultSummary: '页面检查完成',
@@ -314,7 +316,7 @@ export function kimiBrowserAdapter(
       status: async () => ({
         available: true,
         authenticated: true,
-        version: '2.1.1',
+        version: '2.3.1',
         binaryPath: config.current.cli.kimi.binaryPath,
         error: null,
       }),

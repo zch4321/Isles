@@ -80,7 +80,7 @@ describe('Kimi Code application integration', () => {
     expect((await app.inject('/api/harnesses/kimi/status')).json()).toMatchObject({
       available: true,
       authenticated: true,
-      version: '2.1.1',
+      version: '2.3.1',
       binaryPath: cli.binary,
     });
     expect(
@@ -144,7 +144,7 @@ describe('Kimi Code application integration', () => {
       { type: 'agentMessage', status: 'completed', text: expect.stringContaining('Reply: ') },
     ]);
     expect(app.isles.store.listMessages(agent.channelId)[0]!.deliveries[0]!.status).toBe(
-      'completed',
+      'accepted',
     );
     await app.inject({ method: 'POST', url: `/api/agents/${agent.id}/stop`, payload: {} });
     await app.inject({ method: 'POST', url: `/api/agents/${agent.id}/resume`, payload: {} });
@@ -206,7 +206,7 @@ describe('Kimi Code application integration', () => {
     expect(app.isles.store.agentDetail(agent.id).runs).toHaveLength(1);
     expect(
       app.isles.store.listMessages(agent.channelId).map((message) => message.deliveries[0]!.status),
-    ).toEqual(['completed', 'completed']);
+    ).toEqual(['accepted', 'accepted']);
     expect(await frames('/prompts')).toHaveLength(2);
   });
 
@@ -216,7 +216,7 @@ describe('Kimi Code application integration', () => {
     { boundaryOnSteer: true, nextTurnBeforeEnd: false },
     { boundaryOnSteer: true, nextTurnBeforeEnd: true },
   ])(
-    'tracks a consumed continuation in one run, including later steer and questions: %j',
+    'tracks a consumed continuation as a separate native run with its own inputs and questions: %j',
     async (race) => {
       const { app, cli, create, send, frames } = await fixture();
       const agent = await create({ steerEnabled: true });
@@ -236,8 +236,10 @@ describe('Kimi Code application integration', () => {
       );
       expect(app.isles.store.publicAgent(agent.id).status).toBe('running');
       expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([
-        { id: runId, turnId: '1', status: 'running' },
+        { turnId: '2', status: 'running' },
+        { id: runId, turnId: '1', status: 'completed' },
       ]);
+      const continuationId = app.isles.store.agentDetail(agent.id).runs[0]!.id;
       const nativeId = app.isles.store.publicAgent(agent.id).threadId!;
       const posts = await frames('/prompts');
       expect(posts).toHaveLength(2);
@@ -262,9 +264,9 @@ describe('Kimi Code application integration', () => {
         expect(app.isles.store.agentDetail(agent.id).questions).toHaveLength(1),
       );
       const question = app.isles.store.agentDetail(agent.id).questions[0]!;
-      expect(question).toMatchObject({ runId, status: 'pending' });
+      expect(question).toMatchObject({ runId: continuationId, status: 'pending' });
       const nativeQuestion = app.isles.store.getQuestion(question.id);
-      expect(nativeQuestion.turnId).toBe('1');
+      expect(nativeQuestion.turnId).toBe('2');
       const answer = await app.inject({
         method: 'POST',
         url: `/api/agents/${agent.id}/questions/${question.id}/answer`,
@@ -279,12 +281,18 @@ describe('Kimi Code application integration', () => {
       await cli.finish(nativeId);
       await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
       const detail = app.isles.store.agentDetail(agent.id);
-      expect(detail.runs).toHaveLength(1);
+      expect(detail.runs).toHaveLength(2);
       expect(detail.runs[0]).toMatchObject({
+        id: continuationId,
+        turnId: '2',
+        status: 'completed',
+        inputs: [{ channelId: agent.channelId, messageSeqs: [2, 3] }],
+      });
+      expect(detail.runs[1]).toMatchObject({
         id: runId,
         turnId: '1',
         status: 'completed',
-        inputs: [{ channelId: agent.channelId, messageSeqs: [1, 2, 3] }],
+        inputs: [{ channelId: agent.channelId, messageSeqs: [1] }],
       });
       expect(detail.runs[0]!.items.map((item) => item.text).join('\n')).toContain(
         'Continuation reply',
@@ -296,7 +304,7 @@ describe('Kimi Code application integration', () => {
         app.isles.store
           .listMessages(agent.channelId)
           .map((message) => message.deliveries[0]!.status),
-      ).toEqual(['completed', 'completed', 'completed']);
+      ).toEqual(['accepted', 'accepted', 'accepted']);
       expect(await frames('/prompts')).toHaveLength(3);
       expect(await frames(':abort')).toHaveLength(0);
       expect((await app.inject('/api/health')).statusCode).toBe(200);
@@ -337,11 +345,20 @@ describe('Kimi Code application integration', () => {
     );
     expect(starts).toHaveLength(2);
     expect(app.isles.store.publicAgent(agent.id).status).toBe('stopped');
-    expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([{ status: 'interrupted' }]);
+    expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([
+      { turnId: '2', status: 'interrupted' },
+      { turnId: '1', status: 'completed' },
+    ]);
     expect(
       app.isles.store.listMessages(agent.channelId).map((message) => message.deliveries[0]!.status),
-    ).toEqual(['cancelled', 'cancelled', 'cancelled']);
+    ).toEqual(['accepted', 'accepted', 'uncertain']);
     expect(await frames('/prompts')).toHaveLength(3);
+    await app.isles.runtime.resume(agent.id);
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
+    expect(await frames('/prompts')).toHaveLength(3);
+    expect(app.isles.store.listMessages(agent.channelId).at(-1)!.deliveries[0]!.status).toBe(
+      'uncertain',
+    );
   });
 
   it('expires a previous phase form while the continuation remains active and its new question stays answerable', async () => {
@@ -382,7 +399,8 @@ describe('Kimi Code application integration', () => {
     await cli.question(nativeId);
     await vi.waitFor(() => expect(app.isles.store.agentDetail(agent.id).questions).toHaveLength(1));
     const current = app.isles.store.agentDetail(agent.id).questions[0]!;
-    expect(current.runId).toBe(old.runId);
+    expect(current.runId).not.toBe(old.runId);
+    expect(app.isles.store.getQuestion(current.id).turnId).toBe('2');
     const result = await app.inject({
       method: 'POST',
       url: `/api/agents/${agent.id}/questions/${current.id}/answer`,
@@ -414,7 +432,12 @@ describe('Kimi Code application integration', () => {
     await cli.finish(nativeId, 'failed', 'Fixture native failure');
     await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('error'));
     const run = app.isles.store.agentDetail(agent.id).runs[0]!;
-    expect(run).toMatchObject({ turnId: '1', status: 'failed', error: 'Fixture native failure' });
+    expect(run).toMatchObject({ turnId: '2', status: 'failed', error: 'Fixture native failure' });
+    expect(app.isles.store.agentDetail(agent.id).runs[1]).toMatchObject({
+      turnId: '1',
+      status: 'completed',
+      error: null,
+    });
     expect(run.items).toContainEqual(
       expect.objectContaining({
         type: 'agentMessage',
@@ -424,7 +447,7 @@ describe('Kimi Code application integration', () => {
     );
     expect(
       app.isles.store.listMessages(agent.channelId).map((message) => message.deliveries[0]!.status),
-    ).toEqual(['failed', 'failed']);
+    ).toEqual(['accepted', 'accepted']);
     expect(await frames('/prompts')).toHaveLength(2);
     expect((await app.inject('/api/health')).statusCode).toBe(200);
   });

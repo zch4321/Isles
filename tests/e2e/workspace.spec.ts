@@ -59,6 +59,63 @@ async function createAgent(
 const noHorizontalScroll = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
 
+test('keeps delivered messages independent of background activities and autonomous questions', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const agent = await createAgent(page, '原生活动 Agent');
+  await send(page, '验证原生后台活动');
+  const detail = async () => await (await page.request.get(`/api/agents/${agent.id}`)).json();
+  await expect
+    .poll(async () => (await detail()).runs)
+    .toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ threadId: agent.threadId, status: 'completed' }),
+        expect.objectContaining({
+          threadId: `${agent.threadId}-background`,
+          status: 'running',
+          inputs: [],
+        }),
+      ]),
+    );
+  await expect(page.getByTestId('agent-status')).toHaveText('执行中');
+  await expect(page.locator('[data-sender="user"]').last()).toContainText('已送达');
+  expect((await page.request.post(`/api/__test/agents/${agent.id}/background/finish`)).ok()).toBe(
+    true,
+  );
+  await expect(page.getByRole('group', { name: '后续处理确认后台检查结果' })).toBeVisible();
+  await page.getByRole('radio', { name: /^确认/ }).check();
+  await page.getByRole('button', { name: '提交回答', exact: true }).click();
+  await expect
+    .poll(async () => (await detail()).runs)
+    .toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          turnId: 'autonomous-wake',
+          status: 'completed',
+          inputs: [],
+          items: expect.arrayContaining([
+            expect.objectContaining({ text: '自动唤醒后已记录结果' }),
+          ]),
+        }),
+        expect.objectContaining({
+          turnId: 'background-turn',
+          status: 'completed',
+          inputs: [],
+          items: expect.arrayContaining([expect.objectContaining({ text: '后台检查已完成' })]),
+        }),
+      ]),
+    );
+  expect((await detail()).runs).toHaveLength(3);
+  await expect(page.getByTestId('agent-status')).toHaveText('可用');
+  await page.getByRole('button', { name: 'Agent 详情', exact: true }).click();
+  const inspector = page.getByTestId('inspector');
+  const wake = inspector.locator('details[data-run]').filter({ hasText: 'autonomous-wake' });
+  if ((await wake.getAttribute('open')) === null) await wake.locator('summary').click();
+  await expect(wake.getByText('原生活动', { exact: true })).toBeVisible();
+  expect((await page.request.delete(`/api/agents/${agent.id}`)).ok()).toBe(true);
+});
+
 test('saves the Codex executable path in the creation dialog and restores automatic discovery', async ({
   page,
 }, testInfo) => {
@@ -1539,7 +1596,11 @@ test('steers Kimi within its original run and displays child progress and questi
     await expect(inspector).toContainText('页面检查完成');
     await expect
       .poll(async () => (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs)
-      .toMatchObject([{ status: 'completed' }, { status: 'completed' }]);
+      .toMatchObject([
+        { threadId: `${before.threadId}/agents/agent-browser`, status: 'completed', inputs: [] },
+        { status: 'completed' },
+        { status: 'completed' },
+      ]);
   } finally {
     await page.request.delete(`/api/agents/${agent.id}`);
   }
@@ -1639,6 +1700,12 @@ test('steers OpenCode busy input in its original native execution through the We
     await expect(page.getByTestId('agent-status')).toHaveText('可用');
     await send(page, '保持执行以验证 OpenCode steer');
     await expect(page.getByTestId('agent-status')).toHaveText('执行中');
+    await expect
+      .poll(
+        async () =>
+          (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs[0]?.turnId,
+      )
+      .toEqual(expect.any(String));
     const before = (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs[0] as {
       id: string;
       turnId: string;
@@ -1766,13 +1833,13 @@ test('steers DSH busy input in its original native execution through the Web', a
         async () =>
           (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs[0]?.turnId,
       )
-      .toEqual(expect.stringMatching(/^turn_/));
+      .toEqual(expect.stringMatching(/^\d+$/));
     const before = (await (await page.request.get(`/api/agents/${agent.id}`)).json()).runs[0] as {
       id: string;
       turnId: string;
       threadId: string;
     };
-    expect(before.turnId).toMatch(/^turn_/);
+    expect(before.turnId).toMatch(/^\d+$/);
     await send(page, 'DSH 忙碌追加消息');
     await expect(
       page.locator('[data-sender="user"]').filter({ hasText: 'DSH 忙碌追加消息' }),

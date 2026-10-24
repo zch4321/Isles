@@ -227,6 +227,54 @@ try {
   checks.steer = { runId: running.id, turnId: running.turnId, sameRun: true };
   console.log('OpenCode native same-execution steer passed');
 
+  if (local) {
+    const previous = new Set(detail.runs.map((run) => run.id));
+    const messageCount = app.isles.store.channelDetail(agent.channelId).messages.length;
+    await send(
+      agent.channelId,
+      'OPENCODE_BACKGROUND_START：使用原生 subagent 启动后台子代理，然后结束当前响应。',
+    );
+    const activities = await waitFor(
+      () => app.isles.store.agentDetail(agent!.id).runs.filter((run) => !previous.has(run.id)),
+      (runs) =>
+        runs.length === 3 &&
+        runs.every((run) => run.status === 'completed') &&
+        runs.some((run) => run.items.some((item) => item.text === 'OPENCODE_ROOT_WOKEN')),
+      'background child and autonomous root wake',
+    );
+    const child = activities.find((run) => run.threadId !== sessionId);
+    const roots = activities.filter((run) => run.threadId === sessionId);
+    const started = roots.find((run) => run.inputs.length === 1);
+    const woken = roots.find((run) => run.inputs.length === 0);
+    requireCheck(child && started && woken, 'Native background activity identities missing');
+    requireCheck(child.inputs.length === 0, 'Child activity acquired an Isles input');
+    requireCheck(
+      started.turnId !== woken.turnId && started.finishedAt! < child.finishedAt!,
+      'Root activity did not finish independently of its background child',
+    );
+    requireCheck(
+      child.items.some((item) => item.text === 'OPENCODE_CHILD_COMPLETE'),
+      'Background child output missing',
+    );
+    const messages = app.isles.store.channelDetail(agent.channelId).messages;
+    requireCheck(messages.length === messageCount + 1, 'Native activity created a formal message');
+    requireCheck(
+      messages
+        .find((message) => message.body.startsWith('OPENCODE_BACKGROUND_START'))
+        ?.deliveries.every((delivery) => delivery.status === 'accepted'),
+      'Completed native activity changed its input delivery receipt',
+    );
+    checks.backgroundActivities = activities.map((run) => ({
+      id: run.id,
+      sessionId: run.threadId,
+      turnId: run.turnId,
+      inputCount: run.inputs.length,
+      finishedAt: run.finishedAt,
+    }));
+    await ready(agent);
+    console.log('OpenCode native independent child and autonomous root wake passed');
+  }
+
   await request('POST', `/api/agents/${agent.id}/stop`, {});
   await app.close();
   app = await buildApp({ config, logStream });

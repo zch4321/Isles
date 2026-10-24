@@ -42,8 +42,8 @@ async function fixture() {
   };
   return { root, file, options, probe };
 }
-const opencodeVersion = 'opencode v2.0.26';
-const dshVersion = '0.2.0-rc.2';
+const opencodeVersion = 'opencode v2.1.4';
+const dshVersion = '0.2.1-rc.3';
 
 it('includes the native carrier environment in the real version probe', async () => {
   const f = await fixture();
@@ -83,7 +83,7 @@ describe('OpenCode v2 executable discovery', () => {
         file: binary,
         args: [],
         path: launcher,
-        version: 'opencode v2.0.26',
+        version: 'opencode v2.1.4',
       });
     },
   );
@@ -143,7 +143,7 @@ describe('DSH desktop executable discovery', () => {
       ],
       env: { ELECTRON_RUN_AS_NODE: '1' },
       path: f.launcher,
-      version: '0.2.0-rc.2',
+      version: '0.2.1-rc.3',
     });
   });
 

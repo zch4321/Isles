@@ -22,6 +22,7 @@ export interface HarnessCatalog {
   invalidate?(): void;
 }
 
+/** Live activities from the bound root or a descendant whose ownership the adapter verified. */
 export type HarnessEvent =
   | { type: 'context_usage'; sessionId: string; usage: HarnessContextUsage | null }
   | {
@@ -83,8 +84,9 @@ export interface HarnessSession {
   /** Persist the native ID before initialization or guidance verification can fail. */
   createSession(onCreated: (sessionId: string) => void): Promise<string>;
   resumeSession(sessionId: string): Promise<string>;
+  /** Resolve on native input consumption; activity completion arrives independently as an event. */
   submit(input: HarnessTurnInput): Promise<{ turnId: string }>;
-  /** Append to the exact active turn; optional only when the adapter declares no steer support. */
+  /** Target expectedTurnId; return the actual consuming turn, including a native queued continuation. */
   steer?(input: HarnessSteerInput): Promise<{ turnId: string }>;
   interrupt(sessionId: string, turnId: string): Promise<void>;
   answer(requestId: HarnessRequestId, answer: QuestionAnswer): void;

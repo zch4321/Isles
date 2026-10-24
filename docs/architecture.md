@@ -1,12 +1,14 @@
 # Isles（群岛）架构设计
 
-> 版本：0.23 · 日期：2026-10-09 · 状态：五种原生 harness 已接入；支持 steer、Markdown 聊天导出与上下文管理
+> 版本：0.24 · 日期：2026-10-24 · 状态：五种 harness 升级及统一原生活动模型验证中
 >
 > 产品语义以 [需求文档](requirements.md) 为准。本文整理技术选型、模块边界和关键运行流程；已实现范围与阶段验收见 [实现计划](implementation-plan.md)。
 >
 > “已确认”指用户已明确选择的内容；“建议”指本文提出的实现方案；“待确认”指需要产品决策或接入验证的事项。接口、表名、状态名及目录均为设计示意，尚未冻结。
 
 > 基础规则由工作目录文件加载；自动输入与 MCP 读取共用 [文本消息协议](message-protocol.md)。修复范围及真实加载、压缩、恢复的证据见 [基础修复计划](foundation-repair-plan.md)。
+
+当前版本与本轮验证状态见 [Harness 升级记录](harness-upgrade-2026-10-24.md)。
 
 ## 1. 架构目标与约束
 
@@ -278,11 +280,11 @@ Web 的批量删除入口固定所选对象 ID 与名称，确认后逐项调用
 
 群聊创建、查询、改名、成员增减和暂停/继续复用既有频道接口；新增 `DELETE /api/channels/:id`，仅允许群频道。`Channel.deletedAt` 从 SQLite 中该群永久保留的 `group_deleted` 事件的创建时间派生，普通频道为 `null`。默认列表、成员目录和调度查询排除有此标记的群；人类可通过 `includeDeleted=true`、频道详情及消息接口读取历史。
 
-删除事务写入最后一条系统通知、设置暂停状态、移除全部成员关系、取消本群的 `queued` / `skipped` / `submitting` / `steering` / `accepted` 投递并保存删除标记。已接收及其他终态投递、频道序号、历史作者、run 输入与原生记录保留。提交后再发布 SSE 通知；重复 DELETE 返回同一终态，不重复写通知。标记写入失败则整个删除回滚。
+删除事务写入最后一条系统通知、设置暂停状态、移除成员关系、取消本群尚未确认的 `queued` / `skipped` / `submitting` / `steering` 投递并保存删除标记。`accepted` 和 `received` 保留确定的送达或接收事实，频道序号、作者、执行关联与原生记录保留。提交后发布 SSE；重复删除返回同一终态，标记写入失败则整笔事务回滚。
 
 `group_deleted` 同时是持久业务状态和 SSE 通知，不能作为普通事件缓存清除，后续事件保留策略必须永久保留此类标记。当前事件类型保存为文本，无新增数据库列、基线结构变化或迁移代码。REST 拒绝删除后的编辑与成员操作（`410`）和消息写入（`409`），MCP 在成员检查前拒绝已删除群的全部访问；存储调度、主动收信与接收记录也显式检查标记。
 
-Runtime 不中断成员的原生 turn、不关闭其进程、不改变 Agent 的停止状态或待答问题。一次 turn 可能合并私聊及多个群的输入，因此取消投递只针对被删除群。原生接受和完成回调只更新仍处于该次尝试对应的 `submitting` / `steering` / `accepted` 的关联投递，避免较晚到达的回调覆盖已取消的群消息，其他频道继续正常完成。
+删除群聊保留成员的原生进程、停止意愿及待答问题，取消范围限定为本群尚未确认的投递。迟到的确切消费 ACK 可将仍绑定原尝试的投递订正为 `accepted`；原生完成事件只结算对应活动，已送达输入和群聊删除状态保持。其他频道继续按原有策略收发。
 
 Web 将已删除群放入“历史对话”，显示名称、删除标记、消息与只读详情，隐藏输入框、改名、成员操作及暂停/继续入口。用户在查看成员执行详情时收到删除事件，检查器返回群详情。删除确认说明历史与文件保留、成员继续可用及在途任务可能完成。行为与验证见 [群聊管理验收](group-management-acceptance.md)。
 
@@ -290,7 +292,7 @@ Web 将已删除群放入“历史对话”，显示名称、删除标记、消�
 
 ### 7.1 每个 Agent 一个运行控制器
 
-每个 Agent 的 Runtime 持有固定 session 绑定、原生连接、待输入通知和当前执行。不同 Agent 可以并行；同一 Agent 在任一时刻只能存在一条由 Isles 管理的活动执行路径，不维护群消息防抖计时器或全员轮次屏障。
+每个 Agent 的 Runtime 持有固定主 session、原生连接、初始提交及多个原生活动的索引。平台按 Agent 串行提交新的根输入，同时持续记录原生主阶段、后台任务、异步子代理与结果回注。每个原生 session/turn 对应独立 run；不同阶段分别结束，后台子活动可在主阶段结束后继续记录。调度保持即时唤醒，原生事件与 Isles 消息投递分别结算。
 
 上下文用量通过独立的 `HarnessEvent.context_usage` 上报，不要求活跃 turn。Store 将当前 session 快照持久化为既有 `agent` 事件的数据，详情返回 token、窗口、估算标识和更新时间。`Runtime.newSession()` 核验实际执行与原生初始化任务，在同步切换事务内取消全部频道的已有待投递、收束旧 steer 和问题，再关闭旧连接、创建新 session、记录私聊系统分界。管理操作和投递在此期间互斥；边界后新到达输入交给新会话，旧连接回调和旧 session 用量被过滤。操作保留身份、历史、工作区、群关系与停止意愿。接口、原生口径和测试见 [上下文管理](agent-context.md)。
 
@@ -326,17 +328,17 @@ M1 的“停止 Agent”同时中断当前 turn 并持久化停止状态，新�
 - **历史读取**：`read_messages` 继续支持双向历史分页，只将实际返回且仍排队或已跳过的消息记录为 `received`，不确认用于分页探测的额外一条消息，也不改写原生执行的接受、失败、取消或待核对状态。暂停群中主动读到的消息同样计为已接收。
 - **持久接收记录**：`received` 表示该 Agent 的 MCP 工具已取出消息并生成返回内容，不等同于执行完成；状态按频道、序号和接收者持久保存。重启后只自动处理仍排队的消息。工具响应与客户端之间仍无共同事务，接收记录不宣称客户端一定完成阅读；历史始终可重读。
 
-原生 turn 已结束后，由 Isles 依据新消息和运行策略启动下一轮。MCP 通知本身不能被视为唤醒已结束模型执行的保证。
+原生可自行开始后续或后台活动，Runtime 按事件持续记录；新的 Isles 输入按可投递状态和运行策略进入固定主 session。
 
 ### 7.3 实时追加与投递保证
 
 `HarnessDescriptor.capabilities.steer` 声明能力，`Agent.steerEnabled` 保存偏好；创建省略时默认为 `false`，PATCH 可独立修改。Web 根据能力控制开关，服务端创建/编辑仍独立拒绝 unsupported 的开启请求。偏好-only 更新不查询模型目录、不重启原生进程；支持且开启时，Runtime 会检查当前主 turn 并领取可投递未读，追加到它已有的 thread/turn，不创建并行执行。所有消息保留既有元数据、来源边界及格式。
 
-SQLite 先持久记录 `steer_batches` 及其投递关联，再调用 adapter 的 steer。`steering` 表示尚未收到原生接受确认，Web 显示“投递中”，与启动下一 turn 的 `submitting` 区分。确认后消息关联原有 run，原生 ACK 仅证明接受输入，不证明模型已经处理完工作。MCP 的 `receive_messages` / `read_messages` 仍立即返回，与自动追加共享消息接收状态；已领取的在途输入不能再作为排队未读重复收取，不增加阻塞工具或 wait 参数。
+SQLite 先保存 `steer_batches` 的原目标与消息引用，再调用 adapter。`steering` 为“投递中”；确切消费回执将消息标为 `accepted`（“已送达”），按实际 session/turn 关联 run。同阶段与后续阶段各自记录。批次保留原目标用于审计，消息的 run/turn 绑定记录实际消费位置。MCP 的 `receive_messages` / `read_messages` 保持立即返回，已领取输入与排队未读使用同一套接收记录。
 
-关闭偏好会停止领取后续追加批次，但不能撤销已写出的 RPC，已发批次仍按接受、拒绝或未知结果结算。Codex adapter 仅把 steer RPC 的 `-32600`、`-32601`、`-32602` 判为明确拒绝并退回队列，该输入留到下一 turn，当前 turn 不循环重试。其他 RPC 错误、超时或断连均保留结果待核对，不自动重投。若当前 turn 与追加响应交错结束，也必须按该批次已保存的 run/turn 身份结算，不能把旧响应应用到后续执行。
+关闭偏好停止领取后续批次，已发请求按实际回执结算。Codex steer 的 `-32600`、`-32601`、`-32602` 属于明确拒绝，输入退回队列供下一轮处理；其他未知错误、超时和断连保留待核对。原生回执携带实际消费身份时，关联该活动；缺失身份或结果时保留未知状态。已经确认的送达事实保持稳定。
 
-停止 Agent 会持久停止并中断/关闭当前连接，后续消息排队，只有显式恢复继续。暂停群只阻止新的自动领取，已经发出的请求仍需结算；暂停期间主动读仍可用。删除群或移出成员按各自权限和取消规则处理，迟到 ACK、结束或旧连接事件不能覆盖 `cancelled`。这些控制操作不等同于只关闭 steer 偏好。
+停止 Agent 先保存停止意愿，再中断和关闭所属连接；后续消息排队，显式恢复继续。未确认的 steer 在停止或关闭时记为待核对，迟到的确切消费 ACK 可订正送达事实，原 run 终态与停止意愿保持。暂停群阻止新的自动领取，已发请求继续结算，主动读取仍可用；删除群和移出成员取消各自范围内尚未确认的投递。
 
 ### 7.4 投递保证与不确定结果
 
@@ -344,19 +346,19 @@ Isles 可以通过数据库事务和去重键保证内部消息记录及待投�
 
 需要明确区分：
 
-| 事实                       | 可以得出的结论                                     |
-| -------------------------- | -------------------------------------------------- |
-| 消息已提交到 SQLite        | Isles 已接收并保存消息。                           |
-| 原生接口确认接受输入       | harness 已接受输入，具体确认强度由 adapter 定义。  |
-| MCP 主动收信或历史读取     | 实际返回的消息记录为已接收；执行状态在详情中查看。 |
-| 原生执行结束               | 此次执行已产生终态；不等于工作目标已经验收通过。   |
-| 发送后连接断开，未收到确认 | 可能未接受，也可能已执行，结果待核对。             |
+| 事实                       | 可以得出的结论                                       |
+| -------------------------- | ---------------------------------------------------- |
+| 消息已提交到 SQLite        | Isles 已接收并保存消息。                             |
+| 原生接口确认接受输入       | harness 已接受输入，具体确认强度由 adapter 定义。    |
+| MCP 主动收信或历史读取     | 实际返回的消息记录为已接收；执行状态在详情中查看。   |
+| 原生执行结束               | 对应原生活动进入终态；任务验收结论见正式消息和产物。 |
+| 发送后连接断开，未收到确认 | 可能未接受，也可能已执行，结果待核对。               |
 
-建议投递记录区分待投递、尝试中、已接受、明确失败和结果待核对，执行终态单独记录。发送前先记录尝试及关联信息，确认后再推进状态。
+投递状态区分排队、提交中、投递中、已送达、MCP 已接收、失败、取消与待核对，执行终态独立保存。`delivery.completed` 已移除。`acceptRun` 与 `acceptSteer` 仅按确切消费回执更新送达，`finishRun` 仅结算尚未确认的输入并完成 run；已送达状态在完成、中断、失败和异常退出后保留。
 
 恢复时优先查询原生 session/turn 状态并核对。只有明确未被接受的输入才可以安全重试；无法核对的请求不能直接重发，以免重复执行 Git、文件或其他有副作用的操作。
 
-这一设计不宣称跨 harness 的 exactly-once 执行，也不把所有重启后的未完成记录自动当作可重试。
+本轮以原生确定的消费和结束事实推进状态，未知结果保留原尝试供核对。
 
 ### 7.5 重启与进程所有权
 
@@ -428,7 +430,7 @@ Codex 的子代理设置沿用用户自己的 Codex 配置。子代理运行在�
 
 adapter 将原生 turn 与条目事件转换为 `HarnessEvent`，将用户问题转换为 `HarnessQuestion`，携带准确的 session、turn 与请求关联。确定原生拒绝用 `HarnessSubmissionRejected` 表达；超时、断连和其他提交错误保留结果不明语义，Runtime 不猜测是否执行，也不盲目重试。过期问题通过 adapter 拒绝，回答只交回仍有效的原请求。
 
-`HarnessEvent.item_delta` 表示正文、思考、命令输出或工具进度的暂态片段；`item` 表示完整输出或离散状态。Runtime 为每个活动执行维护 `RunOutputBuffer`，按条目 ID 在内存处理追加或替换，保持原有 128000 字符上限。增量处理不查询或更新数据库，也不产生平台事件。收到 `item` 时保存完整快照；执行结束、停止、连接异常及服务关闭前批量保存剩余片段，整批只产生一次 `run` 通知。完整缓冲内容在持久化前再次脱敏，覆盖凭据跨片段出现的情况。执行结束后拒绝迟到输出，新执行使用独立缓冲区。DSH 桥接层仅转发原始文本或思考增量，避免逐片段重组及重复传输累积全文；Kimi 使用独立状态用量与合并后的轻量 status 查询，snapshot 留给会话初始化。
+`HarnessEvent.item_delta` 表示正文、思考、命令或工具进度片段，`item` 表示完整输出或离散状态。Runtime 按原生 session/turn 为每个活动保存独立 `RunOutputBuffer`，按条目 ID 在内存追加或替换，保留 128000 字符上限。增量在内存累积，完整快照或执行边界批量持久化并脱敏。已结束活动忽略迟到片段；仍运行的后台和子代理活动继续使用自己的缓冲和 run。自主活动通过 `observeRun(agentId, sessionId, turnId)` 幂等创建，`inputs=[]`；`findNativeRun` 同时查询活动和终态记录。
 
 `GET /api/harnesses` 公开 descriptor；`GET /api/harnesses/:id/status` 与 `/models` 调用对应 catalog。Web 动态读取目录、模型和能力，只显示已注册项。旧 Codex 状态/模型路径删除，不加兼容别名。descriptor 声明 `configuration: 'cli-path'` 的 harness 通过 `GET/PUT /api/harnesses/:id/config` 读写可执行路径，保存后通过 adapter 失效发现/模型缓存；其他 harness 返回 404。
 
@@ -458,15 +460,15 @@ Codex 的可执行文件发现与平台协议分开处理：先按显式配置�
 
 Claude adapter 封装 executable 发现、共享原生 home、认证和模型/effort 目录、CLI 控制消息以及执行事件。`CLAUDE.md` 的托管段仅导入 `@AGENTS.md`，用户内容保留；`get_context_usage.memoryFiles` 通过规范化真实路径确认两个文件已加载，`mcp_status` 确认 Isles 已连接。仅以启动参数追加带环境变量 token 的 HTTP MCP，用户配置文件保持原生所有权。
 
-创建时先保存 UUID，再发送 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，等待内部初始化回合成功；PreToolUse 回调在该阶段拒绝工具调用，结果不进入 Isles 消息或 run。普通输入将平台 run UUID 作为原生输入 UUID，按原生 replay/started 确认及 result 的 `user_message_uuid` 关联执行；旧输入的结果不结束当前 run。`AskUserQuestion` 通过原生控制请求关联工具、输入 UUID 与问题 ID，Web 答案回交该请求；失效请求拒绝。恢复只使用原 UUID，原生会话不存在时报告错误。
+Claude 创建先保存 UUID，再发送中性用户消息并等待内部初始化回合成功；PreToolUse 回调拦截该阶段工具，初始化结果由 adapter 内部处理。普通输入用平台 run UUID 作为输入 UUID，主线程 replay/started 及 result 消费列表确认输入归属，每个原生回合独立结束。后台和自主回合按其身份继续发布事件。AskUserQuestion 与授权请求关联原生工具、session、turn 和请求 ID；失效请求过期。恢复使用原 UUID。
 
-Claude steer 校验固定 session 与目标 run UUID，再将批次 UUID 写入同一 stream-json 连接。原生 queued 记录排队状态，并解除等待传输回执的计时器，继续等待活动任务的消费边界；主线程 replay/started 和 result 的消费 UUID 列表将批次关联原 run，追加后的工具、提问和结果继续使用原 run 身份。原生回合结束时仍未消费的批次会由 CLI 作为下一个原生回合执行，adapter 因此保持 run 打开：批次被消费后计入同一 run，收到关联结果且没有待消费批次时才发布 turn 完成，一个 run 可以对应多个原生回合。这样回合结束与追加输入之间没有撤回竞态。interrupt(cancel_queued: true) 取消原生队列，被取消的批次返回确定拒绝；连接关闭或确认超时仍按待核对结算，退出通知只发布一次。
+Claude steer 校验固定主 session 与目标原生活动，将批次 UUID 写入同一 stream-json 连接。queued 表示传输入队，replay/started 与 result 消费 UUID 列表提供确切消费事实；adapter 回报实际消费回合。同回合消费归当前 run，后续回合消费归后续 run，每回合独立完成。`interrupt(cancel_queued: true)` 撤销原生排队输入；确认超时、连接关闭等未知结果保留待核对。Windows npm/pnpm 启动器解析到包内 `bin/claude.exe`，直接启动原生程序。
 
 应用关闭通过 `preClose` 同时释放 Runtime 原生进程和活动 MCP transport，随后关闭 HTTP 服务、数据库和数据目录锁；MCP 流不阻塞应用退出。新增 transport 在关闭阶段被拒绝。
 
 使用子进程启动持续运行的 server 后，后续交互通过原生协议完成。连接重建与 session 恢复分别处理，不能把每条消息变成一次新的 CLI 执行。
 
-Codex `0.159.2` 的空 thread 仍需初始化历史才能恢复：`thread/start(ephemeral: false)` 返回后立即保存原生 ID，再以 `thread/inject_items` 写入一条中性的 assistant 标记 `Isles session initialized.`。该标记不含规则，不调用模型、不产生 Isles run。规则加载只依靠工作目录 AGENTS.md，并校验原生返回的 `instructionSources`；恢复与创建均不传 Isles 的 `developerInstructions`。已有原生历史不改写。2026-10-02 曾验证旧注入方式 thread 的恢复，这是历史证据，不要求保留旧版本兼容代码。
+Codex 当前基线的空 thread 仍需初始化历史才能恢复：`thread/start(ephemeral: false)` 返回后立即保存原生 ID，再以 `thread/inject_items` 写入一条中性的 assistant 标记 `Isles session initialized.`。该标记不含规则，不调用模型、不产生 Isles run。规则加载只依靠工作目录 AGENTS.md，并校验原生返回的 `instructionSources`；恢复与创建均不传 Isles 的 `developerInstructions`。已有原生历史不改写。2026-10-02 曾验证旧注入方式 thread 的恢复，这是历史证据，不要求保留旧版本兼容代码。
 
 DSH 已于 2026-10-09 完成 review 后授权接入，采用原生 SDK 桥接保留 steer。后续每个新 adapter 仍需分别验证事件、恢复、原生问题与 MCP 能力；历史与共享产物以协作工具提供的能力为基础。
 
@@ -487,7 +489,7 @@ Agent 记录创建时所用的 Codex 目录；当前目录与之不同时拒绝�
 - Isles MCP 在 `mcpServers` 中以 HTTP 地址和 `Authorization: Bearer` 请求头传入。
 - `session/prompt` 只在回合结束时响应。首个内容更新、权限请求、表单请求或 prompt 响应视为原生已接受；此前收到 RPC 错误为确定拒绝，-32600 `turn.agent_busy` 在 60 秒内退避重试，连接关闭或进程退出保留结果不明。`stopReason` 映射为完成、中断或失败；回合结束后的迟到更新不记录。
 - 连续的消息块和思考块合并为同一条目，工具调用按 `toolCallId` 合并（更新只含变化字段，content 整体替换），plan 作为单一条目刷新。
-- 权限请求按全权限策略选择 allow_once（否则 allow_always）；`AskUserQuestion` 的权限回退不自动作答。表单请求的每个字段转换为一个 Isles 问题，选项值即标签，多选字段以数组回答，拒绝发送 `decline`。interrupt 取消未答表单并发送 `session/cancel`。
+- 权限模式由 ACP harness 的普通/完整访问配置选择。原生权限请求进入 Web，“允许本次”选择 `allow_once`，拒绝选择 `reject_once`；表单字段映射为 Isles 问题，选项值保留原标签，多选以数组回答，拒绝发送 `decline`。interrupt 取消待答表单并发送 `session/cancel`。
 - 模型目录在 `<data_dir>/acp-catalog/<id>` 建立不发送消息的临时会话，逐个模型读取 thinking 选项，完成后用 `session/delete`（或 `session/close`）删除。
 
 ### 9.3.1 Kimi Code 本地 web adapter
@@ -496,17 +498,17 @@ Agent 记录创建时所用的 Codex 目录；当前目录与之不同时拒绝�
 
 每个 Agent 的 Isles MCP 入口写入其工作目录下 `.kimi-code/mcp.json` 的 `isles` 项，token 使用 `bearerTokenEnvVar` 从独立进程环境读取；其他工作区 MCP 项保留，用户全局配置保持原生所有权。adapter 通过原生 workspace trust 接口加载该工作区 MCP。规则继续由 Kimi 原生发现 `AGENTS.md`，不额外拼接到用户消息中。
 
-原生主阶段的开始和结束控制 Isles run；一个 run 可以包含连续多个原生阶段，公开 turn ID 保持最初阶段 ID。adapter 保存各阶段的原生 ID、prompt 归属与终态，接受下一阶段先开始、上一阶段后结束的事件顺序，待全部阶段、输入及投递操作结算后发布一次公开完成事件。子代理思考、工具及生命周期仅补充执行详情，子代理结束不会结束主 run，子代理用量不会覆盖主会话。上下文占用来自独立状态事件和合并后的轻量 status 查询；接口未公开测量标识，按估算展示，窗口来自原生模型目录。
+Kimi 的主阶段、后台和子代理活动按原生身份分别记录 run，阶段之间独立开始与结束。主阶段结束后，原生后续活动及异步子代理继续发布各自事件；子代理用量保持在其原生范围，主会话上下文来自独立状态事件及合并后的轻量 status 查询。上下文按原生窗口和估算标记展示。
 
-输入使用稳定的 `prompt_id`。steer 先提交原生排队输入，再追加到当前原生阶段；原生接口没有 `expectedTurnId` 字段，adapter 以 `prompt.steered` 或自有批次的 `turn.started` 确认实际消费。同阶段追加和自动进入后续阶段都计入原 run，入队后的 `40402` 或状态变化等待回执，已消费批次不重投。输出、偏移及工具按阶段区分；`question_expired` 使 Runtime 同步过期原生阶段释放的问题与审批，保留已回答记录，后续阶段继续使用原 run 的问题关联。停止等待投递操作结束，先取消未消费输入，再取消当前原生 prompt。失败、断连和缺失回执保留原有待核对语义。完整协议与验收见 [Kimi Web 接入](kimi-web-acceptance.md)，此前 ACP 的验收记录保留为历史事实。
+Kimi 输入使用稳定 `prompt_id`。steer 先提交排队输入，再请求原生追加；adapter 以 `prompt.steered` 或自有 prompt 的 `turn.started` 回报实际消费阶段。后续阶段独立 run，收到确切回执后绑定该活动；入队后的 `40402` 或状态变化继续等待消费结果。`40931` 在原生接收前拒绝被其他客户端占用的写入，保留其所有权，稍后可重试。问题和审批按阶段过期，停止先撤销未消费输入，再取消原生 prompt。当前版本与验证见 [本轮升级记录](harness-upgrade-2026-10-24.md)，此前记录见 [Kimi Web 接入](kimi-web-acceptance.md)。
 
 ### 9.4 OpenCode 原生 v2 adapter
 
 `harness/opencode/` 内部封装 HTTP 请求、SSE 帧、模型目录、配置环境与事件转换。每位 Agent 启动独立的 `serve --stdio --hostname 127.0.0.1 --port 0`；随机 HTTP 密码只用于本机原生 server，stdio 模式在启动工具前清除该密码环境变量。Isles 不使用会复用用户 service 的 `--service` 模式。原生配置目录按 `OPENCODE_CONFIG_DIR` 使用；认证和 session 在用户的原生 SQLite 数据库中，固定绑定记录数据库绝对路径。
 
-`OPENCODE_CONFIG_CONTENT` 以 JSONC 解析并合并 Isles MCP 配置，保留其他字段与 MCP servers，用户文件保持原生所有权。创建传入固定 ID、工作目录、模型与会话级全权限规则；原生 AGENTS 发现机制负责规则加载，保留 OpenCode 的全局及目录规则语义。恢复只读取原 ID，核对目录，不创建替代 session。目录检测先通过原生 integration API 等待插件启动完成，再读取已启用的模型及 variants；可用模型包含免登录的免费提供商，不代表某个远端账号认证已实测成功。
+`OPENCODE_CONFIG_CONTENT` 以 JSONC 解析并合并 Isles MCP 配置，保留其他字段和 servers。创建传入固定 ID、工作目录、模型与 Agent 的会话权限；默认授权个人和共享目录，其他工具沿用原生规则，完整访问采用原生全允许模式。原生发现机制加载 AGENTS.md。恢复读取原 ID 并核对目录；目录检测等待 integration API 就绪后读取已启用模型和 variants，认证按原生目录状态展示。
 
-CLI 默认不保存历史事件归档，因此执行状态使用 `/api/event` 的原生已提交事件流；`server.connected` 确认订阅建立后才投递输入，session 过滤和提交序号避免串线与重复事件。execution.started 的事件 ID 是 Isles 原生 turn ID。普通输入和 steer 使用独立、稳定的消息 ID，原生 inbox.delivered 确认进入执行，HTTP 入队响应本身不结算平台接收。OpenCode 没有 expectedTurnId 原子校验，因此 adapter 同时核对目标 execution：跨越执行边界进入待核对，不伪称同一 turn，也不自动重投。停止等待已发入队请求结算，再撤销尚未消费的自有输入并中断、关闭进程。恢复时原生待处理输入需要先核对。
+OpenCode 通过 `/api/event` 的已提交事件流记录活动，`server.connected` 后再投递；session 过滤与提交序号用于去重。`execution.started` 的事件 ID 作为原生 turn ID，各 execution 独立 run。普通输入与 steer 使用稳定消息 ID，`inbox.delivered` 确认实际消费 execution，HTTP 入队响应记录提交状态。确切回执跨 execution 时将输入关联实际 run；缺失回执保留待核对。停止等待已发请求结算，撤销未消费自有输入并中断、关闭进程。恢复分页支持尾页 `cursor.next=null`。
 
 原生文本、推理和工具的已提交事件转为执行条目；form.created 经事件流转为文本/选项及多选问题，答复标签映射回原生选项值，子代理的问题仍归属于主 Agent。执行失败来自原生 execution.failed，未知网络或协议结果保持结果不明。验收与原生边界见 [OpenCode 验收](opencode-acceptance.md)。
 
@@ -518,7 +520,7 @@ CLI 默认不保存历史事件归档，因此执行状态使用 `/api/event` �
 
 创建与恢复分别调用原生 agents.create/resume，先保存固定 ID；恢复核对工作目录，缺失 session 报错。模型选择以 provider/model 和原生 reasoningEffort 精确传入下一次请求。创建不投递消息，原生 instruction 插件加载工作目录与全局 AGENTS.md。
 
-原生 session 的整数 turn 身份映射为平台 turnId；steer 同步校验 expectedTurnId 后调用 native agent.steer。入队回执与消费确认分离：agent/inbox/claimed 关联 native turn，durable user/message 确认进入该执行。原生事件序号与 stream attempt/revision 用于去重，文本、推理及工具映射到执行详情。停止等待已发入队请求结算，撤销未消费的自有输入，再取消并关闭原生进程；恢复清理断连遗留的自有输入。未确定结果仍按平台待核对规则处理。
+DSH 以原生 session 与整数 turn 标识独立活动，异步子代理使用自己的 session/turn，后台和自主 turn 持续记录。steer 同步核验 expectedTurnId 后调用 native agent.steer，入队回执与消费确认分别处理；`agent/inbox/claimed` 关联原生 turn，durable `user/message` 确认消费。事件序号与 stream attempt/revision 用于去重，工具参数按当前 SDK 类型读取。停止撤销尚未消费的自有输入，再取消和关闭连接；未知消费保留待核对。
 
 原生 user-questions waterfall 将表单传给 Isles，答案转回 selected/custom，停止及关闭取消等待。子代理遵循 DSH 原生生命周期；原生问答服务要求调用者为 live root，子代理需要把待决定事项交回主 Agent。实现与验收见 [DSH 验收](dsh-acceptance.md)。
 
@@ -528,7 +530,7 @@ CLI 默认不保存历史事件归档，因此执行状态使用 `/api/event` �
 
 当前直接运行本机 Claude CLI；Kimi Code 使用本地 web adapter，见 [Kimi Web 接入](kimi-web-acceptance.md)。其他 ACP agent 增加 harness 配置即可复用通用 ACP adapter。新 harness 需要按同一契约实现原生模型目录、固定 session、生命周期、MCP 与原生规则发现，不将 Codex 参数或 JSON-RPC 方法推广为通用要求。
 
-后续扩展优先考虑模型厂商自己维护、执行核心开源的 harness；每项支持须有真实原生验收。语义 fake adapter 只证明平台契约可独立于 Codex 协议运行，不证明其他产品已可用。
+后续扩展优先考虑模型厂商维护、执行核心开源的 harness，每项支持分别完成原生验收。语义 fake adapter 验证平台契约与协议转换，原生版本、模型和账户行为由对应的真实接入验证覆盖。
 
 ### 9.5 规则与原生状态
 

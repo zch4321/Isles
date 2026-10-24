@@ -222,7 +222,7 @@ describe('Kimi Code local Web adapter', () => {
     expect(await f.adapter.catalog.status()).toMatchObject({
       available: true,
       authenticated: true,
-      version: '2.1.1',
+      version: '2.3.1',
       binaryPath: f.cli.binary,
     });
     expect(await f.adapter.catalog.models()).toMatchObject([
@@ -516,8 +516,17 @@ describe('Kimi Code local Web adapter', () => {
     );
     expect(f.events.filter((event) => event.type === 'turn_started')).toEqual([
       { type: 'turn_started', sessionId: id, turnId },
+      { type: 'turn_started', sessionId: `${id}/agents/child`, turnId: '99' },
     ]);
-    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([]);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
+      {
+        type: 'turn_completed',
+        sessionId: `${id}/agents/child`,
+        turnId: '99',
+        status: 'completed',
+        error: null,
+      },
+    ]);
     await vi.waitFor(() =>
       expect(f.events.filter((event) => event.type === 'context_usage').at(-1)).toEqual({
         type: 'context_usage',
@@ -533,7 +542,10 @@ describe('Kimi Code local Web adapter', () => {
     expect(
       f.events.every((event) => {
         if (event.type !== 'item' && event.type !== 'item_delta') return true;
-        return event.turnId === turnId && event.sessionId === id;
+        return (
+          (event.turnId === turnId && event.sessionId === id) ||
+          (event.turnId === '99' && event.sessionId === `${id}/agents/child`)
+        );
       }),
     ).toBe(true);
     const childDeltas = f.events.filter(
@@ -709,6 +721,10 @@ describe('Kimi Code local Web adapter', () => {
         runInBackground: false,
       });
       await f.cli.emitBatch(id, [
+        {
+          type: 'turn.started',
+          fields: { agentId: 'child', turnId: 99, promptId: 'partial-child' },
+        },
         { type: 'thinking.delta', fields: { turnId: 1, delta: 'Completed thought' } },
         { type: 'assistant.delta', fields: { turnId: 1, delta: 'Partial ' } },
         { type: 'assistant.delta', fields: { turnId: 1, delta: 'main text' } },
@@ -891,6 +907,22 @@ describe('Kimi Code local Web adapter', () => {
     expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([]);
   });
 
+  it('keeps a session occupied by another client retryable after a definite 40931 refusal', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ rejectPrompt: true, rejectPromptCode: 40931 });
+    await expect(session.submit(f.input('occupied', id))).rejects.toBeInstanceOf(
+      HarnessSubmissionRejected,
+    );
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+    expect(f.events.filter((event) => event.type === 'turn_started')).toEqual([]);
+    expect(await f.requests(':takeover')).toEqual([]);
+    await f.cli.set({});
+    await expect(session.submit(f.input('after owner releases', id))).resolves.toEqual({
+      turnId: '1',
+    });
+  });
+
   it('keeps a proven start accepted if the HTTP response fails later and reports stream loss once', async () => {
     const f = await fixture();
     const { session, id } = await f.created();
@@ -950,7 +982,7 @@ describe('Kimi Code local Web adapter', () => {
     { nextTurnBeforeEnd: true, finishOnQueuedPrompt: true, queuedPromptResponseDelayMs: 80 },
     { nextTurnBeforeEnd: false, boundaryOnSteer: true },
     { nextTurnBeforeEnd: true, boundaryOnSteer: true },
-  ])('keeps a batch consumed across a native boundary in the same run (%j)', async (race) => {
+  ])('reports the consuming native turn across a queued input boundary (%j)', async (race) => {
     const f = await fixture();
     await f.cli.set({ manualOutput: true, ...race });
     const { session, id } = await f.created();
@@ -958,7 +990,7 @@ describe('Kimi Code local Web adapter', () => {
     const batchId = randomUUID();
     expect(
       await session.steer!({ sessionId: id, expectedTurnId: turnId, batchId, text: 'late batch' }),
-    ).toEqual({ turnId });
+    ).toEqual({ turnId: '2' });
     await vi.waitFor(async () =>
       expect(
         (await f.cli.records()).filter(
@@ -968,8 +1000,11 @@ describe('Kimi Code local Web adapter', () => {
     );
     expect(f.events.filter((event) => event.type === 'turn_started')).toEqual([
       { type: 'turn_started', sessionId: id, turnId },
+      { type: 'turn_started', sessionId: id, turnId: '2' },
     ]);
-    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([]);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
+      { type: 'turn_completed', sessionId: id, turnId, status: 'completed', error: null },
+    ]);
     expect(await f.requests(`/${f.nativeId(batchId)}:abort`)).toEqual([]);
     expect(f.handlers.exit).not.toHaveBeenCalled();
     expect(
@@ -996,11 +1031,11 @@ describe('Kimi Code local Web adapter', () => {
     expect(
       await session.steer!({
         sessionId: id,
-        expectedTurnId: turnId,
+        expectedTurnId: '2',
         batchId: nextBatch,
         text: 'append in phase two',
       }),
-    ).toEqual({ turnId });
+    ).toEqual({ turnId: '2' });
     const receipt = (await f.cli.records()).find(
       (record) => record.type === 'event' && record.frame?.type === 'prompt.steered',
     );
@@ -1009,12 +1044,12 @@ describe('Kimi Code local Web adapter', () => {
       promptIds: [f.nativeId(nextBatch)],
     });
     await f.cli.finish(id);
-    expect(await f.completed(turnId)).toMatchObject({ status: 'completed' });
-    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(await f.completed('2')).toMatchObject({ status: 'completed' });
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(2);
     expect(f.handlers.exit).not.toHaveBeenCalled();
   });
 
-  it('projects chained native phases, late frames and native questions under the original turn ID', async () => {
+  it('routes native phases and child questions to their own turn identities', async () => {
     const f = await fixture();
     await f.cli.set({
       manualOutput: true,
@@ -1028,11 +1063,17 @@ describe('Kimi Code local Web adapter', () => {
       { type: 'thinking.delta', fields: { turnId: 1, delta: 'Thought one' } },
       { type: 'assistant.delta', fields: { turnId: 1, delta: 'Answer one' } },
     ]);
+    let currentTurnId = turnId;
     const batch = async (text: string) => {
       const batchId = randomUUID();
-      expect(
-        await session.steer!({ sessionId: id, expectedTurnId: turnId, batchId, text }),
-      ).toEqual({ turnId });
+      const receipt = await session.steer!({
+        sessionId: id,
+        expectedTurnId: currentTurnId,
+        batchId,
+        text,
+      });
+      expect(receipt.turnId).toBe(String(Number(currentTurnId) + 1));
+      currentTurnId = receipt.turnId;
       return batchId;
     };
     await batch('phase two');
@@ -1047,7 +1088,7 @@ describe('Kimi Code local Web adapter', () => {
     await vi.waitFor(() => expect(f.questions).toHaveLength(1));
     expect(f.questions[0]).toMatchObject({
       sessionId: id,
-      turnId,
+      turnId: '2',
       questions: [{ multiSelect: false }, { multiSelect: true }],
     });
     const nativeMain = (await f.cli.records()).find(
@@ -1097,7 +1138,7 @@ describe('Kimi Code local Web adapter', () => {
       turn_id: 99,
     });
     await vi.waitFor(() => expect(f.questions).toHaveLength(2));
-    expect(f.questions[1]).toMatchObject({ sessionId: id, turnId });
+    expect(f.questions[1]).toMatchObject({ sessionId: `${id}/agents/child-three`, turnId: '99' });
     const nativeChild = (await f.cli.records())
       .filter(
         (record) => record.type === 'event' && record.frame?.type === 'event.question.requested',
@@ -1108,10 +1149,10 @@ describe('Kimi Code local Web adapter', () => {
     await vi.waitFor(async () =>
       expect(await f.requests(`/questions/${f.questions[1]!.requestId}`)).toHaveLength(1),
     );
-    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([]);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(2);
     await f.cli.emit(id, 'turn.ended', { agentId: 'child-three', turnId: 99, reason: 'completed' });
     await f.cli.finish(id);
-    await f.completed(turnId);
+    await f.completed('3');
     expect(f.items()).toEqual(
       expect.arrayContaining([
         { type: 'reasoning', status: 'completed', text: 'Thought one' },
@@ -1123,12 +1164,14 @@ describe('Kimi Code local Web adapter', () => {
     );
     expect(f.items().some((item) => item.text.includes('Answer two continued'))).toBe(true);
     expect(f.items().some((item) => item.text.includes('old late output'))).toBe(false);
-    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
-    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(4);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(4);
     expect(
       f.events.every((event) => {
         if (event.type !== 'item' && event.type !== 'item_delta') return true;
-        return event.turnId === turnId;
+        return event.sessionId === `${id}/agents/child-three`
+          ? event.turnId === '99'
+          : ['1', '2', '3'].includes(event.turnId!);
       }),
     ).toBe(true);
     expect(f.handlers.exit).not.toHaveBeenCalled();
@@ -1154,13 +1197,14 @@ describe('Kimi Code local Web adapter', () => {
           batchId,
           text: 'automatic continuation',
         }),
-      ).toEqual({ turnId });
+      ).toEqual({ turnId: '2' });
       expect(await f.completed(turnId)).toMatchObject({ status: 'completed' });
+      expect(await f.completed('2')).toMatchObject({ status: 'completed' });
       expect(f.items()).toEqual([
         { type: 'agentMessage', status: 'completed', text: 'Reply: automatic continuation' },
       ]);
-      expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
-      expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+      expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(2);
+      expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(2);
       expect(await f.requests('/prompts')).toHaveLength(2);
       expect(await f.requests(`/${f.nativeId(batchId)}:steer`)).toEqual([]);
       expect(await f.requests(`/${f.nativeId(batchId)}:abort`)).toEqual([]);
@@ -1184,7 +1228,7 @@ describe('Kimi Code local Web adapter', () => {
     const pendingBatch = randomUUID();
     const pending = session.steer!({
       sessionId: id,
-      expectedTurnId: turnId,
+      expectedTurnId: '2',
       batchId: pendingBatch,
       text: 'pending batch',
     });
@@ -1208,7 +1252,7 @@ describe('Kimi Code local Web adapter', () => {
     expect(f.handlers.exit).not.toHaveBeenCalled();
   });
 
-  it('keeps a native continuation failure and its error on the original public run', async () => {
+  it('reports a continuation failure on its own native turn', async () => {
     const f = await fixture();
     await f.cli.set({ manualOutput: true, boundaryOnSteer: true });
     const { session, id } = await f.created();
@@ -1221,27 +1265,27 @@ describe('Kimi Code local Web adapter', () => {
         batchId,
         text: 'continuation',
       }),
-    ).toEqual({ turnId });
+    ).toEqual({ turnId: '2' });
     await f.cli.emit(id, 'assistant.delta', { turnId: 2, delta: 'Partial continuation' });
     const error = 'Native model request failed: HTTP 502, request fixture-continuation';
     await f.cli.finish(id, 'failed', error);
-    expect(await f.completed(turnId)).toEqual({
+    expect(await f.completed('2')).toEqual({
       type: 'turn_completed',
       sessionId: id,
-      turnId,
+      turnId: '2',
       status: 'failed',
       error,
     });
     expect(f.items()).toEqual([
       { type: 'agentMessage', status: 'failed', text: 'Partial continuation' },
     ]);
-    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(2);
     expect(await f.requests('/prompts')).toHaveLength(2);
     expect(await f.requests(`/${f.nativeId(batchId)}:abort`)).toEqual([]);
     expect(f.handlers.exit).not.toHaveBeenCalled();
   });
 
-  it('interrupts the active continuation using the original public turn ID', async () => {
+  it('interrupts the active continuation using its native turn ID', async () => {
     const f = await fixture();
     await f.cli.set({ manualOutput: true, boundaryOnSteer: true });
     const { session, id } = await f.created();
@@ -1253,15 +1297,15 @@ describe('Kimi Code local Web adapter', () => {
       batchId,
       text: 'continuation',
     });
-    expect(await steering).toEqual({ turnId });
+    expect(await steering).toEqual({ turnId: '2' });
     await f.cli.emit(id, 'assistant.delta', { turnId: 2, delta: 'Partial continuation' });
-    await session.interrupt(id, turnId);
-    expect(await f.completed(turnId)).toMatchObject({ status: 'interrupted', error: null });
-    expect(await steering).toEqual({ turnId });
+    await session.interrupt(id, '2');
+    expect(await f.completed('2')).toMatchObject({ status: 'interrupted', error: null });
+    expect(await steering).toEqual({ turnId: '2' });
     expect(f.items()).toEqual([
       { type: 'agentMessage', status: 'interrupted', text: 'Partial continuation' },
     ]);
-    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(2);
     expect(
       (await f.cli.records()).filter(
         (record) => record.type === 'http' && record.path?.endsWith(':abort'),
@@ -1310,7 +1354,7 @@ describe('Kimi Code local Web adapter', () => {
         batchId: randomUUID(),
         text: 'phase eight',
       }),
-    ).toEqual({ turnId });
+    ).toEqual({ turnId: '8' });
     const expired = () => f.events.filter((event) => event.type === 'question_expired');
     await vi.waitFor(() =>
       expect(expired()).toEqual([
@@ -1351,8 +1395,8 @@ describe('Kimi Code local Web adapter', () => {
     );
     expect(expired()).toHaveLength(2);
     await f.cli.finish(id);
-    expect(await f.completed(turnId)).toMatchObject({ status: 'completed' });
-    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(1);
+    expect(await f.completed('8')).toMatchObject({ status: 'completed' });
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(2);
     expect(f.handlers.exit).not.toHaveBeenCalled();
   });
 
@@ -1515,6 +1559,235 @@ describe('Kimi Code local Web adapter', () => {
     expect(() =>
       session.answer(f.questions[2]!.requestId, { answers: { q0: { answers: ['One'] } } }),
     ).toThrow();
+  });
+
+  it('observes autonomous native wakeups and steers or interrupts their actual turn', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ manualOutput: true, holdTurn: true });
+    await f.cli.wake(id);
+    await vi.waitFor(() =>
+      expect(f.events).toContainEqual({ type: 'turn_started', sessionId: id, turnId: '1' }),
+    );
+    expect(await f.requests('/prompts')).toHaveLength(0);
+    await f.cli.emit(id, 'assistant.delta', { turnId: 1, delta: 'Autonomous output' });
+    const batchId = randomUUID();
+    expect(
+      await session.steer!({
+        sessionId: id,
+        expectedTurnId: '1',
+        batchId,
+        text: 'Steer native wake',
+      }),
+    ).toEqual({ turnId: '1' });
+    await session.interrupt(id, '1');
+    expect(await f.completed('1')).toMatchObject({ status: 'interrupted' });
+    expect(f.items()).toContainEqual({
+      type: 'agentMessage',
+      status: 'interrupted',
+      text: 'Autonomous output',
+    });
+    const wake = (await f.cli.records()).find((record) => record.frame?.type === 'turn.started');
+    const promptId = (wake!.frame!.payload as { promptId: string }).promptId;
+    expect(await f.requests(`/${promptId}:abort`)).toHaveLength(1);
+    await f.cli.wake(id, 'Next native wake');
+    await f.cli.finish(id);
+    expect(await f.completed('2')).toMatchObject({ status: 'completed' });
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('observes and interrupts native turns without a tracked prompt ID', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ manualOutput: true });
+    await f.cli.wake(id, 'Untracked native wake', false);
+    await vi.waitFor(() =>
+      expect(f.events).toContainEqual({ type: 'turn_started', sessionId: id, turnId: '1' }),
+    );
+    await f.cli.emit(id, 'assistant.delta', { turnId: 1, delta: 'Untracked native output' });
+    await expect(
+      session.steer!({
+        sessionId: id,
+        expectedTurnId: '1',
+        batchId: randomUUID(),
+        text: 'Next user input',
+      }),
+    ).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    expect(await f.requests('/prompts')).toHaveLength(0);
+    await session.interrupt(id, '1');
+    expect(await f.completed('1')).toMatchObject({ status: 'interrupted' });
+    expect(await f.requests(`${id}:abort`)).toHaveLength(1);
+    expect(f.items()).toContainEqual({
+      type: 'agentMessage',
+      status: 'interrupted',
+      text: 'Untracked native output',
+    });
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('continues verified background descendants after the parent turn ends and during a new root wake', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ manualOutput: true, holdTurn: true });
+    await session.submit(f.input('Spawn background', id));
+    await f.cli.emitBatch(id, [
+      {
+        type: 'subagent.spawned',
+        fields: {
+          turnId: 1,
+          subagentId: 'background',
+          subagentName: 'Background',
+          runInBackground: true,
+        },
+      },
+      {
+        type: 'turn.started',
+        fields: { agentId: 'background', turnId: 1, promptId: 'background-prompt' },
+      },
+      {
+        type: 'subagent.spawned',
+        fields: {
+          agentId: 'background',
+          parentAgentId: 'background',
+          turnId: 1,
+          subagentId: 'nested',
+          subagentName: 'Nested',
+          runInBackground: true,
+        },
+      },
+      { type: 'turn.started', fields: { agentId: 'nested', turnId: 1, promptId: 'nested-prompt' } },
+    ]);
+    await f.cli.finish(id);
+    expect(await f.completed('1')).toMatchObject({ status: 'completed' });
+    await f.cli.question(id, false, { agentId: 'background', agent_id: 'background', turn_id: 1 });
+    await vi.waitFor(() => expect(f.questions).toHaveLength(1));
+    expect(f.questions[0]).toMatchObject({ sessionId: `${id}/agents/background`, turnId: '1' });
+    await f.cli.wake(id);
+    await vi.waitFor(() =>
+      expect(f.events).toContainEqual({ type: 'turn_started', sessionId: id, turnId: '2' }),
+    );
+    await f.cli.emitBatch(id, [
+      {
+        type: 'assistant.delta',
+        fields: { agentId: 'background', turnId: 1, delta: 'Background keeps running' },
+      },
+      {
+        type: 'assistant.delta',
+        fields: { agentId: 'nested', turnId: 1, delta: 'Nested keeps running' },
+      },
+      { type: 'turn.ended', fields: { agentId: 'nested', turnId: 1, reason: 'completed' } },
+    ]);
+    await session.interrupt(id, '2');
+    expect(await f.completed('2')).toMatchObject({ status: 'interrupted' });
+    expect(await f.requests(`/questions/${f.questions[0]!.requestId}:dismiss`)).toHaveLength(0);
+    session.answer(f.questions[0]!.requestId, { answers: { q0: { answers: ['One'] } } });
+    await vi.waitFor(async () =>
+      expect(await f.requests(`/questions/${f.questions[0]!.requestId}`)).toHaveLength(1),
+    );
+    await f.cli.emitBatch(id, [
+      { type: 'turn.ended', fields: { agentId: 'background', turnId: 1, reason: 'completed' } },
+      {
+        type: 'subagent.completed',
+        fields: { subagentId: 'background', resultSummary: 'Background complete' },
+      },
+    ]);
+    await vi.waitFor(() =>
+      expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(4),
+    );
+    expect(f.events).toContainEqual({
+      type: 'turn_completed',
+      sessionId: `${id}/agents/background`,
+      turnId: '1',
+      status: 'completed',
+      error: null,
+    });
+    expect(f.events).toContainEqual({
+      type: 'turn_completed',
+      sessionId: `${id}/agents/nested`,
+      turnId: '1',
+      status: 'completed',
+      error: null,
+    });
+    expect(
+      f.events
+        .filter(
+          (event) =>
+            (event.type === 'item' || event.type === 'item_delta') &&
+            event.item.text.includes('Nested keeps running'),
+        )
+        .every(
+          (event) =>
+            event.sessionId === `${id}/agents/nested` && 'turnId' in event && event.turnId === '1',
+        ),
+    ).toBe(true);
+    expect(f.items()).toContainEqual({
+      type: 'subagent',
+      status: 'completed',
+      text: '子代理 Background (background)\nBackground complete',
+    });
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('validates root identity and descendant ancestry before publishing native activity', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ manualOutput: true });
+    await session.submit(f.input('Validate descendants', id));
+    await f.cli.emitBatch(id, [
+      {
+        type: 'turn.started',
+        fields: { agentId: 'orphan', turnId: 77, promptId: 'orphan-prompt' },
+      },
+      {
+        type: 'assistant.delta',
+        fields: { agentId: 'orphan', turnId: 77, delta: 'Orphan output' },
+      },
+      {
+        type: 'turn.started',
+        fields: { sessionId: 'foreign-root', turnId: 88, promptId: 'foreign-prompt' },
+      },
+      {
+        type: 'subagent.spawned',
+        fields: {
+          parentAgentId: 'unknown',
+          turnId: 1,
+          subagentId: 'forged',
+          subagentName: 'Forged',
+          runInBackground: true,
+        },
+      },
+      {
+        type: 'turn.started',
+        fields: { agentId: 'forged', turnId: 66, promptId: 'forged-prompt' },
+      },
+      {
+        type: 'turn.started',
+        fields: { agentId: 'late-child', turnId: 99, promptId: 'late-child-prompt' },
+      },
+      {
+        type: 'assistant.delta',
+        fields: { agentId: 'late-child', turnId: 99, delta: 'Verified after spawn' },
+      },
+      {
+        type: 'subagent.spawned',
+        fields: {
+          turnId: 1,
+          subagentId: 'late-child',
+          subagentName: 'Late child',
+          runInBackground: true,
+        },
+      },
+      { type: 'turn.ended', fields: { agentId: 'late-child', turnId: 99, reason: 'completed' } },
+    ]);
+    await f.cli.finish(id);
+    await f.completed('1');
+    expect(f.events.filter((event) => event.type === 'turn_started')).toEqual([
+      { type: 'turn_started', sessionId: id, turnId: '1' },
+      { type: 'turn_started', sessionId: `${id}/agents/late-child`, turnId: '99' },
+    ]);
+    expect(f.items().some((item) => item.text.includes('Verified after spawn'))).toBe(true);
+    expect(f.items().some((item) => /Orphan|Forged/.test(item.text))).toBe(false);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
   });
 
   it('withdraws its unconsumed prompt on stop and resumes without consuming it', async () => {

@@ -110,19 +110,16 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 }
 
-interface ActiveInput {
+interface NativeTurn {
   id: string;
+  sessionId: string;
   bootstrap: boolean;
   interrupted: boolean;
-  steers: Map<string, { accepted: boolean; ended: Promise<void>; end(): void }>;
-  /** A result for this run arrived; the run ends once no appended input awaits consumption. */
-  idle: boolean;
-  failure: Error | null;
-  finish(error: Error | null): void;
+  finish?(error: Error | null): void;
 }
 interface PendingQuestion {
   input: z.infer<typeof questionInputSchema>;
-  turnId: string;
+  turn: NativeTurn;
 }
 
 class ClaudeSession implements HarnessSession {
@@ -132,12 +129,16 @@ class ClaudeSession implements HarnessSession {
   private contextUsageRevision = 0;
   private closed = false;
   private closing: Promise<void> | undefined;
-  private active: ActiveInput | undefined;
+  private rootTurn: NativeTurn | undefined;
+  private turns = new Map<string, NativeTurn>();
+  private receipts = new Map<string, { target?: NativeTurn; turn?: NativeTurn }>();
+  private childSessions = new Map<string, string>();
+  private childTurns = new Map<string, NativeTurn>();
   private startupError: Error | undefined;
   private exitReported = false;
   private questions = new Map<string, PendingQuestion>();
-  private approvals = new Map<string, { input: ClaudeFrame; turnId: string }>();
-  private toolRuns = new Map<string, string>();
+  private approvals = new Map<string, { input: ClaudeFrame; turn: NativeTurn }>();
+  private toolRuns = new Map<string, NativeTurn>();
   constructor(
     private agent: AgentRecord,
     private environment: ClaudeEnvironment,
@@ -268,13 +269,11 @@ class ClaudeSession implements HarnessSession {
       const messageId = randomUUID();
       let timer: NodeJS.Timeout | undefined;
       const completed = new Promise<void>((resolve, reject) => {
-        this.active = {
+        this.rootTurn = {
           id: messageId,
+          sessionId: id,
           bootstrap: true,
           interrupted: false,
-          steers: new Map(),
-          idle: false,
-          failure: null,
           finish: (error) => {
             if (timer) clearTimeout(timer);
             if (error) reject(error);
@@ -290,7 +289,7 @@ class ClaudeSession implements HarnessSession {
       void completed.catch(() => {});
       await this.native().sendUser(id, messageId, CLAUDE_INITIALIZATION_MESSAGE);
       await completed;
-      this.active = undefined;
+      this.rootTurn = undefined;
       await this.refreshContextUsage(id);
       return id;
     } catch (error) {
@@ -315,34 +314,27 @@ class ClaudeSession implements HarnessSession {
       input.workspace !== this.agent.workspace ||
       input.model !== this.agent.model ||
       input.reasoningEffort !== this.agent.reasoningEffort ||
-      this.active
+      this.closed ||
+      this.rootTurn ||
+      [...this.receipts.values()].some((receipt) => !receipt.turn)
     )
       throw new HarnessSubmissionRejected('Claude Code 输入与当前会话配置不一致');
-    const active: ActiveInput = {
-      id: input.runId,
-      bootstrap: false,
-      interrupted: false,
-      steers: new Map(),
-      idle: false,
-      failure: null,
-      finish: () => {
-        for (const batch of active.steers.values()) batch.end();
-      },
-    };
-    this.active = active;
+    const receipt: { turn?: NativeTurn } = {};
+    this.receipts.set(input.runId, receipt);
     try {
       await this.native().sendUser(input.sessionId, input.runId, input.text);
-      return { turnId: input.runId };
+      if (!receipt.turn) throw new Error('Claude Code 尚未确认输入所属原生回合');
+      return { turnId: receipt.turn.id };
     } catch (error) {
       if (error instanceof ClaudeInputRejected) {
-        this.active = undefined;
+        this.receipts.delete(input.runId);
         throw new HarnessSubmissionRejected(error.message);
       }
       throw error;
     }
   }
   async steer(input: HarnessSteerInput) {
-    const active = this.active;
+    const active = this.rootTurn;
     if (
       this.closed ||
       input.sessionId !== this.sessionId ||
@@ -351,35 +343,20 @@ class ClaudeSession implements HarnessSession {
       active.interrupted ||
       input.expectedTurnId !== active.id ||
       input.batchId === active.id ||
-      active.steers.has(input.batchId)
+      this.receipts.has(input.batchId)
     )
       throw new HarnessSubmissionRejected('Claude Code 追加输入与当前执行不一致');
-    let end!: () => void;
-    const batch = {
-      accepted: false,
-      ended: new Promise<void>((resolve) => (end = resolve)),
-      end: () => end(),
-    };
-    active.steers.set(input.batchId, batch);
+    const receipt: { target: NativeTurn; turn?: NativeTurn } = { target: active };
+    this.receipts.set(input.batchId, receipt);
     try {
-      // The CLI consumes queued input at a tool boundary of the current turn, or runs it as the
-      // next native turn once this one ends. The run stays open until then, so both count here.
-      await Promise.race([
-        this.native()
-          .sendUser(input.sessionId, input.batchId, input.text, { waitForConsumption: true })
-          .then(() => {
-            if (!batch.accepted)
-              throw new Error('Claude Code 尚未确认追加输入进入目标执行，请核对原生记录。');
-          }),
-        batch.ended.then(() => {
-          if (!batch.accepted) throw new Error('Claude Code 连接已关闭，追加输入结果待核对。');
-        }),
-      ]);
-      return { turnId: active.id };
+      await this.native().sendUser(input.sessionId, input.batchId, input.text, {
+        waitForConsumption: true,
+      });
+      if (!receipt.turn) throw new Error('Claude Code 尚未确认追加输入所属原生回合');
+      return { turnId: receipt.turn.id };
     } catch (error) {
       if (error instanceof ClaudeInputRejected || error instanceof HarnessSubmissionRejected) {
-        active.steers.delete(input.batchId);
-        this.settle(active);
+        this.receipts.delete(input.batchId);
         throw new HarnessSubmissionRejected(this.environment.redactor.text(error));
       }
       // Unconfirmed input must not execute outside a tracked run; close the owning process.
@@ -390,8 +367,16 @@ class ClaudeSession implements HarnessSession {
     }
   }
   async interrupt(sessionId: string, turnId: string) {
-    if (sessionId !== this.sessionId || this.active?.id !== turnId) return;
-    this.active.interrupted = true;
+    if (sessionId !== this.sessionId || this.closed) return;
+    if (
+      this.rootTurn?.id !== turnId &&
+      ![...this.receipts.values()].some(
+        (receipt) => receipt.target?.id === turnId && !receipt.turn,
+      ) &&
+      !this.childTurns.size
+    )
+      return;
+    for (const turn of this.turns.values()) turn.interrupted = true;
     this.expireRequests(undefined, true);
     await this.native().control('interrupt', { cancel_queued: true });
   }
@@ -399,7 +384,8 @@ class ClaudeSession implements HarnessSession {
     const key = String(requestId);
     const approval = this.approvals.get(key);
     if (approval) {
-      if (approval.turnId !== this.active?.id) throw new Error('Claude Code 原生权限请求已失效');
+      if (!this.turns.has(this.turnKey(approval.turn)))
+        throw new Error('Claude Code 原生权限请求已失效');
       const allowed = permissionAllowed(answer);
       this.approvals.delete(key);
       this.native().respond(
@@ -411,7 +397,7 @@ class ClaudeSession implements HarnessSession {
       return;
     }
     const pending = this.questions.get(key);
-    if (!pending || pending.turnId !== this.active?.id)
+    if (!pending || !this.turns.has(this.turnKey(pending.turn)))
       throw new Error('Claude Code 原生问题已失效');
     const answers: Record<string, string> = {};
     pending.input.questions.forEach((question, index) => {
@@ -430,8 +416,13 @@ class ClaudeSession implements HarnessSession {
     if (this.closing) return this.closing;
     this.expireRequests(undefined, true);
     this.closed = true;
-    this.active?.finish(new Error('Claude Code 连接已关闭'));
+    this.rootTurn?.finish?.(new Error('Claude Code 连接已关闭'));
     this.questions.clear();
+    this.turns.clear();
+    this.receipts.clear();
+    this.toolRuns.clear();
+    this.childTurns.clear();
+    this.childSessions.clear();
     this.closing = this.client?.close() ?? Promise.resolve();
     return this.closing;
   }
@@ -439,14 +430,19 @@ class ClaudeSession implements HarnessSession {
     if (this.exitReported) return;
     this.exitReported = true;
     this.expireRequests();
-    this.active?.finish(error);
+    this.rootTurn?.finish?.(error);
+    this.turns.clear();
+    this.receipts.clear();
+    this.toolRuns.clear();
+    this.childTurns.clear();
+    this.childSessions.clear();
     this.output.exit(error);
   }
   private request(id: string, request: ClaudeFrame) {
     if (request.subtype === 'hook_callback' && request.callback_id === 'isles-bootstrap') {
       this.native().respond(
         id,
-        this.active?.bootstrap
+        this.rootTurn?.bootstrap
           ? {
               hookSpecificOutput: {
                 hookEventName: 'PreToolUse',
@@ -458,13 +454,9 @@ class ClaudeSession implements HarnessSession {
       );
       return;
     }
-    if (
-      request.subtype !== 'can_use_tool' ||
-      !this.active ||
-      this.active.bootstrap ||
-      typeof request.tool_use_id !== 'string' ||
-      this.toolRuns.get(request.tool_use_id) !== this.active.id
-    ) {
+    const turn =
+      typeof request.tool_use_id === 'string' ? this.toolRuns.get(request.tool_use_id) : undefined;
+    if (request.subtype !== 'can_use_tool' || !turn || !this.turns.has(this.turnKey(turn))) {
       this.native().respond(id, {
         behavior: 'deny',
         message: 'Isles cannot accept this native request in the current run',
@@ -484,10 +476,10 @@ class ClaudeSession implements HarnessSession {
         this.native().respond(id, { behavior: 'deny', message: '原生权限请求无效' });
         return;
       }
-      this.approvals.set(id, { input, turnId: this.active.id });
+      this.approvals.set(id, { input, turn });
       this.output.question({
-        sessionId: this.sessionId!,
-        turnId: this.active.id,
+        sessionId: turn.sessionId,
+        turnId: turn.id,
         requestId: id,
         questions: permissionQuestions(
           this.environment.redactor.output(
@@ -511,10 +503,10 @@ class ClaudeSession implements HarnessSession {
       this.native().respond(id, { behavior: 'deny', message: 'Unsupported Claude question input' });
       return;
     }
-    this.questions.set(id, { input: input.data, turnId: this.active.id });
+    this.questions.set(id, { input: input.data, turn });
     this.output.question({
-      sessionId: this.sessionId!,
-      turnId: this.active.id,
+      sessionId: turn.sessionId,
+      turnId: turn.id,
       requestId: id,
       questions: input.data.questions.map((question, index) => ({
         id: `question-${index}`,
@@ -536,19 +528,136 @@ class ClaudeSession implements HarnessSession {
           : 'Claude Code 原生回合失败';
     return this.error(message || 'Claude Code 原生回合失败');
   }
-  private event(frame: ClaudeFrame) {
-    const active = this.active;
-    if (
-      typeof frame.session_id === 'string' &&
-      frame.session_id !== this.sessionId &&
-      !frame.parent_tool_use_id
-    )
-      throw new Error('Claude Code 返回了不同 session ID，已拒绝继续执行');
-    if (!active) {
-      if (frame.type === 'result' && frame.is_error === true)
-        this.startupError = this.resultError(frame);
+  private turnKey(turn: Pick<NativeTurn, 'sessionId' | 'id'>) {
+    return JSON.stringify([turn.sessionId, turn.id]);
+  }
+  private beginTurn(sessionId: string, id: string) {
+    const key = this.turnKey({ sessionId, id });
+    const existing = this.turns.get(key);
+    if (existing) return existing;
+    const turn: NativeTurn = { sessionId, id, bootstrap: false, interrupted: false };
+    this.turns.set(key, turn);
+    if (sessionId === this.sessionId) this.rootTurn = turn;
+    else this.childTurns.set(sessionId, turn);
+    this.output.event({ type: 'turn_started', sessionId, turnId: id });
+    return turn;
+  }
+  private completeTurn(turn: NativeTurn, failure: Error | null) {
+    if (turn.bootstrap) {
+      turn.finish?.(failure);
       return;
     }
+    if (!this.turns.delete(this.turnKey(turn))) return;
+    for (const [id, pending] of [...this.questions, ...this.approvals])
+      if (pending.turn === turn) this.expireRequests(id);
+    for (const [id, owner] of this.toolRuns) if (owner === turn) this.toolRuns.delete(id);
+    if (this.rootTurn === turn) this.rootTurn = undefined;
+    if (this.childTurns.get(turn.sessionId) === turn) this.childTurns.delete(turn.sessionId);
+    this.output.event({
+      type: 'turn_completed',
+      sessionId: turn.sessionId,
+      turnId: turn.id,
+      status: turn.interrupted ? 'interrupted' : failure ? 'failed' : 'completed',
+      error: failure?.message ?? null,
+    });
+    if (turn.sessionId === this.sessionId) void this.refreshContextUsage(turn.sessionId);
+  }
+  private event(frame: ClaudeFrame) {
+    if (this.closed) return;
+    const root = this.sessionId;
+    if (!root) return;
+    if (typeof frame.session_id !== 'string') return;
+    if (frame.isReplay === true && frame.type !== 'user') return;
+    const parent =
+      typeof frame.parent_tool_use_id === 'string' ? frame.parent_tool_use_id : undefined;
+    if (typeof frame.session_id === 'string' && frame.session_id !== root && !parent)
+      throw new Error('Claude Code 返回了不同 session ID，已拒绝继续执行');
+    // Forwarded children are linked by native Agent tools or task_started frames.
+    const sessionId = parent ? this.childSessions.get(parent) : root;
+    if (!sessionId) return;
+    if (this.rootTurn?.bootstrap) {
+      if (
+        !parent &&
+        frame.type === 'result' &&
+        (frame.user_message_uuid === this.rootTurn.id ||
+          (Array.isArray(frame.user_message_uuids) &&
+            frame.user_message_uuids.includes(this.rootTurn.id)))
+      )
+        this.completeTurn(
+          this.rootTurn,
+          frame.is_error === true || frame.subtype !== 'success' ? this.resultError(frame) : null,
+        );
+      return;
+    }
+    if (
+      frame.type === 'system' &&
+      frame.subtype === 'task_started' &&
+      typeof frame.task_id === 'string' &&
+      typeof frame.tool_use_id === 'string'
+    ) {
+      const nativeId = typeof frame.agent_id === 'string' ? frame.agent_id : frame.task_id;
+      const previous = this.childSessions.get(frame.tool_use_id);
+      const childId =
+        previous && this.childTurns.has(previous)
+          ? previous
+          : root + '/agents/' + encodeURIComponent(nativeId);
+      this.childSessions.set(frame.tool_use_id, childId);
+      this.childSessions.set(frame.task_id, childId);
+      this.beginTurn(childId, typeof frame.run_id === 'string' ? frame.run_id : frame.task_id);
+      return;
+    }
+    if (
+      frame.type === 'system' &&
+      frame.subtype === 'task_notification' &&
+      typeof frame.task_id === 'string'
+    ) {
+      const childId = this.childSessions.get(frame.task_id);
+      const child = childId ? this.childTurns.get(childId) : undefined;
+      if (child) {
+        child.interrupted ||= ['stopped', 'cancelled', 'killed'].includes(String(frame.status));
+        this.item(child, {
+          id: frame.task_id,
+          type: 'status',
+          status: frame.status === 'failed' ? 'failed' : 'completed',
+          text: String(frame.summary ?? frame.status ?? 'completed'),
+        });
+        this.completeTurn(
+          child,
+          frame.status === 'failed'
+            ? this.error(frame.summary ?? 'Claude Code 子代理执行失败')
+            : null,
+        );
+      }
+      return;
+    }
+    if (
+      frame.type === 'system' &&
+      ['task_updated', 'task_progress'].includes(String(frame.subtype)) &&
+      typeof frame.task_id === 'string'
+    ) {
+      const childId = this.childSessions.get(frame.task_id);
+      const child = childId ? this.childTurns.get(childId) : undefined;
+      const patch = object(frame.patch);
+      if (child)
+        this.item(child, {
+          id: String(frame.uuid ?? frame.task_id + ':status'),
+          type: 'status',
+          status:
+            patch?.status === 'failed'
+              ? 'failed'
+              : patch?.status === 'completed'
+                ? 'completed'
+                : 'running',
+          text: String(frame.description ?? frame.summary ?? patch?.status ?? frame.subtype),
+        });
+      return;
+    }
+    const commandId = typeof frame.command_uuid === 'string' ? frame.command_uuid : undefined;
+    if (!parent && frame.type === 'command_lifecycle' && frame.state === 'cancelled' && commandId) {
+      this.receipts.delete(commandId);
+      return;
+    }
+    let turn = parent ? this.childTurns.get(sessionId) : this.rootTurn;
     const consumed =
       frame.type === 'user' && frame.isReplay === true
         ? [frame.uuid]
@@ -560,71 +669,75 @@ class ClaudeSession implements HarnessSession {
                 ...(Array.isArray(frame.user_message_uuids) ? frame.user_message_uuids : []),
               ]
             : [];
-    if (frame.session_id === this.sessionId && !frame.parent_tool_use_id) {
-      for (const id of consumed)
-        if (typeof id === 'string') {
-          const batch = active.steers.get(id);
-          if (batch && !batch.accepted) {
-            batch.accepted = true;
-            // Input queued behind a finished turn starts the next native turn of this run.
-            active.idle = false;
-          }
-        }
-      // Withdrawn input (stop cancels the native queue) no longer holds the run open.
-      if (
-        frame.type === 'command_lifecycle' &&
-        frame.state === 'cancelled' &&
-        typeof frame.command_uuid === 'string' &&
-        active.steers.get(frame.command_uuid)?.accepted === false
-      ) {
-        active.steers.delete(frame.command_uuid);
-        this.settle(active);
-        if (this.active !== active) return;
+    if (frame.type === 'command_lifecycle' && frame.state === 'started' && commandId)
+      turn ??= this.beginTurn(sessionId, commandId);
+    if (!parent) {
+      for (const id of consumed) {
+        if (typeof id !== 'string') continue;
+        const receipt = this.receipts.get(id);
+        if (!receipt || receipt.turn) continue;
+        if (!turn) turn = this.beginTurn(root, id);
+        receipt.turn ??= turn;
       }
     }
-    const matches = (id: unknown) =>
-      id === active.id || (typeof id === 'string' && active.steers.get(id)?.accepted === true);
-    const associated =
-      matches(frame.user_message_uuid) ||
-      (Array.isArray(frame.user_message_uuids) && frame.user_message_uuids.some(matches));
-    if (frame.type === 'result') {
-      if (!associated || frame.parent_tool_use_id) return;
-      const failure =
-        frame.is_error === true || frame.subtype !== 'success' ? this.resultError(frame) : null;
-      if (active.bootstrap) active.finish(failure);
-      else {
-        void this.refreshContextUsage(this.sessionId!);
-        active.failure ??= failure;
-        active.idle = true;
-        this.settle(active);
-      }
-      return;
-    }
-    if (active.bootstrap) return;
+    const inputId =
+      typeof frame.user_message_uuid === 'string' ? frame.user_message_uuid : undefined;
+    const receiptTurn = inputId ? this.receipts.get(inputId)?.turn : undefined;
+    if (receiptTurn && !this.turns.has(this.turnKey(receiptTurn))) return;
+    // Autonomous wakeups have no command/input UUID. Their first live assistant UUID
+    // identifies the native turn until its result arrives.
     if (
-      frame.type === 'command_lifecycle' &&
-      frame.command_uuid === active.id &&
-      frame.state === 'started'
-    ) {
-      this.output.event({ type: 'turn_started', sessionId: this.sessionId!, turnId: active.id });
+      !turn &&
+      frame.type === 'assistant' &&
+      frame.isReplay !== true &&
+      typeof frame.uuid === 'string'
+    )
+      turn = this.beginTurn(
+        sessionId,
+        typeof frame.user_message_uuid === 'string'
+          ? frame.user_message_uuid
+          : String(frame.uuid ?? randomUUID()),
+      );
+    if (!turn && frame.type === 'result' && object(frame.origin) && typeof frame.uuid === 'string')
+      turn = this.beginTurn(sessionId, frame.uuid);
+    if (!turn) {
+      if (!parent && frame.type === 'result' && frame.is_error === true && !frame.user_message_uuid)
+        this.startupError = this.resultError(frame);
       return;
     }
-    if (frame.type === 'assistant' && (!frame.user_message_uuid || associated)) {
+    const associated =
+      Boolean(parent) ||
+      !inputId ||
+      inputId === turn.id ||
+      this.receipts.get(inputId)?.turn === turn;
+    if (frame.type === 'result') {
+      if (!associated) return;
+      this.completeTurn(
+        turn,
+        frame.is_error === true || frame.subtype !== 'success' ? this.resultError(frame) : null,
+      );
+      return;
+    }
+    if (frame.type === 'assistant' && associated) {
       const message = object(frame.message);
       if (!message || !Array.isArray(message.content)) return;
       message.content.forEach((value, index) => {
         const block = object(value);
         if (!block || typeof block.type !== 'string') return;
         const id =
-          typeof block.id === 'string' ? block.id : `${String(message.id ?? frame.uuid)}:${index}`;
+          typeof block.id === 'string' ? block.id : String(message.id ?? frame.uuid) + ':' + index;
         const text =
           typeof block.text === 'string'
             ? block.text
             : typeof block.thinking === 'string'
               ? block.thinking
-              : `${String(block.name ?? block.type)}\n${JSON.stringify(block.input ?? {})}`;
-        if (block.type === 'tool_use') this.toolRuns.set(id, active.id);
-        this.item({
+              : String(block.name ?? block.type) + '\n' + JSON.stringify(block.input ?? {});
+        if (block.type === 'tool_use') {
+          this.toolRuns.set(id, turn!);
+          if (block.name === 'Agent' || block.name === 'Task')
+            this.childSessions.set(id, root + '/agents/' + encodeURIComponent(id));
+        }
+        this.item(turn!, {
           id,
           type:
             block.type === 'tool_use'
@@ -641,13 +754,10 @@ class ClaudeSession implements HarnessSession {
       if (!message || !Array.isArray(message.content)) return;
       for (const value of message.content) {
         const block = object(value);
-        if (
-          block?.type !== 'tool_result' ||
-          typeof block.tool_use_id !== 'string' ||
-          this.toolRuns.get(block.tool_use_id) !== active.id
-        )
-          continue;
-        this.item({
+        if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue;
+        const owner = this.toolRuns.get(block.tool_use_id);
+        if (!owner) continue;
+        this.item(owner, {
           id: block.tool_use_id,
           type: 'toolCall',
           status: block.is_error ? 'failed' : 'completed',
@@ -660,34 +770,26 @@ class ClaudeSession implements HarnessSession {
       frame.subtype === 'status' &&
       typeof frame.status === 'string'
     ) {
-      this.item({
+      this.item(turn, {
         id: String(frame.uuid ?? randomUUID()),
         type: 'status',
         status: 'running',
         text: frame.status,
       });
+    } else if (frame.type === 'tool_progress' && typeof frame.tool_use_id === 'string') {
+      const owner = this.toolRuns.get(frame.tool_use_id);
+      if (owner)
+        this.item(owner, {
+          id: frame.tool_use_id + ':progress',
+          type: 'status',
+          status: 'running',
+          text:
+            String(frame.tool_name ?? 'Tool') +
+            ' · ' +
+            String(frame.elapsed_time_seconds ?? 0) +
+            's',
+        });
     }
-  }
-  /** Complete the run once the CLI is idle and every appended input was consumed or withdrawn. */
-  private settle(active: ActiveInput) {
-    if (
-      this.active !== active ||
-      !active.idle ||
-      [...active.steers.values()].some((batch) => !batch.accepted)
-    )
-      return;
-    this.expireRequests();
-    this.active = undefined;
-    active.finish(active.failure);
-    this.questions.clear();
-    this.toolRuns.clear();
-    this.output.event({
-      type: 'turn_completed',
-      sessionId: this.sessionId!,
-      turnId: active.id,
-      status: active.interrupted ? 'interrupted' : active.failure ? 'failed' : 'completed',
-      error: active.failure?.message ?? null,
-    });
   }
   private expireRequests(id?: string, deny = false) {
     for (const [key, pending] of [...this.questions, ...this.approvals]) {
@@ -698,18 +800,18 @@ class ClaudeSession implements HarnessSession {
         this.client.respond(key, { behavior: 'deny', message: '执行已结束' });
       this.output.event({
         type: 'question_expired',
-        sessionId: this.sessionId!,
-        turnId: pending.turnId,
+        sessionId: pending.turn.sessionId,
+        turnId: pending.turn.id,
         requestId: key,
       });
     }
   }
-  private item(item: RunItem) {
-    if (!this.active || this.active.bootstrap) return;
+  private item(turn: NativeTurn, item: RunItem) {
+    if (turn.bootstrap) return;
     this.output.event({
       type: 'item',
-      sessionId: this.sessionId!,
-      turnId: this.active.id,
+      sessionId: turn.sessionId,
+      turnId: turn.id,
       append: false,
       item: { ...item, text: this.environment.redactor.output(item.text) },
     });

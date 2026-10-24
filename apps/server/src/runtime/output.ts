@@ -32,12 +32,19 @@ export class RunOutputBuffer {
   }
 
   flush(status: 'completed' | 'interrupted' | 'failed'): RunItem[] {
-    const items = [...this.pending]
-      .map((id) => {
-        const item = this.items.get(id)!;
-        return { ...item, status: item.status === 'running' ? status : item.status };
-      })
-      .filter((item) => item.text.length > 0);
+    const unsettled = new Set([
+      ...this.pending,
+      ...[...this.items.values()]
+        .filter((item) => item.status === 'running')
+        .map((item) => item.id),
+    ]);
+    const items = [...unsettled].map((id) => {
+      const item = this.items.get(id)!;
+      const settled = { ...item, status: item.status === 'running' ? status : item.status };
+      this.items.set(id, settled);
+      this.sealed.add(id);
+      return settled;
+    });
     this.pending.clear();
     return items;
   }

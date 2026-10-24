@@ -86,6 +86,17 @@ const app = await buildApp({
 });
 const browserStore: Store = app.isles.store;
 harness.useStore(app.isles.store);
+const backgroundScenarios = new Map<string, () => void>();
+app.post<{ Params: { id: string } }>(
+  '/api/__test/agents/:id/background/finish',
+  (request, reply) => {
+    const finish = backgroundScenarios.get(request.params.id);
+    if (!finish) return reply.code(404).send({ error: 'Background scenario is not running' });
+    backgroundScenarios.delete(request.params.id);
+    finish();
+    return { ok: true };
+  },
+);
 
 async function callMcp<T>(client: MockClient, name: string, args: Record<string, unknown>) {
   const response = await fetch(`${client.baseUrl}/mcp/${client.agent.id}`, {
@@ -128,6 +139,75 @@ harness.onTurn = (client) => {
     return latest ? [{ channelId: channel.channel_id, message: latest }] : [];
   });
   const receiveDuringTurn = targets.some((t) => t.message.body === '请在执行中收信');
+  if (targets.some((t) => t.message.body === '验证原生后台活动')) {
+    const childId = `${client.threadId}-background`;
+    const childTurn = 'background-turn';
+    const wakeTurn = 'autonomous-wake';
+    client.handlers.notification('thread/started', {
+      thread: { id: childId, parentThreadId: client.threadId },
+    });
+    client.handlers.notification('turn/started', {
+      threadId: childId,
+      turn: { id: childTurn, status: 'inProgress' },
+    });
+    client.handlers.notification('item/started', {
+      threadId: childId,
+      turnId: childTurn,
+      item: {
+        id: 'background-progress',
+        type: 'subAgentActivity',
+        kind: 'spawn',
+        text: '后台检查进行中',
+      },
+    });
+    client.complete();
+    backgroundScenarios.set(client.agent.id, () => {
+      client.handlers.notification('item/completed', {
+        threadId: childId,
+        turnId: childTurn,
+        item: { id: 'background-output', type: 'agentMessage', text: '后台检查已完成' },
+      });
+      client.handlers.notification('turn/completed', {
+        threadId: childId,
+        turn: { id: childTurn, status: 'completed', error: null },
+      });
+      client.handlers.notification('turn/started', {
+        threadId: client.threadId,
+        turn: { id: wakeTurn, status: 'inProgress' },
+      });
+      client.handlers.request('autonomous-question', 'item/tool/requestUserInput', {
+        threadId: client.threadId,
+        turnId: wakeTurn,
+        itemId: 'wake-question',
+        isBlocking: true,
+        questions: [
+          {
+            id: 'choice',
+            header: '后续处理',
+            question: '确认后台检查结果',
+            isOther: false,
+            isSecret: false,
+            options: [{ label: '确认', description: '记录检查结果' }],
+          },
+        ],
+      });
+      const respond = client.respond.bind(client);
+      client.respond = (id, answer) => {
+        respond(id, answer);
+        if (id !== 'autonomous-question') return;
+        client.handlers.notification('item/completed', {
+          threadId: client.threadId,
+          turnId: wakeTurn,
+          item: { id: 'wake-output', type: 'agentMessage', text: '自动唤醒后已记录结果' },
+        });
+        client.handlers.notification('turn/completed', {
+          threadId: client.threadId,
+          turn: { id: wakeTurn, status: 'completed', error: null },
+        });
+      };
+    });
+    return;
+  }
   if (targets.some((t) => t.message.body === '保持执行以验证 steer')) return;
   const publish = async () => {
     if (receiveDuringTurn) {

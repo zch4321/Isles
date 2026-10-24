@@ -22,10 +22,10 @@ export const deliveryStatusSchema = z.enum([
   'submitting',
   // Appending to the active native turn; awaiting its acceptance acknowledgment.
   'steering',
+  // Native receipt confirms delivery independently of the activity's final outcome.
   'accepted',
-  // Returned through an Agent's MCP inbox/history read; not a completed native turn.
+  // Returned through an Agent's MCP inbox/history read.
   'received',
-  'completed',
   'cancelled',
   'failed',
   'uncertain',
@@ -181,7 +181,7 @@ export const runSchema = z.object({
   error: z.string().nullable(),
   createdAt: z.string(),
   finishedAt: z.string().nullable(),
-  /** Messages submitted in this run, grouped as the Agent saw them. */
+  /** Submitted messages grouped as the Agent saw them; empty for autonomous native activity. */
   inputs: z.array(
     z.object({ channelId: z.string(), messageSeqs: z.array(z.number().int().positive()) }),
   ),

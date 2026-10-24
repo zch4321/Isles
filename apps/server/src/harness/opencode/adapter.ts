@@ -135,12 +135,6 @@ interface PendingInput {
   timer: NodeJS.Timeout;
   accepted?: { turnId: string };
 }
-interface Active {
-  turnId?: string;
-  inputs: Map<string, PendingInput>;
-  submitted: Set<string>;
-  ended?: { status: 'completed' | 'failed' | 'interrupted'; error: string | null };
-}
 interface PendingPermission {
   request: OpenCodePermissionRequest;
   turnId?: string;
@@ -150,14 +144,16 @@ interface PendingPermission {
 class OpenCodeSession implements HarnessSession {
   private client?: OpenCodeConnection;
   private sessionId?: string;
-  private active: Active | undefined;
+  private executions = new Map<string, string>();
+  private inputs = new Map<string, PendingInput>();
+  private submitted = new Set<string>();
   private closing?: Promise<void>;
   private stopped = false;
   private streams = new Set<OpenCodeStream>();
   private descendants = new Set<string>();
-  private nativeSeq = -1;
+  private nativeSeq = new Map<string, number>();
   private forms = new Map<string, OpenCodeForm>();
-  private publishedForms = new Set<string>();
+  private publishedForms = new Map<string, string>();
   private permissions = new Map<string, PendingPermission>();
   private ownedInputs = new Set<string>();
   private admissions = new Set<Promise<unknown>>();
@@ -292,7 +288,7 @@ class OpenCodeSession implements HarnessSession {
         this.descendants.add(child.id);
         await this.restoreChildren(child.id, visited);
       }
-      cursor = page.cursor?.next;
+      cursor = page.cursor?.next ?? undefined;
     } while (cursor);
   }
   private async readPermissions(sessionID: string) {
@@ -390,29 +386,29 @@ class OpenCodeSession implements HarnessSession {
     return this.contextRefresh;
   }
   async submit(input: HarnessTurnInput) {
-    if (input.sessionId !== this.sessionId || this.active || this.stopped)
+    if (
+      input.sessionId !== this.sessionId ||
+      this.executions.has(input.sessionId) ||
+      this.inputs.size ||
+      this.stopped
+    )
       throw new HarnessSubmissionRejected('OpenCode session 当前无法开始执行');
     await this.native().request('POST', `/api/session/${input.sessionId}/model`, {
       model: modelRef(input.model, input.reasoningEffort),
     });
-    const active: Active = { inputs: new Map(), submitted: new Set() };
-    this.active = active;
-    return this.send(active, `msg_isles_${input.runId}`, input.text);
+    return this.send(`msg_isles_${input.runId}`, input.text);
   }
   async steer(input: HarnessSteerInput) {
-    const active = this.active;
     if (
       this.stopped ||
       input.sessionId !== this.sessionId ||
-      !active?.turnId ||
-      active.ended ||
-      active.turnId !== input.expectedTurnId
+      this.executions.get(input.sessionId) !== input.expectedTurnId
     )
       throw new HarnessSubmissionRejected('OpenCode 当前执行已结束，追加消息进入下一轮');
-    return this.send(active, `msg_isles_${input.batchId}`, input.text);
+    return this.send(`msg_isles_${input.batchId}`, input.text);
   }
-  private async send(active: Active, id: string, text: string) {
-    if (active.submitted.has(id)) throw new HarnessSubmissionRejected('OpenCode 输入批次已投递');
+  private async send(id: string, text: string) {
+    if (this.submitted.has(id)) throw new HarnessSubmissionRejected('OpenCode 输入批次已投递');
     let resolve: PendingInput['resolve'] = () => {};
     let reject: PendingInput['reject'] = () => {};
     const promise = new Promise<{ turnId: string }>((yes, no) => {
@@ -428,8 +424,8 @@ class OpenCodeSession implements HarnessSession {
         reject(new Error('OpenCode 输入接收确认超时，结果待核对'));
       }, 60_000),
     };
-    active.submitted.add(id);
-    active.inputs.set(id, pending);
+    this.submitted.add(id);
+    this.inputs.set(id, pending);
     this.ownedInputs.add(id);
     try {
       const response = inboxResponseSchema.parse(await this.admit(id, text)).data;
@@ -447,7 +443,7 @@ class OpenCodeSession implements HarnessSession {
     } catch (error) {
       clearTimeout(pending.timer);
       if (pending.accepted) return pending.accepted;
-      active.inputs.delete(id);
+      this.inputs.delete(id);
       const refused =
         error instanceof HarnessSubmissionRejected ||
         (error instanceof OpenCodeHttpError && [400, 401, 403, 404, 409].includes(error.status));
@@ -456,10 +452,7 @@ class OpenCodeSession implements HarnessSession {
         : (error as Error);
       pending.reject(reason);
       if (refused) this.ownedInputs.delete(id);
-      if (active.inputs.size === 0 && !active.turnId && this.active === active)
-        this.active = undefined;
-      if (refused) this.finish(active);
-      else this.fail(reason);
+      if (!refused) this.fail(reason);
       throw reason;
     }
   }
@@ -488,52 +481,58 @@ class OpenCodeSession implements HarnessSession {
     );
   }
   private event(event: OpenCodeEvent) {
-    if (event.type === 'session.model.selected' || event.type === 'session.step.started') {
-      const model = modelRefSchema.safeParse(event.data.model);
-      if (model.success) this.contextModel = model.data;
-      else this.environment.log.warn('OpenCode context model event invalid');
-    }
-    if (
-      [
-        'session.model.selected',
-        'session.step.ended',
-        'session.step.failed',
-        'session.compaction.ended',
-        'session.revert.committed',
-      ].includes(event.type)
-    )
-      void this.refreshContext();
-    const active = this.active;
-    if (!active) return;
-    if (event.type === 'session.execution.started') {
-      if (active.turnId) {
-        this.fail(new Error('OpenCode 追加输入跨越了原生执行边界，结果待核对'));
-        return;
+    const sessionId = z.string().parse(event.data.sessionID);
+    if (sessionId === this.sessionId) {
+      if (event.type === 'session.model.selected' || event.type === 'session.step.started') {
+        const model = modelRefSchema.safeParse(event.data.model);
+        if (model.success) this.contextModel = model.data;
+        else this.environment.log.warn('OpenCode context model event invalid');
       }
-      active.turnId = event.id;
-      this.handlers.event({ type: 'turn_started', sessionId: this.sessionId!, turnId: event.id });
-      for (const form of this.forms.values()) this.question(form);
-      for (const pending of this.permissions.values()) this.permissionQuestion(pending);
+      if (
+        [
+          'session.model.selected',
+          'session.step.ended',
+          'session.step.failed',
+          'session.compaction.ended',
+          'session.revert.committed',
+        ].includes(event.type)
+      )
+        void this.refreshContext();
+    }
+    if (event.type === 'session.execution.started') {
+      if (this.executions.has(sessionId))
+        throw new Error('OpenCode session 在当前执行结束前开始了另一执行');
+      this.executions.set(sessionId, event.id);
+      this.handlers.event({ type: 'turn_started', sessionId, turnId: event.id });
+      if (this.stopped)
+        void this.client
+          ?.request('POST', `/api/session/${sessionId}/interrupt?resume=false`)
+          .catch((error: unknown) => this.fail(error as Error));
+      for (const form of this.forms.values()) if (form.sessionID === sessionId) this.question(form);
+      for (const pending of this.permissions.values())
+        if (pending.request.sessionID === sessionId) this.permissionQuestion(pending);
       return;
     }
     if (event.type === 'session.inbox.delivered' || event.type === 'session.inbox.cancelled') {
+      if (sessionId !== this.sessionId) return;
       const { inboxID } = inputRef.parse(event.data);
-      const pending = active.inputs.get(inboxID);
+      const pending = this.inputs.get(inboxID);
       if (!pending) return;
       clearTimeout(pending.timer);
-      active.inputs.delete(inboxID);
+      this.inputs.delete(inboxID);
       this.ownedInputs.delete(inboxID);
+      const turnId = this.executions.get(sessionId);
       if (event.type.endsWith('cancelled'))
         pending.reject(new HarnessSubmissionRejected('OpenCode 已取消待处理输入'));
-      else if (!active.turnId || active.ended)
-        pending.reject(new Error('OpenCode 输入进入了不同执行，结果待核对'));
+      else if (!turnId) pending.reject(new Error('OpenCode 输入缺少原生执行，结果待核对'));
       else {
-        pending.accepted = { turnId: active.turnId };
+        pending.accepted = { turnId };
         pending.resolve(pending.accepted);
       }
-      this.finish(active);
       return;
     }
+    const turnId = this.executions.get(sessionId);
+    if (!turnId) return;
     if (
       [
         'session.execution.succeeded',
@@ -541,37 +540,27 @@ class OpenCodeSession implements HarnessSession {
         'session.execution.interrupted',
       ].includes(event.type)
     ) {
-      void this.clearPermissions().catch((error: unknown) => this.fail(error as Error));
-      this.expireForms();
-      active.ended = {
+      void this.clearPermissions(sessionId).catch((error: unknown) => this.fail(error as Error));
+      this.expireForms(sessionId);
+      this.executions.delete(sessionId);
+      for (const key of this.toolNames.keys())
+        if (key.startsWith(`${sessionId}:`)) this.toolNames.delete(key);
+      this.handlers.event({
+        type: 'turn_completed',
+        sessionId,
+        turnId,
         status: event.type.endsWith('succeeded')
           ? 'completed'
           : event.type.endsWith('failed')
             ? 'failed'
             : 'interrupted',
         error: event.type.endsWith('failed') ? this.errorText(event.data.error) : null,
-      };
-      this.finish(active);
+      });
       return;
     }
-    this.item(event);
+    this.item(event, sessionId, turnId);
   }
-  private finish(active: Active) {
-    if (this.active !== active || !active.turnId || !active.ended || active.inputs.size) return;
-    void this.clearPermissions().catch((error: unknown) => this.fail(error as Error));
-    this.expireForms();
-    this.active = undefined;
-    this.publishedForms.clear();
-    this.toolNames.clear();
-    this.handlers.event({
-      type: 'turn_completed',
-      sessionId: this.sessionId!,
-      turnId: active.turnId,
-      ...active.ended,
-    });
-  }
-  private item(event: OpenCodeEvent) {
-    if (!this.active?.turnId) return;
+  private item(event: OpenCodeEvent, sessionId: string, turnId: string) {
     const data = event.data;
     let item: RunItem | undefined;
     if (event.type === 'session.text.ended' || event.type === 'session.reasoning.ended') {
@@ -585,14 +574,15 @@ class OpenCodeSession implements HarnessSession {
     } else if (event.type.startsWith('session.tool.')) {
       const ref = toolRef.parse(data);
       const key = `${ref.assistantMessageID}:${ref.id}`;
+      const toolKey = `${sessionId}:${key}`;
       if (event.type === 'session.tool.input.started')
-        this.toolNames.set(key, z.string().parse(data.name));
+        this.toolNames.set(toolKey, z.string().parse(data.name));
       if (
         event.type === 'session.tool.called' ||
         event.type === 'session.tool.success' ||
         event.type === 'session.tool.failed'
       ) {
-        const name = this.toolNames.get(key) ?? ref.id;
+        const name = this.toolNames.get(toolKey) ?? ref.id;
         const content =
           data.content === undefined
             ? ''
@@ -615,8 +605,8 @@ class OpenCodeSession implements HarnessSession {
     if (item)
       this.handlers.event({
         type: 'item',
-        sessionId: this.sessionId!,
-        turnId: this.active.turnId,
+        sessionId,
+        turnId,
         append: false,
         item: { ...item, text: this.environment.redactor.output(item.text) },
       });
@@ -645,7 +635,7 @@ class OpenCodeSession implements HarnessSession {
       this.descendants.add(z.string().parse(event.data.sessionID));
     if (event.type === 'form.created') {
       const form = formInfoSchema.parse(event.data.form);
-      if (!this.descendants.has(form.sessionID) || !this.active || this.forms.has(form.id)) return;
+      if (!this.descendants.has(form.sessionID) || this.stopped || this.forms.has(form.id)) return;
       if (
         form.fields.some(
           (field) => !['string', 'multiselect'].includes(field.type) || field.when || field.hidden,
@@ -662,48 +652,29 @@ class OpenCodeSession implements HarnessSession {
       this.forms.set(form.id, form);
       this.question(form);
     }
-    if (event.data.sessionID === this.sessionId) {
-      if (event.durable) {
-        const committed = durableEventSchema.parse(event);
-        if (committed.durable.aggregateID !== this.sessionId)
-          throw new Error('OpenCode 事件的 session 身份无效');
-        if (committed.durable.seq <= this.nativeSeq) return;
-        this.nativeSeq = committed.durable.seq;
-      } else if (
-        event.type.startsWith('session.execution.') ||
-        event.type.startsWith('session.inbox.')
-      ) {
-        throw new Error('OpenCode 执行事件缺少提交确认');
-      }
-      this.event(event);
-    }
-    // Descendant execution details belong to the root Agent, without creating another Isles identity.
-    if (
-      event.data.sessionID !== this.sessionId &&
-      typeof event.data.sessionID === 'string' &&
-      this.descendants.has(event.data.sessionID)
+    const sessionId = event.data.sessionID;
+    if (typeof sessionId !== 'string' || !this.descendants.has(sessionId)) return;
+    if (event.durable) {
+      const committed = durableEventSchema.parse(event);
+      if (committed.durable.aggregateID !== sessionId)
+        throw new Error('OpenCode 事件的 session 身份无效');
+      if (committed.durable.seq <= (this.nativeSeq.get(sessionId) ?? -1)) return;
+      this.nativeSeq.set(sessionId, committed.durable.seq);
+    } else if (
+      event.type.startsWith('session.execution.') ||
+      event.type.startsWith('session.inbox.')
     ) {
-      if (
-        [
-          'session.execution.succeeded',
-          'session.execution.failed',
-          'session.execution.interrupted',
-        ].includes(event.type)
-      ) {
-        this.expireForms(event.data.sessionID);
-        void this.clearPermissions(event.data.sessionID).catch((error: unknown) =>
-          this.fail(error as Error),
-        );
-      }
-      this.item(event);
+      throw new Error('OpenCode 执行事件缺少提交确认');
     }
+    this.event(event);
   }
+
   private async receivePermission(request: OpenCodePermissionRequest) {
     if (this.permissions.has(request.id)) return;
     if (
       !this.descendants.has(request.sessionID) ||
-      !this.active ||
-      this.active.ended ||
+      (!this.executions.has(request.sessionID) &&
+        !(request.sessionID === this.sessionId && this.inputs.size)) ||
       this.stopped ||
       this.closing
     ) {
@@ -715,16 +686,17 @@ class OpenCodeSession implements HarnessSession {
     this.permissionQuestion(pending);
   }
   private permissionQuestion(pending: PendingPermission) {
-    if (!this.active?.turnId || pending.turnId) return;
-    pending.turnId = this.active.turnId;
     const request = pending.request;
+    const turnId = this.executions.get(request.sessionID);
+    if (!turnId || pending.turnId) return;
+    pending.turnId = turnId;
     const text = this.environment.redactor.output(
       [request.message, `OpenCode 请求执行 ${request.action}`, ...request.resources]
         .filter(Boolean)
         .join('\n'),
     );
     this.handlers.question({
-      sessionId: this.sessionId!,
+      sessionId: request.sessionID,
       turnId: pending.turnId,
       requestId: request.id,
       questions: permissionQuestions(text),
@@ -737,7 +709,7 @@ class OpenCodeSession implements HarnessSession {
     if (pending.turnId)
       this.handlers.event({
         type: 'question_expired',
-        sessionId: this.sessionId!,
+        sessionId: pending.request.sessionID,
         turnId: pending.turnId,
         requestId: id,
       });
@@ -771,8 +743,9 @@ class OpenCodeSession implements HarnessSession {
     for (const request of requests.values()) await this.replyPermission(request, 'reject');
   }
   private question(form: OpenCodeForm) {
-    if (!this.active?.turnId || this.publishedForms.has(form.id)) return;
-    this.publishedForms.add(form.id);
+    const turnId = this.executions.get(form.sessionID);
+    if (!turnId || this.publishedForms.has(form.id)) return;
+    this.publishedForms.set(form.id, turnId);
     const questions: QuestionDefinition[] = form.fields.map((field) => ({
       id: field.key,
       header: field.title ?? form.title,
@@ -787,8 +760,8 @@ class OpenCodeSession implements HarnessSession {
         })) ?? null,
     }));
     this.handlers.question({
-      sessionId: this.sessionId!,
-      turnId: this.active!.turnId!,
+      sessionId: form.sessionID,
+      turnId,
       requestId: form.id,
       questions,
     });
@@ -797,11 +770,13 @@ class OpenCodeSession implements HarnessSession {
     for (const [id, form] of this.forms) {
       if (sessionID && form.sessionID !== sessionID) continue;
       this.forms.delete(id);
-      if (this.publishedForms.delete(id) && this.active?.turnId)
+      const turnId = this.publishedForms.get(id);
+      this.publishedForms.delete(id);
+      if (turnId)
         this.handlers.event({
           type: 'question_expired',
-          sessionId: this.sessionId!,
-          turnId: this.active.turnId,
+          sessionId: form.sessionID,
+          turnId,
           requestId: id,
         });
     }
@@ -819,7 +794,7 @@ class OpenCodeSession implements HarnessSession {
       return;
     }
     const form = this.forms.get(String(requestId));
-    if (!form || !this.active?.turnId) return;
+    if (!form || !this.executions.has(form.sessionID)) return;
     const values: Record<string, string | string[]> = {};
     for (const field of form.fields) {
       const answers = answer.answers[field.key]?.answers;
@@ -830,6 +805,7 @@ class OpenCodeSession implements HarnessSession {
       values[field.key] = field.type === 'multiselect' ? mapped : mapped[0]!;
     }
     this.forms.delete(form.id);
+    this.publishedForms.delete(form.id);
     void this.native()
       .request('POST', `/api/session/${form.sessionID}/form/${form.id}/reply`, { answer: values })
       .catch((error: unknown) => this.fail(error as Error));
@@ -846,6 +822,7 @@ class OpenCodeSession implements HarnessSession {
     const form = this.forms.get(String(requestId));
     if (!form || this.closing) return;
     this.forms.delete(form.id);
+    this.publishedForms.delete(form.id);
     void this.native()
       .request(
         'DELETE',
@@ -854,12 +831,17 @@ class OpenCodeSession implements HarnessSession {
       .catch((error: unknown) => this.fail(error as Error));
   }
   async interrupt(sessionId: string, turnId: string) {
-    if (sessionId !== this.sessionId || this.active?.turnId !== turnId) return;
+    if (!this.descendants.has(sessionId) || this.executions.get(sessionId) !== turnId) return;
     this.stopped = true;
     this.expireForms();
     await this.clearPermissions();
     await this.clearInputs();
-    await this.native().request('POST', `/api/session/${sessionId}/interrupt?resume=false`);
+    await this.interruptExecutions();
+  }
+  private async interruptExecutions() {
+    // Native interrupt stops one session. Each owned descendant has its own coordinator.
+    for (const sessionId of this.executions.keys())
+      await this.client?.request('POST', `/api/session/${sessionId}/interrupt?resume=false`);
   }
   private async clearInputs() {
     if (!this.client || !this.sessionId) return;
@@ -888,11 +870,11 @@ class OpenCodeSession implements HarnessSession {
   }
   private fail(error: Error) {
     if (this.closing) return;
-    for (const input of this.active?.inputs.values() ?? []) {
+    for (const input of this.inputs.values()) {
       clearTimeout(input.timer);
       input.reject(error);
     }
-    this.active?.inputs.clear();
+    this.inputs.clear();
     this.handlers.exit(new Error(this.environment.redactor.text(error)));
     void this.close();
   }
@@ -901,14 +883,15 @@ class OpenCodeSession implements HarnessSession {
     this.closing = Promise.resolve().then(async () => {
       this.stopped = true;
       this.expireForms();
-      for (const input of this.active?.inputs.values() ?? []) {
+      for (const input of this.inputs.values()) {
         clearTimeout(input.timer);
         input.reject(new Error('OpenCode 连接已关闭'));
       }
-      this.active?.inputs.clear();
+      this.inputs.clear();
       try {
         await this.clearPermissions();
         await this.clearInputs();
+        await this.interruptExecutions();
       } catch (error) {
         this.environment.log.warn({ err: error }, 'OpenCode pending input cleanup failed');
       }

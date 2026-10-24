@@ -124,8 +124,13 @@ export class DshFixture implements DshConnection {
       return {};
     throw new Error(`Unexpected DSH fixture request: ${method}`);
   }
-  event(sessionId: string, event: Record<string, unknown>) {
-    this.notify('isles/event', { sessionId, event, eventId: `evt_${++this.sequence}` });
+  event(sessionId: string, event: Record<string, unknown>, rootSessionId = sessionId) {
+    this.notify('isles/event', {
+      rootSessionId,
+      sessionId,
+      event,
+      eventId: `evt_${++this.sequence}`,
+    });
   }
   start(sessionId: string, turnId = `turn_${++this.sequence}`) {
     this.event(sessionId, { type: 'turn_started', turnId });
@@ -138,7 +143,8 @@ export class DshFixture implements DshConnection {
     this.event(sessionId, { type: 'turn_completed', turnId, status, error: null });
   }
   notify(method: string, params: unknown) {
-    this.handlers?.notification(method, params);
+    const value = params as Record<string, unknown>;
+    this.handlers?.notification(method, { rootSessionId: value.sessionId, ...value });
   }
   loseConnection(error = new Error('Native SDK stream lost')) {
     this.handlers?.exit(error);

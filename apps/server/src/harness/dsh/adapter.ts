@@ -84,10 +84,13 @@ class DshSession implements HarnessSession {
   private client?: DshConnection;
   private sessionId?: string;
   private active: Active | undefined;
+  private rootTurnId: string | undefined;
+  private activities = new Set<string>();
+  private completedActivities = new Set<string>();
   private closing?: Promise<void>;
   private stopped = false;
   private events = new Set<string>();
-  private questions = new Set<string>();
+  private questions = new Map<string, { sessionId: string; turnId: string }>();
   private permissions = new Set<string>();
   private admissions = new Set<Promise<unknown>>();
   constructor(
@@ -158,7 +161,7 @@ class DshSession implements HarnessSession {
       this.handlers.event({ type: 'context_usage', sessionId, usage: session.contextUsage });
   }
   async submit(input: HarnessTurnInput) {
-    if (this.stopped || input.sessionId !== this.sessionId || this.active)
+    if (this.stopped || input.sessionId !== this.sessionId || this.active || this.rootTurnId)
       throw new HarnessSubmissionRejected('DSH session 当前无法开始执行');
     const active: Active = { inputs: new Map(), submitted: new Set() };
     this.active = active;
@@ -167,15 +170,18 @@ class DshSession implements HarnessSession {
     });
   }
   async steer(input: HarnessSteerInput) {
-    const active = this.active;
     if (
       this.stopped ||
       input.sessionId !== this.sessionId ||
-      !active?.turnId ||
-      active.ended ||
-      active.turnId !== input.expectedTurnId
+      this.rootTurnId !== input.expectedTurnId ||
+      this.active?.ended
     )
       throw new HarnessSubmissionRejected('DSH 当前执行已结束，追加消息进入下一轮');
+    const active = (this.active ??= {
+      turnId: input.expectedTurnId,
+      inputs: new Map(),
+      submitted: new Set(),
+    });
     return this.send(active, 'steer', `msg_isles_${input.batchId}`, input.text, {
       expectedTurnId: input.expectedTurnId,
     });
@@ -244,82 +250,64 @@ class DshSession implements HarnessSession {
       this.admissions.delete(request);
     }
   }
+  private activityKey(sessionId: string, turnId: string) {
+    return JSON.stringify([sessionId, turnId]);
+  }
   private notification(method: string, params: unknown) {
     if (this.closing) return;
-    if (method === 'isles/permission') {
-      const permission = permissionRequestSchema.parse(params);
+    if (method === 'isles/permission' || method === 'isles/question') {
+      const permission = method === 'isles/permission';
+      const request = permission
+        ? permissionRequestSchema.parse(params)
+        : questionSchema.parse(params);
+      const requestId = String(request.requestId);
       if (
         this.stopped ||
-        permission.sessionId !== this.sessionId ||
-        permission.turnId !== this.active?.turnId ||
-        this.active.ended ||
-        this.questions.has(permission.requestId)
+        request.rootSessionId !== this.sessionId ||
+        !this.activities.has(this.activityKey(request.sessionId, request.turnId)) ||
+        this.questions.has(requestId)
       )
         return;
-      this.questions.add(permission.requestId);
-      this.permissions.add(permission.requestId);
+      this.questions.set(requestId, { sessionId: request.sessionId, turnId: request.turnId });
+      if (permission) this.permissions.add(requestId);
       this.handlers.question({
-        sessionId: permission.sessionId,
-        turnId: permission.turnId,
-        requestId: permission.requestId,
-        questions: permissionQuestions(this.environment.redactor.output(permission.text)),
+        sessionId: request.sessionId,
+        turnId: request.turnId,
+        requestId: request.requestId,
+        questions:
+          'text' in request
+            ? permissionQuestions(this.environment.redactor.output(request.text))
+            : request.questions,
       });
-      return;
-    }
-    if (method === 'isles/question') {
-      const question = questionSchema.parse(params);
-      if (
-        this.stopped ||
-        question.sessionId !== this.sessionId ||
-        question.turnId !== this.active?.turnId ||
-        this.active.ended ||
-        this.questions.has(String(question.requestId))
-      )
-        return;
-      this.questions.add(String(question.requestId));
-      this.handlers.question(question);
       return;
     }
     if (method !== 'isles/event') return;
     const frame = eventSchema.parse(params);
-    if (frame.sessionId !== this.sessionId) return;
+    if (frame.rootSessionId !== this.sessionId) return;
     if (frame.eventId) {
       if (this.events.has(frame.eventId)) return;
       this.events.add(frame.eventId);
     }
     const event = frame.event;
+    const root = frame.sessionId === this.sessionId;
     if (event.type === 'question_expired') {
-      if (event.turnId === this.active?.turnId && this.questions.delete(event.requestId)) {
+      const request = this.questions.get(event.requestId);
+      if (request?.sessionId === frame.sessionId && request.turnId === event.turnId) {
+        this.questions.delete(event.requestId);
         this.permissions.delete(event.requestId);
         this.handlers.event({ ...event, sessionId: frame.sessionId });
       }
       return;
     }
     if (event.type === 'context_usage') {
-      this.handlers.event({
-        type: 'context_usage',
-        sessionId: this.sessionId!,
-        usage: event.usage,
-      });
+      this.handlers.event({ ...event, sessionId: frame.sessionId });
       return;
     }
     const active = this.active;
-    if (!active) return;
-    if (event.type === 'turn_started') {
-      if (active.turnId === event.turnId) return;
-      if (active.turnId || active.ended) {
-        this.fail(new Error('DSH 追加输入跨越了原生执行边界，结果待核对'));
-        return;
-      }
-      active.turnId = event.turnId;
-      this.handlers.event({
-        type: 'turn_started',
-        sessionId: this.sessionId!,
-        turnId: event.turnId,
-      });
-    } else if (event.type === 'input_accepted' || event.type === 'input_rejected') {
-      const pending = active.inputs.get(event.messageId);
-      if (!pending) return;
+    if (event.type === 'input_accepted' || event.type === 'input_rejected') {
+      if (!root) return;
+      const pending = active?.inputs.get(event.messageId);
+      if (!active || !pending) return;
       clearTimeout(pending.timer);
       active.inputs.delete(event.messageId);
       if (event.type === 'input_rejected')
@@ -331,28 +319,48 @@ class DshSession implements HarnessSession {
         pending.resolve(pending.accepted);
       }
       this.finish(active);
-    } else if (event.turnId === active.turnId) {
-      if (event.type === 'turn_completed') {
-        active.ended = {
-          status: event.status,
-          error: event.error === null ? null : this.environment.redactor.text(event.error),
-        };
-        this.finish(active);
-      } else
-        this.handlers.event({
-          type: event.type,
-          sessionId: this.sessionId!,
-          turnId: event.turnId,
-          item: { ...event.item, text: this.environment.redactor.output(event.item.text) },
-          append: event.append,
-        });
+      return;
     }
+    const key = this.activityKey(frame.sessionId, event.turnId);
+    if (event.type === 'turn_started') {
+      if (this.activities.has(key) || this.completedActivities.has(key)) return;
+      this.activities.add(key);
+      if (root) {
+        this.rootTurnId = event.turnId;
+        if (active && !active.turnId && !active.ended) active.turnId = event.turnId;
+      }
+      this.handlers.event({ ...event, sessionId: frame.sessionId });
+      return;
+    }
+    if (!this.activities.has(key)) return;
+    if (event.type === 'turn_completed') {
+      this.activities.delete(key);
+      this.completedActivities.add(key);
+      if (root && this.rootTurnId === event.turnId) this.rootTurnId = undefined;
+      for (const [requestId, request] of this.questions)
+        if (request.sessionId === frame.sessionId && request.turnId === event.turnId) {
+          this.questions.delete(requestId);
+          this.permissions.delete(requestId);
+        }
+      const ended = {
+        status: event.status,
+        error: event.error === null ? null : this.environment.redactor.text(event.error),
+      };
+      if (root && active?.turnId === event.turnId) {
+        active.ended = ended;
+        this.finish(active);
+      } else this.handlers.event({ ...event, ...ended, sessionId: frame.sessionId });
+      return;
+    }
+    this.handlers.event({
+      ...event,
+      sessionId: frame.sessionId,
+      item: { ...event.item, text: this.environment.redactor.output(event.item.text) },
+    });
   }
   private finish(active: Active) {
     if (this.active !== active || !active.turnId || !active.ended || active.inputs.size) return;
     this.active = undefined;
-    this.questions.clear();
-    this.permissions.clear();
     this.handlers.event({
       type: 'turn_completed',
       sessionId: this.sessionId!,
@@ -361,14 +369,15 @@ class DshSession implements HarnessSession {
     });
   }
   answer(requestId: HarnessRequestId, answer: QuestionAnswer) {
-    if (this.closing || !this.questions.has(String(requestId))) return;
+    const request = this.questions.get(String(requestId));
+    if (this.closing || !request) return;
     const allow = this.permissions.has(String(requestId)) ? permissionAllowed(answer) : undefined;
     this.questions.delete(String(requestId));
     const permission = this.permissions.delete(String(requestId));
     void this.native()
       .request(permission ? 'isles/permission/answer' : 'isles/question/answer', {
-        sessionId: this.sessionId,
-        expectedTurnId: this.active?.turnId,
+        sessionId: request.sessionId,
+        expectedTurnId: request.turnId,
         requestId,
         ...(permission ? { allow } : { answers: answer.answers }),
       })
@@ -376,24 +385,29 @@ class DshSession implements HarnessSession {
       .catch((error: unknown) => this.fail(error as Error));
   }
   rejectQuestion(requestId: HarnessRequestId, reason: string) {
-    if (this.closing || !this.questions.delete(String(requestId))) return;
+    const request = this.questions.get(String(requestId));
+    if (this.closing || !request) return;
+    this.questions.delete(String(requestId));
     const permission = this.permissions.delete(String(requestId));
     void this.native()
       .request(permission ? 'isles/permission/reject' : 'isles/question/reject', {
-        sessionId: this.sessionId,
-        expectedTurnId: this.active?.turnId,
+        sessionId: request.sessionId,
+        expectedTurnId: request.turnId,
         requestId,
         reason,
       })
       .catch((error: unknown) => this.fail(error as Error));
   }
   async interrupt(sessionId: string, turnId: string) {
-    if (sessionId !== this.sessionId || turnId !== this.active?.turnId) return;
+    if (!this.sessionId || !this.activities.has(this.activityKey(sessionId, turnId))) return;
     this.stopped = true;
     this.expireQuestions();
     await Promise.allSettled(this.admissions);
     this.checked(
-      await this.native().request('isles/session/interrupt', { sessionId, expectedTurnId: turnId }),
+      await this.native().request('isles/session/interrupt', {
+        sessionId: this.sessionId,
+        expectedTurnId: turnId,
+      }),
     );
   }
   private fail(error: Error) {
@@ -407,14 +421,13 @@ class DshSession implements HarnessSession {
     void this.close();
   }
   private expireQuestions() {
-    if (this.sessionId && this.active?.turnId)
-      for (const requestId of this.questions)
-        this.handlers.event({
-          type: 'question_expired',
-          sessionId: this.sessionId,
-          turnId: this.active.turnId,
-          requestId,
-        });
+    for (const [requestId, request] of this.questions)
+      this.handlers.event({
+        type: 'question_expired',
+        sessionId: request.sessionId,
+        turnId: request.turnId,
+        requestId,
+      });
     this.questions.clear();
     this.permissions.clear();
   }

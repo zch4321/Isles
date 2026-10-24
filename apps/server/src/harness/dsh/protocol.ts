@@ -40,6 +40,7 @@ export const admissionSchema = z.object({
 });
 const turnId = z.string().min(1);
 export const eventSchema = z.object({
+  rootSessionId: z.string().min(1),
   sessionId: z.string().min(1),
   event: z.discriminatedUnion('type', [
     z.object({ type: z.literal('context_usage'), usage: contextUsageSchema }),
@@ -67,12 +68,14 @@ export const eventSchema = z.object({
   eventId: z.string().optional(),
 });
 export const questionSchema = z.object({
+  rootSessionId: z.string().min(1),
   sessionId: z.string().min(1),
   turnId,
   requestId: z.union([z.string(), z.number()]),
   questions: z.array(questionDefinitionSchema).min(1),
 });
 export const permissionRequestSchema = z.object({
+  rootSessionId: z.string().min(1),
   sessionId: z.string().min(1),
   turnId,
   requestId: z.string().min(1),

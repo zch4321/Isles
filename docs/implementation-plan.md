@@ -1,6 +1,6 @@
 # Isles 实现计划
 
-> 版本：0.24 · 日期：2026-10-09 · 状态：五种 harness 已接入；支持 steer、Markdown 聊天导出与 Agent 上下文管理
+> 版本：0.25 · 日期：2026-10-24 · 状态：五种 harness 升级及统一原生活动模型已完成验收
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
@@ -49,7 +49,16 @@
 
 配置与目录拆分的验收覆盖优先级、路径解析、数据库/token 位置、Codex 发现及错误、UI 保存与实时检测、工作区稳定性、共享目录和原生规则加载。当前结果为 89 项测试、7 项浏览器测试与两个真实 Codex Agent 的读写/重启验证通过。旧目录清理仍有进程占用及工具审批限制，具体边界见 [验收记录](config-workspace-acceptance.md#4-旧目录清理遗留项)。
 
-当前单用户、本机、Codex 范围的基础闭环可收口：配置和独立工作区、Agent/群聊管理、私聊与群聊、MCP 共享文件协作、持久规则、停止/恢复与固定 thread 已有自动化、浏览器和真实 Codex 证据。群聊管理的检查与边界见 [验收记录](group-management-acceptance.md)。适配层、按 Agent 配置 steer 与 Claude CLI 接入已完成验收，其他 harness 之后另定；M5 的检索、产物版本、备份和更长时间运行不作为接入前置条件。当前 Codex 或 fake adapter 验证都不能代替其他 harness 的原生能力验收。
+当前五种 harness 已接入固定 session、私聊/群聊、MCP、原生问题和权限管理。2026-10-24 按最新版本更新 adapter，并采用统一原生活动模型；完整检查、浏览器回归与原生复验正在进行，见 [本轮升级记录](harness-upgrade-2026-10-24.md)。既有阶段的自动化与真实账户验收继续保留历史结果。
+
+### 2.1 2026-10-24：版本升级与统一原生活动模型
+
+- 基线为 Codex `0.164.0`、Claude `2.1.310`、Kimi `2.3.1`、OpenCode `2.1.4` 与用户指定的 DSH `0.2.1-rc.3`；通用 ACP 保持官方 v1 Latest。
+- 保留状态显示；每个原生阶段独立 run，持续记录后台、自主和异步子代理，无 Isles 输入时 `inputs=[]`。
+- 投递与活动完成独立。确切消费标记 `accepted`（已送达），运行结束与停止保留送达事实；迟到 ACK 只订正仍绑定原尝试的消费记录。
+- steer 按实际消费活动归属；固定主 session、停止意愿和原 session 恢复保持。
+- 原生测试使用隔离 home、本地 provider 与临时 Isles 数据；DSH/Kimi 协议验证零推理，其余使用本地模拟推理。
+- 完整 `pnpm check` 通过（569 项测试、1 项平台跳过），Chrome 浏览器 44 项通过，五种新版 CLI 本地验证完成；结果汇总在 [本轮升级记录](harness-upgrade-2026-10-24.md)。
 
 ## 3. M0：工程初始化
 
@@ -169,16 +178,16 @@
 
 - 新增 `capabilities.steer` 与持久 `steerEnabled`，创建默认关闭；支持 harness 也可保持关闭，创建/编辑/详情都可配置。unsupported 禁用开启且 API 独立拒绝，已有开启值仍可关闭。
 - 仅修改收信偏好不查模型目录、不重启原生连接，不改 thread。开启时忙碌 queued 输入立即向当前 thread/turn 追加，保留频道、序号、来源、回复和提及；关闭或 unsupported 继续排队到下一轮。
-- 新基线增加 `steer_batches`，发出前保存批次与关联；`steering` 在 Web 显示“投递中”。原生 ACK 表示接受，MCP received 表示工具接收，两者都不是工作完成证明。
+- `steer_batches` 在发出前保存批次与原目标；`steering` 显示“投递中”，确切原生消费后为 `accepted` / “已送达”，关联实际原生活动。MCP 返回记录为 `received`；活动终态单独保存。
 - Codex steer 只有 `-32600` / `-32601` / `-32602` 明确拒绝可退回队列到下一 turn；未知错误、超时、断连不自动重投。关闭开关只影响后续输入，已发 RPC 按实际结果结算；停止、暂停群、删除群和移出成员继续分别执行原控制规则。
-- `receive_messages` 保持立即返回，不新增 wait 参数或阻塞 MCP；稳定 AGENTS.md 只解释机制，不写实时开关值。不新增 harness，Claude 继续暂缓。
+- `receive_messages` 保持立即返回，稳定 AGENTS.md 描述收信机制。五种已注册 harness 按能力提供默认关闭的 steer；当前版本与运行模型见 [升级记录](harness-upgrade-2026-10-24.md)。
 - 首个 release 前仍只更新当前全新 schema 基线，不增加兼容或旧库迁移；验收使用独立临时配置/数据。旧库阻碍默认环境启动时，按用户授权直接清理或覆盖并重建，不要求用户另配数据库；同版本正常重启继续保留数据。
 
 2026-10-04 验收通过：`pnpm check` 的 166 项测试、完整构建、16 项 Chrome 浏览器测试，以及真实 `codex-cli 0.160.0` / `gpt-6.1-sol` 的三来源 steer 验证。私聊、用户群消息与 Agent 群消息均进入原 thread/turn；reader 只有一次 turn/start，无收件箱或历史读取；重启保留开关和原 thread。数据库脚本使用独立配置，确认 10 表新基线无差异并成功初始化。完整证据与边界见 [独立验收](steer-delivery-acceptance.md)。
 
-### 6.2 M3：Kimi Code 与通用 ACP adapter
+### 6.2 M3：Kimi Code 本地 Web 与 ACP 接入历史
 
-2026-10-10 用户确认改用 CLI 本地 `kimi web` 的 REST/WebSocket 接口，保持原 session 与模型，增加 steer 和主执行中的原生子代理进度。当前实现与协议验收见 [Kimi Web 接入](kimi-web-acceptance.md)，以下保留此前 ACP 接入事实。
+Kimi 当前使用本地 `kimi web` REST/WebSocket，基线 `2.3.1`，保持固定 session、原生模型与共享登录，支持 steer、问题及子代理活动。2026-10-24 起每个原生阶段独立 run，消费回执关联实际阶段，后台和自主阶段持续记录。当前验证见 [升级记录](harness-upgrade-2026-10-24.md)，此前 Web 接入见 [Kimi Web 验收](kimi-web-acceptance.md)。以下保留 2026-10-08 的 ACP 接入事实。
 
 2026-10-08 用户确认接入 Kimi Code，并先实现通用 ACP adapter，后续采用 ACP 的 agent 只需新增 harness 配置；DSH 的本轮接入采用原生桥接以保留 steer。
 
@@ -198,7 +207,7 @@
 - 创建先保存 UUID，发送中性消息并等待内部模型回合成功；工具调用在该阶段被拒绝，结果不生成 Isles 消息或 run。
 - CLAUDE.md 原生导入唯一 AGENTS.md，通过 get_context_usage 校验加载文件，并检查 Isles MCP 连接。
 - 将 replay/started、result、工具和 AskUserQuestion 转为既有平台事件与问答；只恢复原 UUID，失效问题拒绝，未知结果不重投。
-- Claude 支持默认关闭的 steer，以原生批次 UUID 确认同执行消费；回合结束时尚未消费的输入由 CLI 接着执行并计入同一 run（2026-10-08 修复撤回竞态后确认）；停止取消原生队列。保留忙碌排队、主动 receive_messages 和原生子代理能力。
+- Claude 支持默认关闭的 steer，批次 UUID 与主线程 replay/started、result 消费列表确认实际原生回合；每回合独立 run，后台和自主事件持续记录。停止取消未消费输入，保持固定 UUID、忙碌排队、主动收信与原生子代理能力。
 - preClose 释放原生进程与 MCP 流，随后关闭 HTTP 与数据库，覆盖持久 SSE 连接阻塞退出的回归。
 
 macOS 原生私聊、问答、停止/恢复、改名、Codex/Claude 混合群聊、同 session 服务重启和保留历史删除均已通过；Claude steer 的三来源同执行追加、在途停止与偏好重启持久化也已通过。自动化、浏览器与真实验证分层记录在 [Claude CLI 验收](claude-cli-acceptance.md)。

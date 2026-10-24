@@ -4,6 +4,7 @@ import {
   AtSign,
   Ban,
   CircleAlert,
+  Check,
   Clock3,
   CornerDownRight,
   LoaderCircle,
@@ -44,7 +45,7 @@ const deliveryStyles: Partial<
     spin: true,
     hint: '正在向当前执行追加消息。',
   },
-  accepted: { icon: LoaderCircle, class: 'text-st-running', spin: true },
+  accepted: { icon: Check, class: 'text-ink-3' },
   cancelled: { icon: Ban, class: 'text-ink-3' },
   failed: { icon: CircleAlert, class: 'text-st-error' },
   uncertain: {

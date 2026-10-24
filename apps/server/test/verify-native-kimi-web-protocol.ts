@@ -47,7 +47,7 @@ default_effort = "high"
 const config = new ConfigManager({
   configFilePath: join(root, 'config.toml'),
   homeDir: root,
-  environment: { ISLES_KIMI_HOME: nativeHome },
+  environment: { ISLES_KIMI_HOME: nativeHome, ISLES_KIMI_BIN: process.env.ISLES_KIMI_BIN },
 });
 const clients = new Map<string, KimiWebClient>();
 let environment: KimiWebEnvironment;

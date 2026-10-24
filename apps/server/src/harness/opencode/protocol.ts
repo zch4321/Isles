@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-// OpenCode v2.0.25 native HTTP protocol, pinned to anomalyco/opencode b44eea9.
+// OpenCode v2.1.4 native HTTP protocol.
 export const modelRefSchema = z.object({
   providerID: z.string().min(1),
   id: z.string().min(1),
@@ -25,7 +25,7 @@ export const sessionInfoSchema = z
 export const sessionResponseSchema = z.object({ data: sessionInfoSchema });
 export const sessionListSchema = z.object({
   data: z.array(sessionInfoSchema.extend({ parentID: z.string().optional() })),
-  cursor: z.object({ next: z.string().optional() }).optional(),
+  cursor: z.object({ next: z.string().nullish() }).optional(),
 });
 export const permissionRuleSchema = z.object({
   action: z.string(),

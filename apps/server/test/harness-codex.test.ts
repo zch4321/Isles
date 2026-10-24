@@ -125,7 +125,184 @@ async function fixture(dangerFullAccess = false) {
   };
 }
 
+function userInput(threadId = 'session-one', turnId = 'turn-one') {
+  return {
+    threadId,
+    turnId,
+    itemId: 'question-item',
+    isBlocking: true,
+    autoResolutionMs: null,
+    questions: [
+      {
+        id: 'q',
+        header: 'Choice',
+        question: 'Pick a value',
+        isOther: true,
+        isSecret: false,
+        options: null,
+      },
+    ],
+  };
+}
+
 describe('Codex adapter protocol boundary', () => {
+  it('filters unrelated native activity and accepts only verified descendants', async () => {
+    const f = await fixture();
+    await f.session.createSession(() => {});
+    const emit = (threadId: string) => {
+      f.wire.notification('turn/started', { threadId, turn: { id: 'turn', status: 'inProgress' } });
+      f.wire.notification('item/agentMessage/delta', {
+        threadId,
+        turnId: 'turn',
+        itemId: 'message',
+        delta: 'hello',
+      });
+      f.wire.request(
+        `question-${threadId}`,
+        'item/tool/requestUserInput',
+        userInput(threadId, 'turn'),
+      );
+    };
+    f.wire.notification('thread/started', {
+      thread: { id: 'stranger-child', parentThreadId: 'stranger' },
+    });
+    f.wire.notification('item/completed', {
+      threadId: 'stranger',
+      turnId: 'turn',
+      item: { id: 'activity', type: 'subAgentActivity', agentThreadId: 'forged-child' },
+    });
+    for (const id of ['stranger', 'stranger-child', 'forged-child']) emit(id);
+    expect(f.output.event).not.toHaveBeenCalled();
+    expect(f.output.question).not.toHaveBeenCalled();
+    expect(f.native.reject).toHaveBeenCalledTimes(3);
+    f.wire.notification('thread/started', {
+      thread: { id: 'child', parentThreadId: 'session-one' },
+    });
+    f.wire.notification('thread/started', {
+      thread: { id: 'grandchild', parentThreadId: 'child' },
+    });
+    emit('child');
+    emit('grandchild');
+    expect(f.output.question).toHaveBeenCalledTimes(2);
+    expect(f.output.event).toHaveBeenCalledTimes(4);
+  });
+
+  it('retains background questions when a root or another child turn completes', async () => {
+    const f = await fixture();
+    await f.session.createSession(() => {});
+    f.wire.notification('thread/started', {
+      thread: { id: 'child', parentThreadId: 'session-one' },
+    });
+    f.wire.request('root-question', 'item/tool/requestUserInput', userInput());
+    f.wire.request(
+      'child-question',
+      'item/tool/requestUserInput',
+      userInput('child', 'background-turn'),
+    );
+    f.wire.request('child-approval', 'item/fileChange/requestApproval', {
+      threadId: 'child',
+      turnId: 'background-turn',
+      itemId: 'change',
+    });
+    for (const [threadId, turnId] of [
+      ['session-one', 'turn-one'],
+      ['child', 'other-turn'],
+    ])
+      f.wire.notification('turn/completed', {
+        threadId,
+        turn: { id: turnId, status: 'completed' },
+      });
+    const expired = vi
+      .mocked(f.output.event)
+      .mock.calls.map(([event]) => event)
+      .filter((event) => event.type === 'question_expired');
+    expect(expired).toEqual([
+      {
+        type: 'question_expired',
+        sessionId: 'session-one',
+        turnId: 'turn-one',
+        requestId: 'root-question',
+      },
+    ]);
+    f.session.answer('child-question', { answers: { q: { answers: ['continue'] } } });
+    f.session.answer('child-approval', { answers: { permission: { answers: ['允许本次'] } } });
+    expect(f.native.respond).toHaveBeenCalledTimes(2);
+  });
+
+  it('suppresses bootstrap replay and restores descendant ownership from native history', async () => {
+    const f = await fixture();
+    f.setRequest(async (method) => {
+      if (method === 'thread/resume') {
+        f.wire.notification('turn/started', {
+          threadId: 'session-one',
+          turn: { id: 'historical', status: 'inProgress' },
+        });
+        f.wire.notification('item/agentMessage/delta', {
+          threadId: 'session-one',
+          turnId: 'historical',
+          itemId: 'old',
+          delta: 'history',
+        });
+        f.wire.request('bootstrap-question', 'item/tool/requestUserInput', userInput());
+        return {
+          thread: {
+            id: 'session-one',
+            turns: [
+              {
+                items: [{ id: 'spawn', type: 'subAgentActivity', agentThreadId: 'restored-child' }],
+              },
+            ],
+          },
+          instructionSources: [join(f.agent.workspace, 'AGENTS.md')],
+        };
+      }
+      return {};
+    });
+    await f.session.resumeSession('session-one');
+    expect(f.output.event).not.toHaveBeenCalled();
+    expect(f.output.question).not.toHaveBeenCalled();
+    expect(f.native.reject).toHaveBeenCalledWith('bootstrap-question', expect.any(String));
+    f.wire.notification('turn/started', {
+      threadId: 'restored-child',
+      turn: { id: 'wake', status: 'inProgress' },
+    });
+    expect(f.output.event).toHaveBeenCalledWith({
+      type: 'turn_started',
+      sessionId: 'restored-child',
+      turnId: 'wake',
+    });
+    await f.session.close();
+    f.wire.notification('turn/started', {
+      threadId: 'session-one',
+      turn: { id: 'late', status: 'inProgress' },
+    });
+    expect(f.output.event).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps definite submit refusals when unrelated autonomous work starts concurrently', async () => {
+    const f = await fixture();
+    await f.session.createSession(() => {});
+    f.setRequest(async () => {
+      f.wire.notification('turn/started', {
+        threadId: f.input.sessionId,
+        turn: { id: 'autonomous', status: 'inProgress' },
+      });
+      f.wire.notification('item/started', {
+        threadId: f.input.sessionId,
+        turnId: 'autonomous',
+        item: { id: 'other-input', type: 'userMessage', clientId: 'other-message' },
+      });
+      f.wire.request('autonomous-question', 'item/tool/requestUserInput', userInput());
+      throw new NativeRpcError('input rejected');
+    });
+    await expect(f.session.submit(f.input)).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    expect(f.output.event).toHaveBeenCalledWith({
+      type: 'turn_started',
+      sessionId: f.input.sessionId,
+      turnId: 'autonomous',
+    });
+  });
+
   it.each([false, true])(
     'applies native permissions for create, resume and every turn (full=%s)',
     async (full) => {
@@ -244,8 +421,8 @@ describe('Codex adapter protocol boundary', () => {
     });
     expect(f.output.event).toHaveBeenCalledWith({
       type: 'question_expired',
-      sessionId: 'session-one',
-      turnId: 'turn-one',
+      sessionId: 'child',
+      turnId: 'child-turn',
       requestId: 'child-request',
     });
     expect(() =>
@@ -260,7 +437,8 @@ describe('Codex adapter protocol boundary', () => {
   });
 
   it('isolates message and command deltas while retaining discrete tool and completion boundaries', async () => {
-    const { wire, output } = await fixture();
+    const { session, wire, output } = await fixture();
+    await session.createSession(() => {});
     const identity = { threadId: 'session-one', turnId: 'turn-one' };
     for (const type of ['agentMessage', 'reasoning'])
       wire.notification('item/started', {
@@ -299,6 +477,170 @@ describe('Codex adapter protocol boundary', () => {
     ]);
   });
 
+  it('projects indexed reasoning sections, final snapshots, plans and native subagent activity', async () => {
+    const f = await fixture();
+    await f.session.createSession(() => {});
+    const identity = { threadId: 'session-one', turnId: 'turn-one' };
+    f.environment.redactor.add('reasoning-secret-123456');
+    for (const [summaryIndex, delta] of [
+      [1, 'second'],
+      [0, 'first '],
+      [0, 'reasoning-secret-123456'],
+    ] as const)
+      f.wire.notification('item/reasoning/summaryTextDelta', {
+        ...identity,
+        itemId: 'reason',
+        summaryIndex,
+        delta,
+      });
+    f.wire.notification('item/reasoning/summaryPartAdded', {
+      ...identity,
+      itemId: 'reason',
+      summaryIndex: 0,
+    });
+    f.wire.notification('item/reasoning/textDelta', {
+      ...identity,
+      itemId: 'reason',
+      contentIndex: 0,
+      delta: 'content',
+    });
+    expect(f.output.event).toHaveBeenLastCalledWith({
+      type: 'item_delta',
+      ...{ sessionId: 'session-one', turnId: 'turn-one' },
+      append: false,
+      item: {
+        id: 'reason',
+        type: 'reasoning',
+        status: 'running',
+        text: 'first [redacted]\nsecond\ncontent',
+      },
+    });
+    f.wire.notification('item/completed', {
+      ...identity,
+      item: {
+        id: 'reason',
+        type: 'reasoning',
+        summary: ['final summary'],
+        content: ['final content'],
+      },
+    });
+    expect(f.output.event).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: 'item',
+        append: false,
+        item: {
+          id: 'reason',
+          type: 'reasoning',
+          status: 'completed',
+          text: 'final summary\nfinal content',
+        },
+      }),
+    );
+    f.wire.notification('item/plan/delta', { ...identity, itemId: 'plan', delta: 'Step one' });
+    expect(f.output.event).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: 'item_delta',
+        append: true,
+        item: { id: 'plan', type: 'plan', status: 'running', text: 'Step one' },
+      }),
+    );
+    f.wire.notification('item/completed', {
+      ...identity,
+      item: {
+        id: 'activity',
+        type: 'subAgentActivity',
+        kind: 'started',
+        agentThreadId: 'child',
+        agentPath: '/root/review',
+        model: 'model-one',
+        reasoningEffort: 'high',
+      },
+    });
+    expect(f.output.event).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: 'item',
+        item: {
+          id: 'activity',
+          type: 'subAgentActivity',
+          status: 'completed',
+          text: 'kind: started\nagentThreadId: child\nagentPath: /root/review\nmodel: model-one\nreasoningEffort: high',
+        },
+      }),
+    );
+    f.wire.request('child-approval', 'item/fileChange/requestApproval', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      itemId: 'change',
+    });
+    expect(f.output.question).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 'child-approval' }),
+    );
+  });
+
+  it.each(['resolved', 'completed', 'interrupt', 'close', 'exit'] as const)(
+    'expires native user input on %s and rejects late answers',
+    async (ending) => {
+      const f = await fixture();
+      await f.session.createSession(() => {});
+      await f.session.submit(f.input);
+      f.wire.notification('thread/started', {
+        thread: { id: 'child', parentThreadId: 'session-one' },
+      });
+      f.wire.request(
+        'pending-input',
+        'item/tool/requestUserInput',
+        userInput('child', 'child-turn'),
+      );
+      if (ending === 'resolved') {
+        f.wire.notification('serverRequest/resolved', {
+          threadId: 'other',
+          requestId: 'pending-input',
+        });
+        expect(f.output.event).not.toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'question_expired' }),
+        );
+        f.wire.notification('serverRequest/resolved', {
+          threadId: 'child',
+          requestId: 'pending-input',
+        });
+      } else if (ending === 'completed')
+        f.wire.notification('turn/completed', {
+          threadId: 'child',
+          turn: { id: 'child-turn', status: 'completed' },
+        });
+      else if (ending === 'interrupt') await f.session.interrupt('session-one', 'turn-one');
+      else if (ending === 'close') await f.session.close();
+      else f.wire.exit(new Error('native exit'));
+      expect(f.output.event).toHaveBeenCalledWith({
+        type: 'question_expired',
+        sessionId: 'child',
+        turnId: 'child-turn',
+        requestId: 'pending-input',
+      });
+      expect(() =>
+        f.session.answer('pending-input', { answers: { q: { answers: ['value'] } } }),
+      ).toThrow('已失效');
+      expect(f.native.respond).not.toHaveBeenCalled();
+      if (ending === 'interrupt' || ending === 'close')
+        expect(f.native.reject).toHaveBeenCalledWith('pending-input', expect.any(String));
+      else expect(f.native.reject).not.toHaveBeenCalled();
+    },
+  );
+
+  it('answers native user input once and keeps answered requests out of expiry notifications', async () => {
+    const f = await fixture();
+    await f.session.createSession(() => {});
+    f.wire.request(9, 'item/tool/requestUserInput', userInput());
+    const answer = { answers: { q: { answers: ['value'] } } };
+    f.session.answer(9, answer);
+    expect(f.native.respond).toHaveBeenCalledWith(9, answer);
+    f.wire.notification('serverRequest/resolved', { threadId: 'session-one', requestId: 9 });
+    expect(f.output.event).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'question_expired' }),
+    );
+    expect(() => f.session.answer(9, answer)).toThrow('已失效');
+  });
+
   it('reports last context usage outside turns and filters other native threads', async () => {
     const { session, wire, output } = await fixture();
     await session.createSession(() => {});
@@ -333,6 +675,13 @@ describe('Codex adapter protocol boundary', () => {
         tokenUsage: { ...usage, last: { totalTokens: invalid } },
       });
     expect(output.event).toHaveBeenCalledTimes(2);
+    wire.notification('thread/started', { thread: { id: 'child', parentThreadId: 'restored' } });
+    wire.notification('thread/tokenUsage/updated', { threadId: 'child', tokenUsage: usage });
+    expect(output.event).toHaveBeenLastCalledWith({
+      type: 'context_usage',
+      sessionId: 'child',
+      usage: { usedTokens: 12345, maxTokens: 200000, estimated: false },
+    });
   });
 
   it('does not treat a usage notification as turn acceptance', async () => {
@@ -393,6 +742,8 @@ describe('Codex adapter protocol boundary', () => {
 
   it('maps semantic submission and control operations, and preserves uncertain errors', async () => {
     const { session, input, calls, native, wire, setRequest, environment } = await fixture();
+    await session.createSession(() => {});
+    calls.length = 0;
     await expect(session.submit(input)).resolves.toEqual({ turnId: 'turn-one' });
     expect(calls[0]).toEqual({
       method: 'turn/start',
@@ -428,6 +779,11 @@ describe('Codex adapter protocol boundary', () => {
         threadId: input.sessionId,
         turn: { id: 'accepted-turn', status: 'inProgress' },
       });
+      wire.notification('item/started', {
+        threadId: input.sessionId,
+        turnId: 'accepted-turn',
+        item: { id: 'user-input', type: 'userMessage', clientId: input.runId },
+      });
       throw refusal;
     });
     await expect(session.submit(input)).rejects.toBe(refusal);
@@ -438,6 +794,7 @@ describe('Codex adapter protocol boundary', () => {
       params: { threadId: input.sessionId, turnId: 'accepted-turn' },
     });
     const answer = { answers: { q: { answers: ['Yes'] } } };
+    wire.request(7, 'item/tool/requestUserInput', userInput());
     session.answer(7, answer);
     session.rejectQuestion('other', 'expired');
     await session.close();
@@ -448,7 +805,11 @@ describe('Codex adapter protocol boundary', () => {
   });
 
   it('projects safe items and scrubs credentials across events, questions and exits', async () => {
-    const { environment, wire, output, native } = await fixture();
+    const { session, environment, wire, output, native } = await fixture();
+    await session.createSession(() => {});
+    wire.notification('thread/started', {
+      thread: { id: 'child-session', parentThreadId: 'session-one' },
+    });
     const secret = 'private-token-123456';
     environment.redactor.add(secret);
     wire.notification('item/completed', {

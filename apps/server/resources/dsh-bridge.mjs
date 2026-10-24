@@ -14,11 +14,13 @@ const [
   { createUserMessage, BlockAssembler },
   { installModelSelection },
   { UserQuestionError },
+  { carrierKeyOf },
 ] = await Promise.all([
   native('@deepseek-ai/dsh-sdk-protocol'),
   native('@deepseek-ai/dsh-llm'),
   native('@deepseek-ai/dsh-agent'),
   native('@deepseek-ai/dsh-user-questions'),
+  native('@deepseek-ai/dsh-scope'),
 ]);
 
 export const name = 'isles-dsh-bridge';
@@ -35,7 +37,7 @@ const textOf = (blocks = []) =>
   blocks
     .map((block) => {
       if (typeof block.text === 'string') return block.text;
-      if (block.type === 'tool-call') return `${block.name}: ${JSON.stringify(block.arguments)}`;
+      if (block.type === 'tool-call') return `${block.name}: ${block.arguments}`;
       return '';
     })
     .filter(Boolean)
@@ -51,14 +53,17 @@ export function apply(ctx, config = {}) {
   const questions = new Map();
   const permissions = new Map();
   const creations = new Map();
+  const subagents = new Map();
+  const seenSubagents = new Set();
   const disposers = [];
   let stopping = false;
   let shutdownTask;
   let exitTask;
   const ready = () => ctx.get('loader')?.await();
-  const emit = (rec, event, eventId) =>
+  const emit = (rec, event, eventId, sourceSessionId = rec.id) =>
     transport.notify('isles/event', {
-      sessionId: rec.id,
+      rootSessionId: rec.id,
+      sessionId: sourceSessionId,
       event,
       ...(eventId === undefined ? {} : { eventId }),
     });
@@ -117,6 +122,7 @@ export function apply(ctx, config = {}) {
   const ownedRecord = (agent) => {
     const seen = new Set();
     for (let current = agent; current && !seen.has(current);) {
+      if (ctx.agents.get(current.id) !== current) return;
       seen.add(current);
       const rec = record(current);
       if (rec) return rec;
@@ -128,9 +134,103 @@ export function apply(ctx, config = {}) {
       agent.session,
       rec.dangerFullAccess ? 'danger-full-access' : 'workspace-write',
     );
-  const expireInteractions = (rec, turnId) => {
+  const activityOf = (agent) => {
+    const rec = record(agent);
+    if (rec?.activeTurn !== undefined) return { rec, sessionId: rec.id, turnId: rec.activeTurn };
+    for (const run of subagents.values())
+      if (run.local && ctx.agents.get(run.id) === agent)
+        return { rec: run.rec, sessionId: String(run.id), turnId: run.turnId };
+  };
+  disposers.push(
+    ctx.on(
+      'subagent/start',
+      function (info) {
+        const parent = carrierKeyOf(this);
+        const rec = parent && ownedRecord(parent);
+        if (!rec || stopping || seenSubagents.has(info.runId)) return;
+        seenSubagents.add(info.runId);
+        const run = { rec, parent, turnId: String(info.runId), ...info };
+        subagents.set(info.runId, run);
+        emit(
+          rec,
+          { type: 'turn_started', turnId: run.turnId },
+          `${rec.id}:subagent:${info.runId}:started`,
+          String(info.id),
+        );
+        emit(
+          rec,
+          {
+            type: 'item',
+            turnId: run.turnId,
+            append: false,
+            item: {
+              id: `subagent:${info.runId}`,
+              type: 'subagent',
+              status: 'running',
+              text: `${info.provider} · ${info.id}`,
+            },
+          },
+          `${rec.id}:subagent:${info.runId}:start`,
+          String(info.id),
+        );
+      },
+      { global: true },
+    ),
+    ctx.on(
+      'subagent/end',
+      function (info) {
+        const run = subagents.get(info.runId);
+        if (
+          !run ||
+          run.parent !== carrierKeyOf(this) ||
+          run.id !== info.id ||
+          run.provider !== info.provider ||
+          run.local !== info.local
+        )
+          return;
+        subagents.delete(info.runId);
+        expireInteractions(run.rec, run.turnId, String(run.id));
+        const status =
+          info.stopReason === 'completed'
+            ? 'completed'
+            : info.stopReason === 'aborted'
+              ? 'interrupted'
+              : 'failed';
+        emit(
+          run.rec,
+          {
+            type: 'item',
+            turnId: run.turnId,
+            append: false,
+            item: {
+              id: `subagent:${info.runId}`,
+              type: 'subagent',
+              status,
+              text: `${info.provider} · ${info.id}\n${textOf(info.lastAssistantMessage) || info.stopReason}`,
+            },
+          },
+          `${run.rec.id}:subagent:${info.runId}:end`,
+          String(info.id),
+        );
+        emit(
+          run.rec,
+          {
+            type: 'turn_completed',
+            turnId: run.turnId,
+            status,
+            error: status === 'failed' ? `DSH 子代理执行结束：${info.stopReason}` : null,
+          },
+          `${run.rec.id}:subagent:${info.runId}:completed`,
+          String(info.id),
+        );
+      },
+      { global: true },
+    ),
+  );
+  const expireInteractions = (rec, turnId, sessionId = rec.id) => {
     for (const pending of [...permissions.values()])
-      if (pending.rec === rec && pending.turnId === turnId) pending.finish('cancelled', true);
+      if (pending.rec === rec && pending.sessionId === sessionId && pending.turnId === turnId)
+        pending.finish('cancelled', true);
     for (const pending of [...questions.values()])
       if (pending.rec === rec && pending.turnId === turnId)
         pending.finish(new UserQuestionError('问题已取消', 'ASK_ABORTED'), undefined, true);
@@ -282,7 +382,7 @@ export function apply(ctx, config = {}) {
                 id: String(data.callId),
                 type,
                 status: 'running',
-                text: `${data.name}: ${JSON.stringify(data.arguments)}`,
+                text: `${data.name}: ${data.arguments}`,
               },
             },
             eventId,
@@ -395,19 +495,20 @@ export function apply(ctx, config = {}) {
     ctx.on(
       'approval/request',
       (request, next) => {
-        const rec = ownedRecord(request.agent);
-        if (!rec || rec.activeTurn === undefined || rec.interrupting || stopping) return next();
+        const activity = activityOf(request.agent);
+        if (!activity || activity.rec.interrupting || stopping) return next();
+        const { rec, turnId, sessionId } = activity;
         const requestId = randomUUID();
-        const turnId = rec.activeTurn;
         return new Promise((resolveAnswer) => {
           const finish = (outcome, expired = false) => {
             if (!permissions.delete(requestId)) return;
             request.signal?.removeEventListener('abort', aborted);
-            if (expired) emit(rec, { type: 'question_expired', turnId, requestId });
+            if (expired)
+              emit(rec, { type: 'question_expired', turnId, requestId }, undefined, sessionId);
             resolveAnswer(outcome);
           };
           const aborted = () => finish('cancelled', true);
-          permissions.set(requestId, { rec, agent: request.agent, turnId, finish });
+          permissions.set(requestId, { rec, agent: request.agent, sessionId, turnId, finish });
           request.signal?.addEventListener('abort', aborted, { once: true });
           if (request.signal?.aborted) return aborted();
           const reason =
@@ -423,12 +524,13 @@ export function apply(ctx, config = {}) {
                       String(event.data.callId) === String(request.callId),
                   );
           transport.notify('isles/permission', {
-            sessionId: rec.id,
+            rootSessionId: rec.id,
+            sessionId,
             turnId,
             requestId,
             text:
               `${reason}\n\n工具：${request.toolName}` +
-              (call ? `\n操作：${JSON.stringify(call.data.arguments)}` : ''),
+              (call ? `\n操作：${call.data.arguments}` : ''),
           });
         });
       },
@@ -476,6 +578,7 @@ export function apply(ctx, config = {}) {
             })().catch((error) => finish(error));
           }
           transport.notify('isles/question', {
+            rootSessionId: rec.id,
             sessionId: rec.id,
             turnId: rec.activeTurn,
             requestId,
@@ -683,13 +786,17 @@ export function apply(ctx, config = {}) {
   }
   async function interrupt(params) {
     const rec = liveSession(params.sessionId);
-    if (!rec || rec.activeTurn === undefined || rec.activeTurn !== params.expectedTurnId)
-      return rejection('目标执行已经结束');
+    if (!rec) return rejection('DSH 会话当前不可用');
     rec.interrupting = true;
-    expireInteractions(rec, rec.activeTurn);
+    for (const pending of [...permissions.values()])
+      if (pending.rec === rec) pending.finish('cancelled', true);
+    for (const pending of [...questions.values()])
+      if (pending.rec === rec)
+        pending.finish(new UserQuestionError('问题已取消', 'ASK_ABORTED'), undefined, true);
     clearOwnPending(rec);
     rec.agent.cancel({ kind: 'user' }, { keepInbox: true });
     try {
+      await ctx.get('subagents')?.drainDescendants([rec.agent]);
       await rec.agent.whenIdle();
     } finally {
       rec.interrupting = false;
@@ -733,10 +840,11 @@ export function apply(ctx, config = {}) {
   function answerPermission(params, reject) {
     const pending = permissions.get(String(params.requestId));
     if (!pending) return rejection('权限请求已经结束');
-    if (params.sessionId !== pending.rec.id) return rejection('权限请求不属于该 DSH 会话');
+    if (params.sessionId !== pending.sessionId) return rejection('权限请求不属于该 DSH 活动');
+    const activity = activityOf(pending.agent);
     if (
       params.expectedTurnId !== pending.turnId ||
-      pending.rec.activeTurn !== pending.turnId ||
+      activity?.turnId !== pending.turnId ||
       pending.rec.interrupting ||
       stopping ||
       ctx.agents.get(pending.agent.id) !== pending.agent
@@ -754,8 +862,14 @@ export function apply(ctx, config = {}) {
         question.finish(new UserQuestionError('DSH 已关闭', 'ASK_ABORTED'), undefined, true);
       for (const pending of [...permissions.values()]) pending.finish('cancelled', true);
       for (const rec of sessions.values()) if (rec.agent) clearOwnPending(rec);
+      for (const rec of sessions.values()) rec.agent?.cancel({ kind: 'user' }, { keepInbox: true });
+      await ctx
+        .get('subagents')
+        ?.drainDescendants([...sessions.values()].map((rec) => rec.agent).filter(Boolean));
       await Promise.all([...sessions.values()].map((rec) => rec.handle?.dispose()));
       sessions.clear();
+      subagents.clear();
+      seenSubagents.clear();
       while (disposers.length) disposers.pop()();
       return {};
     })());

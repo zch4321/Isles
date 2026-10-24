@@ -166,9 +166,12 @@ describe('OpenCode v2 adapter', () => {
           .replaceAll('*', '.*')
           .replaceAll('?', '.')}$`,
       ).test(value);
+    // Native FileAccess emits slash-normalized resources on Windows as well.
     const effect = (action: string, resource: string) =>
-      rules.findLast((rule) => match(action, rule.action) && match(resource, rule.resource))
-        ?.effect;
+      rules.findLast(
+        (rule) =>
+          match(action, rule.action) && match(resource.replaceAll('\\', '/'), rule.resource),
+      )?.effect;
     expect(effect('edit', 'notes/draft.txt')).toBe('allow');
     expect(effect('edit', '../../agents/other/file.txt')).toBe('ask');
     expect(effect('edit', '/external/document.txt')).toBe('ask');
@@ -196,11 +199,12 @@ describe('OpenCode v2 adapter', () => {
     const f = await runningFixture();
     const child = 'ses_permission_child';
     f.native.emit(f.native.frame(child, 'session.created', { parentID: f.id }));
+    const childTurnId = f.native.execution(child);
     ask(f, 'per_child', child);
     expect(f.questions).toMatchObject([
       {
-        sessionId: f.id,
-        turnId: f.turnId,
+        sessionId: child,
+        turnId: childTurnId,
         requestId: 'per_child',
         questions: [{ id: 'permission', options: [{ label: '允许本次' }, { label: '拒绝' }] }],
       },
@@ -219,8 +223,8 @@ describe('OpenCode v2 adapter', () => {
     ).toHaveLength(1);
     expect(f.events).not.toContainEqual({
       type: 'question_expired',
-      sessionId: f.id,
-      turnId: f.turnId,
+      sessionId: child,
+      turnId: childTurnId,
       requestId: 'per_child',
     });
   });
@@ -228,6 +232,7 @@ describe('OpenCode v2 adapter', () => {
     const f = await runningFixture();
     const child = 'ses_permission_child';
     f.native.emit(f.native.frame(child, 'session.created', { parentID: f.id }));
+    f.native.execution(child);
     ask(f, 'per_first');
     ask(f, 'per_second');
     ask(f, 'per_child', child);
@@ -269,6 +274,7 @@ describe('OpenCode v2 adapter', () => {
     const f = await runningFixture();
     const child = 'ses_permission_child';
     f.native.emit(f.native.frame(child, 'session.created', { parentID: f.id }));
+    const childTurnId = f.native.execution(child);
     ask(f, 'per_first');
     ask(f, 'per_second');
     ask(f, 'per_child', child);
@@ -299,12 +305,14 @@ describe('OpenCode v2 adapter', () => {
     );
     expect(
       f.events.filter((event) => event.type === 'question_expired').map((event) => event.requestId),
-    ).toEqual(['per_first', 'per_second', 'frm_child_pending', 'per_child']);
+    ).toEqual(['per_first', 'per_second', 'per_child', 'frm_child_pending']);
     f.session.answer('frm_child_pending', { answers: { text: { answers: ['late'] } } });
     expect(
       f.native.calls.filter((call) => call.path.endsWith('/form/frm_child_pending/reply')),
     ).toEqual([]);
-    expect(f.events.some((event) => event.type === 'turn_completed')).toBe(false);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toMatchObject([
+      { sessionId: child, turnId: childTurnId, status: 'interrupted' },
+    ]);
   });
   it('publishes an early permission once after execution starts and rejects dismissal', async () => {
     const f = await fixture();
@@ -414,7 +422,7 @@ describe('OpenCode v2 adapter', () => {
       const query = new URLSearchParams(path.split('?')[1]);
       if (query.get('parentID') !== id) return;
       return query.has('cursor')
-        ? { data: [next], cursor: {} }
+        ? { data: [next], cursor: { next: null } }
         : { data: [child], cursor: { next: 'page2' } };
     };
     await session.resumeSession(id);
@@ -660,7 +668,7 @@ describe('OpenCode v2 adapter', () => {
     expect(await f.adapter.catalog.status()).toMatchObject({
       available: true,
       authenticated: true,
-      version: 'opencode v2.0.25',
+      version: 'opencode v2.1.4',
       binaryPath: f.binary,
     });
     expect(await f.adapter.catalog.models()).toEqual([
@@ -918,7 +926,7 @@ describe('OpenCode v2 adapter', () => {
     expect(f.native.calls.filter((call) => call.path.endsWith('/prompt'))).toHaveLength(2);
   });
 
-  it('preserves an uncertain result when a steer is consumed by a different native execution', async () => {
+  it('accepts a steer in the native execution that actually consumes its inbox item', async () => {
     const f = await fixture();
     const session = await f.connect();
     const id = await session.createSession(() => {});
@@ -947,10 +955,17 @@ describe('OpenCode v2 adapter', () => {
       expect(f.native.calls.filter((call) => call.path.endsWith('/prompt'))).toHaveLength(2),
     );
     f.native.emit(f.native.frame(id, 'session.execution.succeeded'));
-    f.native.execution(id);
+    expect(f.events).toContainEqual({
+      type: 'turn_completed',
+      sessionId: id,
+      turnId,
+      status: 'completed',
+      error: null,
+    });
+    const nextTurnId = f.native.execution(id);
     f.native.deliver(id, receipt.data.id);
-    await expect(pending).rejects.not.toBeInstanceOf(HarnessSubmissionRejected);
-    expect(f.handlers.exit).toHaveBeenCalledTimes(1);
+    await expect(pending).resolves.toEqual({ turnId: nextTurnId });
+    expect(f.handlers.exit).not.toHaveBeenCalled();
   });
 
   it('treats native global stream loss before delivery as uncertain and closes the connection', async () => {
@@ -1100,9 +1115,10 @@ describe('OpenCode v2 adapter', () => {
       f.native.deliver(id, receipt.data.id);
       return receipt;
     };
-    const { turnId } = await session.submit(f.input(id));
+    await session.submit(f.input(id));
     const child = 'ses_native_child';
     f.native.emit(f.native.frame(child, 'session.created', { parentID: id }));
+    const childTurnId = f.native.execution(child);
     f.native.emit(
       f.native.frame(child, 'form.created', {
         form: {
@@ -1126,8 +1142,8 @@ describe('OpenCode v2 adapter', () => {
     );
     expect(f.questions).toMatchObject([
       {
-        sessionId: id,
-        turnId,
+        sessionId: child,
+        turnId: childTurnId,
         requestId: 'frm_choice',
         questions: [
           { id: 'message', multiSelect: false, isOther: true },
@@ -1149,7 +1165,7 @@ describe('OpenCode v2 adapter', () => {
     expect(f.native.calls.filter((call) => call.path.endsWith('/reply'))).toHaveLength(1);
   });
 
-  it('keeps main and native child execution details attached to the original platform turn', async () => {
+  it('preserves separate main and native child execution identities', async () => {
     const f = await fixture();
     const session = await f.connect();
     const id = await session.createSession(() => {});
@@ -1170,6 +1186,7 @@ describe('OpenCode v2 adapter', () => {
     );
     const child = 'ses_native_child';
     f.native.emit(f.native.frame(child, 'session.created', { parentID: id }));
+    const childTurnId = f.native.execution(child);
     f.native.emit(
       f.native.frame(child, 'session.tool.input.started', {
         assistantMessageID: 'msg_child',
@@ -1187,12 +1204,84 @@ describe('OpenCode v2 adapter', () => {
     expect(f.events.filter((event) => event.type === 'item')).toMatchObject([
       { sessionId: id, turnId, item: { type: 'agentMessage', text: 'Hello' } },
       {
-        sessionId: id,
-        turnId,
+        sessionId: child,
+        turnId: childTurnId,
         item: { type: 'mcpToolCall', status: 'completed', text: 'isles.send_message\nSent' },
       },
     ]);
-    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(2);
+  });
+
+  it('records child activity after root completion and observes an autonomous root execution', async () => {
+    const f = await runningFixture();
+    const child = 'ses_background';
+    f.native.emit(f.native.frame(child, 'session.created', { parentID: f.id }));
+    const childTurnId = f.native.execution(child);
+    // Native session sequences are independent; the child's first seq is below the root's.
+    expect(f.events).toContainEqual({
+      type: 'turn_started',
+      sessionId: child,
+      turnId: childTurnId,
+    });
+    f.native.emit(f.native.frame(f.id, 'session.execution.succeeded'));
+    expect(f.events).toContainEqual({
+      type: 'turn_completed',
+      sessionId: f.id,
+      turnId: f.turnId,
+      status: 'completed',
+      error: null,
+    });
+    const text = f.native.frame(child, 'session.text.ended', {
+      assistantMessageID: 'msg_background',
+      ordinal: 0,
+      text: 'Background complete',
+    });
+    f.native.emit(text);
+    f.native.emit(text);
+    ask(f, 'per_background', child);
+    expect(f.questions).toMatchObject([{ sessionId: child, turnId: childTurnId }]);
+    const wakeTurnId = f.native.execution(f.id);
+    f.native.emit(f.native.frame(child, 'session.execution.succeeded'));
+    // Child completion only expires child questions; the new root can still receive steer.
+    f.native.onRequest = ({ path, body }) => {
+      if (!path.endsWith('/prompt')) return;
+      const receipt = inboxReceipt(f.id, 'wake update', (body as { id: string }).id);
+      f.native.deliver(f.id, receipt.data.id);
+      return receipt;
+    };
+    await expect(
+      f.session.steer!({
+        sessionId: f.id,
+        expectedTurnId: wakeTurnId,
+        batchId: randomUUID(),
+        text: 'wake update',
+      }),
+    ).resolves.toEqual({ turnId: wakeTurnId });
+    f.native.emit(f.native.frame(f.id, 'session.execution.succeeded'));
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toMatchObject([
+      { sessionId: f.id, turnId: f.turnId },
+      { sessionId: child, turnId: childTurnId },
+      { sessionId: f.id, turnId: wakeTurnId },
+    ]);
+    expect(f.events.filter((event) => event.type === 'item')).toMatchObject([
+      { sessionId: child, turnId: childTurnId, item: { text: 'Background complete' } },
+    ]);
+    f.native.execution('ses_foreign');
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(3);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('interrupts each owned native execution when stopping during background activity', async () => {
+    const f = await runningFixture();
+    const child = 'ses_background_stop';
+    f.native.emit(f.native.frame(child, 'session.created', { parentID: f.id }));
+    const childTurnId = f.native.execution(child);
+    f.native.emit(f.native.frame(f.id, 'session.execution.succeeded'));
+    await f.session.interrupt(child, childTurnId);
+    expect(f.native.calls.filter((call) => call.path.endsWith('/interrupt?resume=false'))).toEqual([
+      { method: 'POST', path: `/api/session/${child}/interrupt?resume=false`, body: undefined },
+    ]);
+    await expect(f.session.submit(f.input(f.id))).rejects.toBeInstanceOf(HarnessSubmissionRejected);
   });
 
   it('reports an unexpected stream EOF once and keeps an intentional close quiet', async () => {

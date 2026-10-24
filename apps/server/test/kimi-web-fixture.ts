@@ -15,7 +15,7 @@ export interface KimiWebFixtureRecord {
   hasToken?: boolean;
 }
 
-/** An isolated CLI with real HTTP and WebSocket transport, using Kimi Code 2.1.1 shapes. */
+/** An isolated CLI with real HTTP and WebSocket transport, using Kimi Code 2.3.1 shapes. */
 export async function kimiWebFixture(root: string) {
   const home = join(root, 'kimi-web-home');
   await mkdir(join(home, 'sessions'), { recursive: true });
@@ -30,7 +30,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
-if (process.argv.includes('--version')) { console.log('2.1.1'); process.exit(0); }
+if (process.argv.includes('--version')) { console.log('2.3.1'); process.exit(0); }
 const home = process.env.KIMI_CODE_HOME;
 const settings = () => JSON.parse(fs.readFileSync(path.join(home, 'fixture.json'), 'utf8'));
 const record = entry => fs.appendFileSync(path.join(home, 'wire.jsonl'), JSON.stringify(entry) + '\n');
@@ -98,8 +98,8 @@ const finish = (s, reason = 'completed', error) => {
   if (next && settings().nextTurnBeforeEnd) begin(s,next);
   const terminal = current => {
     emit(current, 'turn.ended', { turnId, reason, ...(error === undefined ? {} : { error }) });
-    if (reason === 'cancelled') emit(current, 'prompt.aborted', { promptId, abortedAt: now() });
-    else emit(current, 'prompt.completed', { promptId, finishedAt: now(), reason });
+    if (promptId && reason === 'cancelled') emit(current, 'prompt.aborted', { promptId, abortedAt: now() });
+    else if (promptId) emit(current, 'prompt.completed', { promptId, finishedAt: now(), reason });
   };
   if (next && settings().nextTurnBeforeEnd && settings().oldTurnEndDelayMs)
     setTimeout(() => terminal(read(s.id)),settings().oldTurnEndDelayMs);
@@ -141,6 +141,7 @@ const server = http.createServer(async (req,res) => {
     if (body.op === 'drop') { for (const peer of peers) peer.socket.destroy(); return envelope(res); }
     if (!s) return envelope(res, {}, 40401, 'Unknown session');
     if (body.op === 'begin') { const p = s.queue.find(p => p.prompt_id === body.promptId); if (p) begin(s,p); }
+    if (body.op === 'wake') begin(s,{ prompt_id: body.promptId, content: [{ type: 'text', text: body.text }], metadata: { source: 'native-wake' } });
     if (body.op === 'finish') finish(s,body.reason,body.error);
     if (body.op === 'question') question(s,body.many,body.fields);
     if (body.op === 'emit') emit(s,body.event,body.fields,body.transport);
@@ -153,7 +154,7 @@ const server = http.createServer(async (req,res) => {
   if (route === '/api/v1/auth') return envelope(res,{ models_ready: !settings().unauthenticated, providers_count: settings().unauthenticated ? 0 : 1, managed_provider: { name: 'kimi-code', status: settings().unauthenticated ? 'unauthenticated' : 'authenticated' } });
   if (route === '/api/v1/models') return envelope(res,{ items: models() });
   if (route === '/api/v1/config') return envelope(res,{ providers: {}, default_model: 'kimi-code/k3' });
-  if (route === '/api/v1/meta') return envelope(res,{ server_version: '2.1.1', server_id: 'fixture', capabilities: { websocket: true, mcp: true }, started_at: now() });
+  if (route === '/api/v1/meta') return envelope(res,{ server_version: '2.3.1', server_id: 'fixture', capabilities: { websocket: true, mcp: true }, started_at: now() });
   if (req.method === 'POST' && route === '/api/v1/workspaces') return envelope(res,workspace(body.root));
   if (/^\/api\/v1\/workspaces\/[^/]+\/trust$/.test(route)) return envelope(res,{ trusted: true });
   if (/^\/api\/v1\/workspaces\/[^/]+\/add-dir$/.test(route)) return envelope(res,{ additional_dirs: [body.path], persisted: false });
@@ -163,6 +164,8 @@ const server = http.createServer(async (req,res) => {
     return envelope(res,wireSession(s));
   }
   if (route === '/api/v1/sessions' && req.method === 'GET') return envelope(res,{ items: list().map(wireSession), has_more: false });
+  const abortSession = route.match(/^\/api\/v1\/sessions\/([^/]+):abort$/);
+  if (abortSession) { const s = read(abortSession[1]); if (!s) return envelope(res,{},40401,'Unknown session'); finish(s,'cancelled'); return envelope(res,{ aborted: true }); }
   const match = route.match(/^\/api\/v1\/sessions\/([^/]+)(.*)$/);
   if (!match) return envelope(res,{},40401,'Unknown route ' + route);
   const s = read(match[1]);
@@ -183,10 +186,10 @@ const server = http.createServer(async (req,res) => {
     return envelope(res,status);
   }
   if (tail === '/snapshot') return envelope(res,{ session: wireSession(s), as_of_seq: s.seq, epoch: s.epoch, messages: { items: [], has_more: false }, in_flight_turn: s.active ? { turn_id: s.turn, current_prompt_id: s.active.prompt_id, assistant_text: '', thinking_text: '', running_tools: [] } : null, pending_approvals: [], pending_questions: s.questions, subagents: [] });
-  if (tail === '/prompts' && req.method === 'GET') return envelope(res,{ active: s.active, queued: s.queue });
+  if (tail === '/prompts' && req.method === 'GET') return envelope(res,{ active: s.active?.prompt_id ? s.active : null, queued: s.queue });
   if (tail === '/prompts' && req.method === 'POST') {
     const cfg = settings();
-    if (cfg.rejectPrompt) return envelope(res,{},40001,'Prompt refused');
+    if (cfg.rejectPrompt) return envelope(res,{},cfg.rejectPromptCode ?? 40001,'Prompt refused');
     if (cfg.loseBeforeAcceptance) { req.socket.destroy(); return; }
     const p = { prompt_id: body.prompt_id, user_message_id: 'message-' + body.prompt_id, status: 'queued', content: body.content, created_at: now() };
     if (!p.prompt_id) return envelope(res,{},40001,'prompt_id required');
@@ -338,6 +341,13 @@ process.on('SIGTERM',() => { for (const peer of peers) peer.socket.destroy(); se
       transport: { volatile?: boolean; offset?: number } = {},
     ) => control({ op: 'emit', sessionId, event, fields, transport }),
     begin: (sessionId: string, promptId: string) => control({ op: 'begin', sessionId, promptId }),
+    wake: (sessionId: string, text = 'Native automatic wake', tracked = true) =>
+      control({
+        op: 'wake',
+        sessionId,
+        ...(tracked ? { promptId: `native-wake-${Date.now()}` } : {}),
+        text,
+      }),
     emitBatch: (
       sessionId: string,
       events: {

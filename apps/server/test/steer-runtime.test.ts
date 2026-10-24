@@ -115,7 +115,7 @@ describe('configurable steer scheduling', () => {
     expect(app.isles.store.agentDetail(agent.id).runs[0]!.status).toBe('completed');
     expect(status(agent, 'Consumed before claim')).toBe('received');
   });
-  it('refuses a delayed initial ACK that attempts to replace the turn already receiving steer', async () => {
+  it('keeps initial input pending until its ACK and records another native turn separately', async () => {
     const { app, harness, create, say, status, ready } = await fixture();
     const agent = await create(true);
     const client = harness.latest(agent.id);
@@ -133,21 +133,27 @@ describe('configurable steer scheduling', () => {
       return result;
     };
     say(agent.channelId, 'Initial turn');
-    await expect.poll(() => status(agent, 'Initial turn')).toBe('accepted');
+    await expect.poll(() => status(agent, 'Initial turn')).toBe('submitting');
     const nativeTurn = client.turnId;
     say(agent.channelId, 'Steered before start ACK');
-    await expect.poll(() => status(agent, 'Steered before start ACK')).toBe('accepted');
+    expect(status(agent, 'Steered before start ACK')).toBe('queued');
+    expect(harness.steers).toHaveLength(0);
     gate.resolve();
-    await expect.poll(() => app.isles.store.publicAgent(agent.id).status).toBe('error');
-    const run = app.isles.store.agentDetail(agent.id).runs[0]!;
-    expect(run).toMatchObject({
-      turnId: nativeTurn,
-      status: 'uncertain',
-      finishedAt: expect.any(String),
+    await expect.poll(() => status(agent, 'Initial turn')).toBe('accepted');
+    await expect.poll(() => status(agent, 'Steered before start ACK')).toBe('accepted');
+    const runs = app.isles.store.agentDetail(agent.id).runs;
+    expect(runs.find((run) => run.turnId === 'conflicting-ack-turn')).toMatchObject({
+      status: 'running',
+      inputs: [expect.objectContaining({ messageSeqs: [1] })],
     });
+    expect(runs.find((run) => run.turnId === nativeTurn)).toMatchObject({ status: 'running' });
     client.complete();
-    expect(app.isles.store.publicAgent(agent.id).status).toBe('error');
-    expect(status(agent, 'Steered before start ACK')).toBe('uncertain');
+    expect(status(agent, 'Steered before start ACK')).toBe('accepted');
+    client.handlers.notification('turn/completed', {
+      threadId: agent.threadId,
+      turn: { id: 'conflicting-ack-turn', status: 'completed', error: null },
+    });
+    await ready(agent);
     await app.isles.runtime.stop(agent.id);
     await app.isles.runtime.resume(agent.id);
     await ready(agent);
@@ -246,8 +252,8 @@ describe('configurable steer scheduling', () => {
     expect(harness.bodies(reader.id)).toHaveLength(1);
     client.complete();
     await ready(reader);
-    expect(status(reader, 'Private steer')).toBe('completed');
-    expect(status(reader, 'Peer steer', group.id)).toBe('completed');
+    expect(status(reader, 'Private steer')).toBe('accepted');
+    expect(status(reader, 'Peer steer', group.id)).toBe('accepted');
     expect(app.isles.store.agentDetail(reader.id).runs).toHaveLength(1);
   });
 
@@ -294,7 +300,7 @@ describe('configurable steer scheduling', () => {
     expect(harness.bodies(agent.id)).toHaveLength(1);
     gate.resolve();
     await expect.poll(() => harness.bodies(agent.id)).toHaveLength(2);
-    expect(status(agent, 'ACK after completion')).toBe('completed');
+    expect(status(agent, 'ACK after completion')).toBe('accepted');
     expect(harness.bodies(agent.id)[1]).toEqual(['Next turn']);
     client.complete();
     await ready(agent);
@@ -337,7 +343,7 @@ describe('configurable steer scheduling', () => {
     expect(app.isles.runtime.receiveMessages(agent.id, { limit: 100 }).input).toEqual([]);
   });
 
-  it('does not revive a cancelled group when a pending RPC is later accepted', async () => {
+  it('records late native acceptance while keeping the group deleted', async () => {
     const { app, harness, create, say, status, begin, ready } = await fixture();
     const agent = await create(true);
     const group = app.isles.runtime.createGroup('user', {
@@ -355,13 +361,17 @@ describe('configurable steer scheduling', () => {
     await expect
       .poll(() => app.isles.store.getSteer(harness.steers[0]!.batchId).status)
       .toBe('accepted');
-    expect(status(agent, 'Deleted group input', group.id)).toBe('cancelled');
+    expect(status(agent, 'Deleted group input', group.id)).toBe('accepted');
+    expect(app.isles.store.publicChannel(group.id)).toMatchObject({
+      deletedAt: expect.any(String),
+      memberIds: [],
+    });
     client.complete();
     await ready(agent);
     expect(harness.bodies(agent.id)).toHaveLength(1);
   });
 
-  it('settles stop after native completion without letting a late ACK overwrite cancelled input', async () => {
+  it('settles stop after native completion when closing the connection loses the pending ACK', async () => {
     const { app, harness, create, say, status, begin, ready } = await fixture();
     const agent = await create(true);
     const client = await begin(agent);
@@ -372,7 +382,9 @@ describe('configurable steer scheduling', () => {
     client.complete();
     await app.isles.runtime.stop(agent.id);
     gate.resolve();
-    expect(status(agent, 'Stopped input')).toBe('cancelled');
+    expect(status(agent, 'Stopped input')).toBe('uncertain');
+    expect(status(agent, 'Initial turn')).toBe('accepted');
+    expect(app.isles.store.getSteer(harness.steers[0]!.batchId).status).toBe('uncertain');
     expect(app.isles.store.publicAgent(agent.id).status).toBe('stopped');
     await app.isles.runtime.resume(agent.id);
     await ready(agent);

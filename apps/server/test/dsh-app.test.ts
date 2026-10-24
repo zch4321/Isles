@@ -134,7 +134,7 @@ describe('DSH application integration', () => {
       expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([{ status: 'completed' }]),
     );
     expect(app.isles.store.listMessages(agent.channelId)[0]!.deliveries[0]!.status).toBe(
-      'completed',
+      'accepted',
     );
   });
 });

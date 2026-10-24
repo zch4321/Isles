@@ -83,9 +83,9 @@ describe('group logical deletion', () => {
       'queued',
       'skipped',
       'submitting',
+      'steering',
       'accepted',
       'received',
-      'completed',
       'failed',
       'uncertain',
       'cancelled',
@@ -126,7 +126,7 @@ describe('group logical deletion', () => {
           .from(deliveries)
           .where(eq(deliveries.channelId, group.id))
           .all()
-          .some((d) => ['queued', 'skipped', 'submitting', 'accepted'].includes(d.status)),
+          .some((d) => ['queued', 'skipped', 'submitting', 'steering'].includes(d.status)),
       ).toBe(false);
     });
 
@@ -188,9 +188,7 @@ describe('group logical deletion', () => {
       ]),
     );
 
-    // A late native acknowledgment/completion of the shared turn cannot revive this group.
-    store.acceptRun(run.id, 'native-turn');
-    store.finishRun(run.id, 'completed', 'completed');
+    store.finishRun(run.id, 'completed', 'uncertain');
     for (const [index, message] of seeded.entries()) {
       const delivery = store.database.db
         .select()
@@ -216,7 +214,7 @@ describe('group logical deletion', () => {
       items: beforeRun.items,
     });
     expect(store.listMessages(a.channelId)[0]!.deliveries).toEqual([
-      { agentId: a.id, status: 'completed' },
+      { agentId: a.id, status: 'accepted' },
     ]);
     expect(
       store.eventsAfter(deletionEvents.at(-1)!.id).filter((e) => e.type === 'delivery'),

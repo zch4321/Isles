@@ -22,6 +22,7 @@ export async function localOpenCodeProvider() {
   let slept = false;
   let requests = 0;
   let guidanceLoaded = false;
+  let backgroundLaunched = false;
   const server = createServer(async (request, response) => {
     try {
       if (request.url !== '/v1/chat/completions') {
@@ -57,7 +58,31 @@ export async function localOpenCodeProvider() {
       const tools = input.tools ?? [];
       const find = (name: RegExp) => tools.find((tool) => name.test(tool.function.name));
       let call: { name: string; arguments: string } | undefined;
-      if (tools.length && marker && !completed.has(marker)) {
+      let content = 'Native acceptance complete.';
+      let delay = 500;
+      if (prompt.includes('OPENCODE_BACKGROUND_START')) {
+        if (!backgroundLaunched) {
+          const tool = find(/subagent$/);
+          if (!tool) throw new Error('Native subagent tool missing');
+          backgroundLaunched = true;
+          call = {
+            name: tool.function.name,
+            arguments: JSON.stringify({
+              agent: 'general',
+              description: 'Background activity acceptance',
+              prompt: 'Return OPENCODE_CHILD_COMPLETE as your final response.',
+              background: true,
+            }),
+          };
+        }
+        content = 'OPENCODE_ROOT_YIELDED';
+      } else if (prompt.includes('OPENCODE_CHILD_COMPLETE')) {
+        if (prompt.includes('<subagent ')) content = 'OPENCODE_ROOT_WOKEN';
+        else {
+          delay = 4000;
+          content = 'OPENCODE_CHILD_COMPLETE';
+        }
+      } else if (tools.length && marker && !completed.has(marker)) {
         if (marker === 'OPENCODE_QUESTION_OK' && !questioned.has(prompt)) {
           const tool = find(/(?:question|ask_user)$/);
           if (!tool) throw new Error('Native question tool missing');
@@ -113,7 +138,7 @@ export async function localOpenCodeProvider() {
           }
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, delay));
       response.writeHead(200, { 'Content-Type': 'text/event-stream' });
       const base = {
         id: `chatcmpl_${randomUUID()}`,
@@ -134,7 +159,7 @@ export async function localOpenCodeProvider() {
                     { index: 0, id: `call_${randomUUID()}`, type: 'function', function: call },
                   ],
                 }
-              : { role: 'assistant', content: 'Native acceptance complete.' },
+              : { role: 'assistant', content },
             finish_reason: null,
           },
         ],

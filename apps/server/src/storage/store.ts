@@ -16,7 +16,21 @@ import type {
   RunStatus,
   UserQuestion,
 } from '@isles/contracts';
-import { and, asc, desc, eq, gt, inArray, lt, lte, ne, notExists, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lt,
+  lte,
+  ne,
+  notExists,
+  or,
+  sql,
+} from 'drizzle-orm';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -342,7 +356,7 @@ export class Store {
         )
         .returning({ channelId: deliveries.channelId })
         .all();
-      // A late native admission ACK or refusal must not revive input from the old session.
+      // Pending deliveries retain their original session binding for later native receipts.
       for (const batch of this.db
         .select({ runId: steerBatches.runId })
         .from(steerBatches)
@@ -420,7 +434,7 @@ export class Store {
         .where(
           and(
             eq(deliveries.agentId, id),
-            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'steering', 'accepted']),
+            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'steering']),
           ),
         )
         .returning({ channelId: deliveries.channelId })
@@ -612,7 +626,7 @@ export class Store {
         .where(
           and(
             eq(deliveries.channelId, id),
-            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'steering', 'accepted']),
+            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'steering']),
           ),
         )
         .returning({ agentId: deliveries.agentId })
@@ -1087,6 +1101,35 @@ export class Store {
       };
     });
   }
+  findNativeRun(agentId: string, sessionId: string, turnId: string): Run | undefined {
+    const row = this.db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(and(eq(runs.agentId, agentId), eq(runs.threadId, sessionId), eq(runs.turnId, turnId)))
+      .get();
+    return row ? this.getRun(row.id) : undefined;
+  }
+  /** Record one native activity that began without a claimed Isles message. */
+  observeRun(agentId: string, sessionId: string, turnId: string): Run {
+    return this.change(() => {
+      const existing = this.findNativeRun(agentId, sessionId, turnId);
+      if (existing) return existing;
+      const id = randomUUID();
+      this.db
+        .insert(runs)
+        .values({
+          id,
+          agentId,
+          threadId: sessionId,
+          turnId,
+          status: 'running',
+          createdAt: now(),
+        })
+        .run();
+      this.event('run', { agentId }, { runId: id });
+      return this.getRun(id);
+    });
+  }
   claimSteer(
     agentId: string,
     runId: string,
@@ -1154,9 +1197,11 @@ export class Store {
     status: 'accepted' | 'rejected' | 'uncertain',
     error: string | null,
     delivery: DeliveryStatus,
+    acceptedRun?: { id: string; turnId: string },
   ) {
     const batch = this.getSteer(id);
-    if (batch.status !== 'pending') return;
+    if (batch.status !== 'pending' && !(status === 'accepted' && batch.status === 'uncertain'))
+      return;
     this.db
       .update(steerBatches)
       .set({ status, error, finishedAt: now() })
@@ -1167,13 +1212,22 @@ export class Store {
       .update(deliveries)
       .set({
         status: delivery,
+        ...(acceptedRun ? { runId: acceptedRun.id, turnId: acceptedRun.turnId } : {}),
         ...(restored ? { runId: null, turnId: null, steerId: null } : {}),
         updatedAt: now(),
       })
       .where(
         and(
           eq(deliveries.steerId, id),
-          inArray(deliveries.status, restored ? ['steering', 'skipped'] : ['steering']),
+          inArray(
+            deliveries.status,
+            restored
+              ? ['steering', 'skipped']
+              : status === 'accepted'
+                ? ['steering', 'uncertain', 'cancelled', 'failed']
+                : ['steering'],
+          ),
+          status === 'accepted' ? deliveryRefs(batch.included) : undefined,
         ),
       )
       .returning({ channelId: deliveries.channelId })
@@ -1182,28 +1236,30 @@ export class Store {
       this.event(
         'delivery',
         { agentId: batch.agentId, channelId },
-        { runId: batch.runId, steerId: id, status: delivery },
+        { runId: acceptedRun?.id ?? batch.runId, steerId: id, status: delivery },
       );
   }
-  acceptSteer(id: string, acceptedTurnId: string) {
+  acceptSteer(id: string, acceptedTurnId: string, acceptedRunId?: string) {
     this.change(() => {
       const batch = this.getSteer(id);
-      if (batch.status !== 'pending') return;
-      if (batch.turnId !== acceptedTurnId)
-        throw new HttpError(409, 'Steer 确认的原生 turn 与目标不符');
-      const run = this.db.select().from(runs).where(eq(runs.id, batch.runId)).get()!;
-      const terminal: Partial<Record<RunStatus, DeliveryStatus>> = {
-        completed: 'completed',
-        interrupted: 'cancelled',
-        failed: 'failed',
-        uncertain: 'uncertain',
-      };
-      this.settleSteer(
-        id,
-        'accepted',
-        null,
-        run.finishedAt ? (terminal[run.status] ?? 'uncertain') : 'accepted',
-      );
+      if (batch.status === 'accepted' || batch.status === 'rejected') return;
+      const original = this.getRun(batch.runId);
+      const accepted = acceptedRunId ? this.getRun(acceptedRunId) : original;
+      if (
+        accepted.agentId !== batch.agentId ||
+        accepted.threadId !== original.threadId ||
+        accepted.turnId !== acceptedTurnId ||
+        (!acceptedRunId && batch.turnId !== acceptedTurnId)
+      )
+        throw new HttpError(409, 'Steer 确认的原生 turn 与执行不符');
+      this.settleSteer(id, 'accepted', null, 'accepted', {
+        id: accepted.id,
+        turnId: acceptedTurnId,
+      });
+      if (accepted.id !== original.id) {
+        this.event('run', { agentId: batch.agentId }, { runId: original.id });
+        this.event('run', { agentId: batch.agentId }, { runId: accepted.id });
+      }
     });
   }
   rejectSteer(id: string, error: string) {
@@ -1227,17 +1283,27 @@ export class Store {
   acceptRun(runId: string, turnId: string) {
     this.change(() => {
       const run = this.getRun(runId);
-      if (run.finishedAt) return;
+      if (run.turnId && run.turnId !== turnId)
+        throw new HttpError(409, '输入确认的原生 turn 与执行不符');
       this.db
         .update(runs)
-        .set({ turnId, status: run.status === 'waiting' ? 'waiting' : 'running' })
+        .set({
+          turnId,
+          ...(!run.finishedAt
+            ? { status: run.status === 'waiting' ? ('waiting' as const) : ('running' as const) }
+            : {}),
+        })
         .where(eq(runs.id, runId))
         .run();
       const accepted = this.db
         .update(deliveries)
         .set({ turnId, status: 'accepted', updatedAt: now() })
         .where(
-          and(eq(deliveries.runId, runId), inArray(deliveries.status, ['submitting', 'accepted'])),
+          and(
+            eq(deliveries.runId, runId),
+            isNull(deliveries.steerId),
+            inArray(deliveries.status, ['submitting', 'uncertain', 'cancelled', 'failed']),
+          ),
         )
         .returning({ channelId: deliveries.channelId })
         .all();
@@ -1249,15 +1315,15 @@ export class Store {
   finishRun(
     runId: string,
     status: RunStatus,
-    delivery: DeliveryStatus,
+    delivery: 'failed' | 'cancelled' | 'uncertain',
     error: string | null = null,
   ) {
     this.change(() => {
       const run = this.getRun(runId);
       // Completion cannot acknowledge a pending steer. Stop/shutdown must settle it,
       // including when the native completion arrived before its submission ACK.
-      if (delivery === 'cancelled' || delivery === 'uncertain')
-        this.settlePendingSteers(runId, delivery, error);
+      if (status === 'interrupted' || status === 'uncertain')
+        this.settlePendingSteers(runId, 'uncertain', error);
       if (run.finishedAt) return;
       this.db
         .update(runs)
@@ -1267,9 +1333,7 @@ export class Store {
       const finished = this.db
         .update(deliveries)
         .set({ status: delivery, updatedAt: now() })
-        .where(
-          and(eq(deliveries.runId, runId), inArray(deliveries.status, ['submitting', 'accepted'])),
-        )
+        .where(and(eq(deliveries.runId, runId), eq(deliveries.status, 'submitting')))
         .returning({ channelId: deliveries.channelId })
         .all();
       this.db
@@ -1287,22 +1351,26 @@ export class Store {
     const row = this.db.select().from(runs).where(eq(runs.id, id)).get();
     if (!row) throw new HttpError(404, '执行不存在');
     const inputs: Run['inputs'] = [];
-    const steerInputs = new Map(
-      this.db
-        .select({ id: steerBatches.id, included: steerBatches.included })
-        .from(steerBatches)
-        .where(eq(steerBatches.runId, id))
-        .all()
-        .map((b) => [b.id, new Set((JSON.parse(b.included) as MessageRef[]).map(messageKey))]),
-    );
     for (const d of this.db
-      .select({ channelId: deliveries.channelId, seq: deliveries.seq, steerId: deliveries.steerId })
+      .select({
+        channelId: deliveries.channelId,
+        seq: deliveries.seq,
+        steerId: deliveries.steerId,
+        included: steerBatches.included,
+      })
       .from(deliveries)
       .innerJoin(messages, deliveryMessageJoin)
+      .leftJoin(steerBatches, eq(steerBatches.id, deliveries.steerId))
       .where(eq(deliveries.runId, id))
       .orderBy(asc(messages.createdAt), asc(messages.seq))
       .all()) {
-      if (d.steerId && !steerInputs.get(d.steerId)?.has(messageKey(d))) continue;
+      if (
+        d.steerId &&
+        !(JSON.parse(d.included ?? '[]') as MessageRef[]).some(
+          (ref) => messageKey(ref) === messageKey(d),
+        )
+      )
+        continue;
       const group = inputs.find((i) => i.channelId === d.channelId);
       if (group) group.messageSeqs.push(d.seq);
       else inputs.push({ channelId: d.channelId, messageSeqs: [d.seq] });
@@ -1389,7 +1457,11 @@ export class Store {
         .where(and(eq(questions.runId, q.runId), eq(questions.status, 'pending')))
         .get();
       if (!pending)
-        this.db.update(runs).set({ status: 'running' }).where(eq(runs.id, q.runId)).run();
+        this.db
+          .update(runs)
+          .set({ status: 'running' })
+          .where(and(eq(runs.id, q.runId), eq(runs.status, 'waiting'), isNull(runs.finishedAt)))
+          .run();
       this.event('question', { agentId: q.agentId }, { questionId: id });
     });
   }

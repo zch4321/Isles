@@ -146,6 +146,19 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
       expect(await readFile(join(dir, 'v2', 'ThreadStartParams.ts'), 'utf8')).toContain(
         'ephemeral',
       );
+      expect(await readFile(join(dir, 'v2', 'ToolRequestUserInputParams.ts'), 'utf8')).toContain(
+        'isBlocking: boolean',
+      );
+      expect(await readFile(join(dir, 'v2', 'ThreadItem.ts'), 'utf8')).toContain(
+        '"type": "subAgentActivity"',
+      );
+      expect(
+        await readFile(join(dir, 'v2', 'ReasoningSummaryTextDeltaNotification.ts'), 'utf8'),
+      ).toContain('summaryIndex: number');
+      expect(
+        await readFile(join(dir, 'v2', 'ServerRequestResolvedNotification.ts'), 'utf8'),
+      ).toContain('requestId: RequestId');
     },
+    15_000,
   );
 });

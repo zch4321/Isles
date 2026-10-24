@@ -51,6 +51,16 @@ const itemKinds: Record<string, { label: string; icon: Component }> = {
   status: { label: '状态', icon: CircleDot },
 };
 const kindOf = (type: string) => itemKinds[type] ?? { label: type, icon: CircleDot };
+const itemRunning = (status: string) =>
+  ['starting', 'running', 'inProgress', 'pending', 'waiting'].includes(status);
+const itemStatus = (status: string) =>
+  status === 'failed'
+    ? '失败'
+    : status === 'interrupted'
+      ? '已中断'
+      : itemRunning(status)
+        ? '进行中'
+        : '';
 </script>
 
 <template>
@@ -87,6 +97,7 @@ const kindOf = (type: string) => itemKinds[type] ?? { label: type, icon: CircleD
     </summary>
     <div class="space-y-3 border-t border-line px-3 py-3">
       <p v-if="inputs" class="text-xs text-ink-3">输入：{{ inputs }}</p>
+      <p v-else class="text-xs text-ink-3">原生活动</p>
       <p class="font-mono text-[11px] break-all text-ink-4">
         turn {{ run.turnId ?? '等待原生接受' }}
       </p>
@@ -105,14 +116,14 @@ const kindOf = (type: string) => itemKinds[type] ?? { label: type, icon: CircleD
             :class="
               cn(
                 'z-10 grid size-[23px] shrink-0 place-items-center rounded-full border',
-                item.status !== 'completed'
+                itemRunning(item.status)
                   ? 'border-transparent bg-st-running-soft text-st-running'
                   : 'border-line bg-surface-2 text-ink-2',
               )
             "
           >
             <LoaderCircle
-              v-if="item.status !== 'completed'"
+              v-if="itemRunning(item.status)"
               class="size-3.5 animate-spin"
               aria-hidden="true"
             />
@@ -121,7 +132,9 @@ const kindOf = (type: string) => itemKinds[type] ?? { label: type, icon: CircleD
           <div class="min-w-0 flex-1">
             <div class="flex min-h-[23px] items-center gap-2 text-xs">
               <span class="font-medium">{{ kindOf(item.type).label }}</span>
-              <span v-if="item.status !== 'completed'" class="ml-auto text-st-running">进行中</span>
+              <span v-if="itemStatus(item.status)" class="ml-auto text-ink-3">{{
+                itemStatus(item.status)
+              }}</span>
             </div>
             <pre
               class="mt-0.5 max-h-64 overflow-auto rounded-md border border-line bg-surface-2 px-2.5 py-2 font-mono text-[11.5px] leading-relaxed break-words whitespace-pre-wrap text-ink-2"

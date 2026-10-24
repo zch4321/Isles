@@ -719,6 +719,119 @@ describe('DSH native SDK adapter', () => {
     });
   });
 
+  it('observes autonomous root turns and background child lifecycles independently of owned inputs', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const child = 'native-child';
+    const epoch = 'native-epoch';
+    const rootTurn = f.native.start(id, 'native-root-1');
+    f.native.event(child, { type: 'turn_started', turnId: epoch }, id);
+    f.native.complete(id, rootTurn);
+    f.native.event(
+      child,
+      {
+        type: 'item',
+        turnId: epoch,
+        append: false,
+        item: { id: 'child-result', type: 'subagent', status: 'completed', text: 'child answer' },
+      },
+      id,
+    );
+    f.native.event(
+      child,
+      { type: 'turn_completed', turnId: epoch, status: 'completed', error: null },
+      id,
+    );
+    f.native.start(id, 'native-root-2');
+    f.native.event(id, {
+      type: 'item',
+      turnId: 'native-root-2',
+      append: false,
+      item: {
+        id: 'root-answer',
+        type: 'agentMessage',
+        status: 'completed',
+        text: 'follow-up answer',
+      },
+    });
+    f.native.complete(id, 'native-root-2');
+    f.native.start(id, 'native-root-1');
+    expect(f.events).toMatchObject([
+      { type: 'turn_started', sessionId: id, turnId: rootTurn },
+      { type: 'turn_started', sessionId: child, turnId: epoch },
+      { type: 'turn_completed', sessionId: id, turnId: rootTurn },
+      { type: 'item', sessionId: child, turnId: epoch, item: { text: 'child answer' } },
+      { type: 'turn_completed', sessionId: child, turnId: epoch },
+      { type: 'turn_started', sessionId: id, turnId: 'native-root-2' },
+      { type: 'item', sessionId: id, turnId: 'native-root-2', item: { text: 'follow-up answer' } },
+      { type: 'turn_completed', sessionId: id, turnId: 'native-root-2' },
+    ]);
+    expect(f.native.calls.some((call) => call.method === 'isles/session/submit')).toBe(false);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
+  it('authenticates the root envelope and answers child approvals after the root turn ends', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const rootTurn = f.native.start(id);
+    const child = 'native-child';
+    const epoch = 'child-epoch';
+    f.native.event(child, { type: 'turn_started', turnId: epoch }, 'unrelated-root');
+    f.native.notify('isles/permission', {
+      rootSessionId: id,
+      sessionId: child,
+      turnId: epoch,
+      requestId: 'unowned',
+      text: 'Write file',
+    });
+    expect(f.questions).toHaveLength(0);
+    f.native.event(child, { type: 'turn_started', turnId: epoch }, id);
+    f.native.notify('isles/permission', {
+      rootSessionId: id,
+      sessionId: child,
+      turnId: epoch,
+      requestId: 'owned',
+      text: 'Write file',
+    });
+    f.native.complete(id, rootTurn);
+    session.answer('owned', { answers: { permission: { answers: ['允许本次'] } } });
+    await vi.waitFor(() =>
+      expect(
+        f.native.calls.find((call) => call.method === 'isles/permission/answer'),
+      ).toMatchObject({ params: { sessionId: child, expectedTurnId: epoch, requestId: 'owned' } }),
+    );
+    expect(f.questions).toMatchObject([{ sessionId: child, turnId: epoch, requestId: 'owned' }]);
+    await session.interrupt!(child, epoch);
+    expect(f.native.calls.find((call) => call.method === 'isles/session/interrupt')).toMatchObject({
+      params: { sessionId: id, expectedTurnId: epoch },
+    });
+    expect(f.events.some((event) => event.type === 'turn_started' && event.turnId === epoch)).toBe(
+      true,
+    );
+  });
+
+  it('steers a native autonomous root turn and keeps consumption tied to that exact turn', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const turnId = f.native.start(id, 'autonomous-root');
+    f.native.onRequest = ({ method, params }) => {
+      if (method === 'isles/session/steer') f.native.accept(id, params.messageId as string, turnId);
+    };
+    await expect(
+      session.steer!({
+        sessionId: id,
+        expectedTurnId: turnId,
+        batchId: randomUUID(),
+        text: 'additional input',
+      }),
+    ).resolves.toEqual({ turnId });
+    f.native.complete(id, turnId);
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+  });
+
   it('forwards native user questions and sends answer or rejection once', async () => {
     const f = await fixture();
     const session = await f.connect();

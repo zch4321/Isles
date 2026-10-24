@@ -17,7 +17,7 @@ export function findClaudeExecutable(
     {
       name: 'claude',
       displayName: 'Claude Code',
-      npmEntry: '@anthropic-ai/claude-code/cli.js',
+      npmEntry: '@anthropic-ai/claude-code/bin/claude.exe',
       versionPattern: /^\d+\.\d+\.\d+[^\r\n]*\(Claude Code\)/,
       installDirectories: (home) => [
         join(home, '.claude', 'local'),

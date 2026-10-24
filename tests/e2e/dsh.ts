@@ -16,6 +16,7 @@ export function dshBrowserAdapter(
   store: () => Store,
 ) {
   const persisted = new Map<string, { sessionId: string; cwd: string }>();
+  const turns = new Map<string, number>();
   const factory: DshClientFactory = (command, cwd, runtime, handlers, redactor, log) => {
     const native = new DshFixture();
     native.factory(command, cwd, runtime, handlers, redactor, log);
@@ -113,7 +114,11 @@ export function dshBrowserAdapter(
         const messageId = params.messageId as string;
         schedule(
           () => {
-            turnId ??= native.start(sessionId);
+            if (!turnId) {
+              const turn = (turns.get(sessionId) ?? 0) + 1;
+              turns.set(sessionId, turn);
+              turnId = native.start(sessionId, String(turn));
+            }
             native.accept(sessionId, messageId, turnId);
             if (text.includes('保持执行以验证 DSH steer')) return;
             if (text.includes('DSH 多选提问')) {

@@ -85,9 +85,9 @@ describe('Agent logical deletion', () => {
       'queued',
       'skipped',
       'submitting',
+      'steering',
       'accepted',
       'received',
-      'completed',
       'failed',
       'uncertain',
       'cancelled',
@@ -135,7 +135,7 @@ describe('Agent logical deletion', () => {
     expect(store.memberIds(a.channelId)).toEqual([]);
     expect(store.memberIds(group.id)).toEqual([b.id]);
     expect(store.listMessages(a.channelId)).toMatchObject([
-      { ...privateMessage, deliveries: [{ agentId: a.id, status: 'cancelled' }] },
+      { ...privateMessage, deliveries: [{ agentId: a.id, status: 'accepted' }] },
     ]);
     expect(store.listMessages(group.id).find((m) => m.seq === authored.seq)).toEqual(authored);
     for (const [index, message] of seeded.entries()) {
@@ -169,7 +169,7 @@ describe('Agent logical deletion', () => {
         expect.objectContaining({
           type: 'delivery',
           agentId: a.id,
-          channelId: a.channelId,
+          channelId: group.id,
           data: { status: 'cancelled' },
         }),
         expect.objectContaining({ type: 'question', agentId: a.id, data: { status: 'expired' } }),

@@ -224,7 +224,7 @@ function inputs(run: Run) {
         <span v-if="runs" class="text-xs text-ink-3 tabular-nums">{{ runs.length }}</span>
       </div>
       <p class="mt-0.5 text-xs text-ink-3">
-        在这里查看原生输出和执行过程。每次执行汇总所有频道的未读消息，显示最近 30 次。
+        查看原生回合、后台子代理和自动唤醒的活动，显示最近 30 次。消息的送达状态独立记录。
       </p>
       <div v-if="!runs" class="mt-4 flex justify-center text-ink-3">
         <LoaderCircle class="size-4 animate-spin" />

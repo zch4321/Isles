@@ -161,7 +161,7 @@ describe('OpenCode application integration', () => {
     expect((await app.inject('/api/harnesses/opencode/status')).json()).toMatchObject({
       available: true,
       authenticated: true,
-      version: 'opencode v2.0.25',
+      version: 'opencode v2.1.4',
       binaryPath: binary,
     });
     expect((await app.inject('/api/harnesses/opencode/models')).json().models).toMatchObject([
@@ -222,7 +222,7 @@ describe('OpenCode application integration', () => {
       expect(app.isles.store.agentDetail(agent.id).runs).toMatchObject([{ status: 'completed' }]),
     );
     expect(app.isles.store.listMessages(agent.channelId)[0]!.deliveries[0]!.status).toBe(
-      'completed',
+      'accepted',
     );
     expect((await app.inject('/api/health')).statusCode).toBe(200);
   });

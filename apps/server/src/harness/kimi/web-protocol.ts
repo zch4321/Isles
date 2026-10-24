@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+// Kimi Code 2.3.1 REST envelopes and WebSocket protocol 2.
+
 export const kimiSessionSchema = z
   .object({
     id: z.string().min(1),

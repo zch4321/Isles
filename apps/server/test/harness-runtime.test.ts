@@ -61,7 +61,7 @@ class FakeSession implements HarnessSession {
   }
   async submit(input: HarnessTurnInput) {
     this.submissions.push(input);
-    this.turnId = `turn-${this.submissions.length}`;
+    this.turnId = `turn-${++this.adapter.nextTurn}`;
     if (this.adapter.failure && !this.adapter.startedBeforeFailure) throw this.adapter.failure;
     this.emit({ type: 'turn_started', sessionId: input.sessionId, turnId: this.turnId });
     if (this.adapter.failure) throw this.adapter.failure;
@@ -124,6 +124,7 @@ class FakeAdapter implements HarnessAdapter {
   creationFailure: Error | undefined;
   failure: Error | undefined;
   startedBeforeFailure = false;
+  nextTurn = 0;
   constructor(
     id: string,
     workspace: AgentWorkspace,
@@ -505,9 +506,7 @@ describe('runtime with independent semantic harness adapters', () => {
           .filter(
             (event) => event.type === 'run' && event.data.runId === run.id && !event.data.status,
           ),
-      ).toHaveLength(
-        boundary === 'completed' || boundary === 'failed' || boundary === 'interrupted' ? 2 : 1,
-      );
+      ).toHaveLength(1);
     },
   );
 
@@ -562,7 +561,7 @@ describe('runtime with independent semantic harness adapters', () => {
           turnId: session.turnId,
         });
       release();
-      await expect.poll(() => delivery(agent)).toEqual(['completed', 'accepted']);
+      await expect.poll(() => delivery(agent)).toEqual(['accepted', 'accepted']);
       const confirmed = app.isles.store.agentDetail(agent.id).runs[0]!;
       expect(confirmed.items).toEqual([
         {
@@ -688,12 +687,12 @@ describe('runtime with independent semantic harness adapters', () => {
     await sessionB.close();
     expect(sessionA.closes).toBe(1);
     expect(sessionB.closes).toBe(1);
-    expect(delivery(first)).toEqual(['cancelled']);
-    expect(delivery(second)).toEqual(['cancelled']);
+    expect(delivery(first)).toEqual(['accepted']);
+    expect(delivery(second)).toEqual(['accepted']);
     await app.isles.runtime.resume(first.id);
     await expect.poll(() => app.isles.store.publicAgent(first.id).status).toBe('ready');
     send(first, 'Shutdown in flight');
-    await expect.poll(() => delivery(first)).toEqual(['cancelled', 'accepted']);
+    await expect.poll(() => delivery(first)).toEqual(['accepted', 'accepted']);
     await app.close();
     const restarted = await open();
     await expect.poll(() => restarted.isles.store.publicAgent(first.id).status).toBe('ready');
@@ -707,7 +706,7 @@ describe('runtime with independent semantic harness adapters', () => {
       restarted.isles.store
         .listMessages(first.channelId)
         .map((message) => message.deliveries[0]!.status),
-    ).toEqual(['cancelled', 'uncertain']);
+    ).toEqual(['accepted', 'accepted']);
     expect(a.inputs(first.id)).toHaveLength(2);
     expect(b.inputs(second.id)).toHaveLength(1);
   });
@@ -731,8 +730,10 @@ describe('runtime with independent semantic harness adapters', () => {
       return result;
     };
     let lateEventSent = false;
-    session.interrupt = async (sessionId, turnId) => {
-      session.interruptions.push({ sessionId, turnId });
+    const close = session.close.bind(session);
+    session.close = async () => {
+      const sessionId = nativeId;
+      const turnId = session.turnId;
       await Promise.resolve();
       session.emit({
         type: 'turn_completed',
@@ -750,9 +751,10 @@ describe('runtime with independent semantic harness adapters', () => {
       });
       lateEventSent = true;
       await interrupted;
+      await close();
     };
     send(agent, 'Stop before acknowledgment');
-    await expect.poll(() => delivery(agent)).toEqual(['accepted']);
+    await expect.poll(() => delivery(agent)).toEqual(['submitting']);
     const stopping = app.isles.runtime.stop(agent.id);
     try {
       await expect.poll(() => lateEventSent).toBe(true);
@@ -771,9 +773,10 @@ describe('runtime with independent semantic harness adapters', () => {
       releaseInterrupt();
       await stopping;
     }
+    await expect.poll(() => delivery(agent)).toEqual(['accepted']);
   });
 
-  it('gates native questions by capabilities and associates permitted child questions with the active main run', async () => {
+  it('gates native questions by capabilities and records each permitted question on its native activity', async () => {
     const { app, a, b, create, send } = await fixture();
     const first = await create(a);
     const second = await create(b);
@@ -782,15 +785,19 @@ describe('runtime with independent semantic harness adapters', () => {
     await expect.poll(() => a.inputs(first.id).length + b.inputs(second.id).length).toBe(2);
     const sessionA = a.latest(first.id);
     const sessionB = b.latest(second.id);
-    sessionA.question('wrong-main', nativeId, 'wrong-turn');
+    sessionA.question('autonomous-root', nativeId, 'autonomous-turn');
     sessionA.question('child', 'native-child', 'child-turn');
     sessionB.question('child-disabled', 'native-child', 'child-turn');
     sessionB.question('main');
-    expect(sessionA.rejected).toEqual(['wrong-main']);
+    expect(sessionA.rejected).toEqual([]);
     expect(sessionB.rejected).toEqual(['child-disabled']);
-    const question = app.isles.store.agentDetail(first.id).questions[0]!;
-    expect(question.runId).toBe(app.isles.store.agentDetail(first.id).runs[0]!.id);
-    expect(app.isles.store.agentDetail(first.id).runs[0]!.turnId).toBe(sessionA.turnId);
+    const childRun = app.isles.store
+      .agentDetail(first.id)
+      .runs.find((run) => run.turnId === 'child-turn')!;
+    const question = app.isles.store
+      .agentDetail(first.id)
+      .questions.find((question) => question.runId === childRun.id)!;
+    expect(childRun).toMatchObject({ threadId: 'native-child', turnId: 'child-turn', inputs: [] });
     app.isles.runtime.answer(first.id, question.id, {
       answers: { choice: { answers: ['Continue'] } },
     });
@@ -821,14 +828,19 @@ describe('runtime with independent semantic harness adapters', () => {
     await expect.poll(() => a.inputs(agent.id).length).toBe(2);
     const current = a.latest(agent.id);
     expect(current).not.toBe(old);
-    expect(current.turnId).toBe(old.turnId);
-    old.complete();
-    old.question('stale');
+    old.emit({
+      type: 'turn_completed',
+      sessionId: nativeId,
+      turnId: current.turnId,
+      status: 'completed',
+      error: null,
+    });
+    old.question('stale', nativeId, current.turnId);
     old.handlers.exit(new Error('Obsolete exit'));
     old.emit({
       type: 'item',
       sessionId: nativeId,
-      turnId: old.turnId,
+      turnId: current.turnId,
       append: false,
       item: { id: 'stale-item', type: 'text', status: 'completed', text: 'obsolete' },
     });
@@ -862,12 +874,17 @@ describe('runtime with independent semantic harness adapters', () => {
     await expect.poll(() => app.isles.store.publicAgent(second.id).status).toBe('ready');
     expect(a.inputs(first.id)).toHaveLength(1);
     expect(b.inputs(second.id)).toHaveLength(1);
-    a.failure = new HarnessSubmissionRejected('Refusal after acceptance');
+    a.failure = new Error('Transport uncertainty after native start');
     a.startedBeforeFailure = true;
     send(first, 'Already accepted');
     await expect.poll(() => delivery(first)).toEqual(['failed', 'uncertain']);
     expect(
-      app.isles.store.agentDetail(first.id).runs.find((run) => run.status === 'uncertain')!.turnId,
-    ).toBeTruthy();
+      app.isles.store
+        .agentDetail(first.id)
+        .runs.find((run) => run.status === 'uncertain' && run.inputs.length)!.turnId,
+    ).toBeNull();
+    expect(
+      app.isles.store.agentDetail(first.id).runs.some((run) => !run.inputs.length && run.turnId),
+    ).toBe(true);
   });
 });

@@ -2,23 +2,23 @@
 
 **让独立的 AI 一起工作。**
 
-面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server**、**Claude Code CLI**、**Kimi Code**（通过通用 ACP adapter）、**OpenCode**（原生 v2 HTTP/SSE）与 **DeepSeek Harness**（原生 SDK 桥接），各自参与私聊和混合群聊。Codex、Claude、OpenCode 与 DSH 支持默认关闭的实时收信开关：开启时追加到当前执行，关闭时忙碌排队；Kimi 忙碌时排队到下一轮。所有 Agent 都可通过 MCP 主动收信。
+面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server**、**Claude Code CLI**、**Kimi Code**（本地 Web REST/WebSocket）、**OpenCode**（原生 v2 HTTP/SSE）与 **DeepSeek Harness**（原生 SDK 桥接）。五种 harness 均支持默认关闭的实时收信开关：开启时，新消息追加到原生执行；关闭时，新消息排队。所有 Agent 都可通过 MCP 主动收信。当前版本及统一运行规则见 [Harness 升级与统一原生活动模型](docs/harness-upgrade-2026-10-24.md)。
 
 Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到 `[channel: "评审", seq: 12, from: agent:"Alice"]` 这样的文本头部，自己的私聊显示为 `private`。普通消息用名称呈现群、发送者与提及对象，重名时在引号外附加 ID 短前缀；工具仍通过目录查询完整 UUID 寻址，消息仍以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，本轮验证见 [名称消息验收](docs/name-message-acceptance.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。
 
-当前已实现 M1 的 Codex 私聊闭环、M2 的 Codex 群聊与 Agent 基础管理。用户创建多个 Agent，与每个 Agent 私聊，或把几个 Agent 拉进群讨论；Agent 通过 Isles MCP 发布正式消息，原生输出只在执行详情展示。群内用户或 Agent 的发言立即唤醒其他空闲成员；忙碌成员默认独立积累未读，原生 turn 结束后立即合并剩余未读开始下一 turn。用户可按 Agent 开启“忙碌时实时接收（steer）”，把新消息追加到同一 thread 的当前 turn，不另开 turn。调度不做防抖、不等待其他成员结束。Agent 可以在当前 turn 内通过 `receive_messages` 主动收信，或通过 `read_messages` 读取历史，实际返回的消息不再自动投递；`@` 只公开标明特意对谁说。用户可以暂停群讨论、管理成员，并按 Agent 开启拉群权限。每个 Agent 在私聊和所有群中始终使用同一个原生 thread，消息与投递持久化，应用重启后继续。Agent 之间私聊与用户登录留在后续阶段。
+当前已实现 M1 的 Codex 私聊闭环、M2 的 Codex 群聊与 Agent 基础管理。用户创建多个 Agent，与每个 Agent 私聊，或把几个 Agent 拉进群讨论；Agent 通过 Isles MCP 发布正式消息，原生输出只在执行详情展示。群内用户或 Agent 的发言立即唤醒其他空闲成员；忙碌成员默认独立积累未读，原生 turn 结束后立即合并剩余未读开始下一 turn。用户可按 Agent 开启“忙碌时实时接收（steer）”，把新消息送入同一主 session 的原生追加入口，按实际消费阶段记录。调度不做防抖、不等待其他成员结束。Agent 可以在当前 turn 内通过 `receive_messages` 主动收信，或通过 `read_messages` 读取历史，实际返回的消息不再自动投递；`@` 只公开标明特意对谁说。用户可以暂停群讨论、管理成员，并按 Agent 开启拉群权限。每个 Agent 在私聊和所有群中始终使用同一个原生 thread，消息与投递持久化，应用重启后继续。Agent 之间私聊与用户登录留在后续阶段。
 
 Web 界面采用工作台布局：左侧分为“群聊”和“Agents”，有已删除 Agent 或群聊时增加“历史对话”，支持按名称、成员或模型搜索并查看最近消息；中间是按发送者分组的对话，Agent 消息渲染 Markdown（不加载图片、不执行 HTML），用户消息按原文显示并高亮 `@`，系统消息居中显示。群聊输入框输入 `@` 可选择成员。右侧检查器在私聊中显示 Agent 配置、拉群权限和执行记录，在群聊中显示成员（可添加、移出或查看任一成员的执行详情）；宽屏常驻、较窄时浮层打开。窄屏下在聊天列表与单个对话之间切换。界面跟随系统的亮色/暗色设置。输入框支持 Enter 发送、Shift + Enter 换行（也兼容 Ctrl / ⌘ + Enter），切换聊天会保留各自尚未发送的草稿；草稿仅保存在当前页面，刷新后清空。
 
 在私聊或群成员的 Agent 详情中点击“编辑 Agent”，可修改名称、模型、推理等级、拉群权限和实时收信开关。ID、工作目录及原生 thread 保持不变；运行中的 turn 使用原配置，下一次执行使用新模型和推理等级。停止的 Agent 修改后仍保持停止。名称、权限和收信开关可在模型目录暂时不可用时修改，切换模型或等级需要原生目录确认支持。
 
-实时收信开关 `steerEnabled` 默认关闭，支持 steer 的 harness 也可在创建、编辑或 Agent 详情中保持关闭。未声明 `capabilities.steer` 的 harness 禁止开启，界面禁用该选项，服务端也拒绝开启；已保存开启值但当前 harness 不再支持时仍可关闭。只修改收信偏好不会重启原生进程、不查询模型目录，也不更换 session。开启后，忙碌 Agent 的可投递未读立即追加到当前 turn，消息仍保留频道、序号、发送者、回复和提及；关闭或不支持时继续排队到下一轮。关闭开关只影响后续调度，已经发出的原生 RPC 仍按实际响应结算。
+实时收信开关 `steerEnabled` 默认关闭，支持 steer 的 harness 也可在创建、编辑或 Agent 详情中保持关闭。未声明 `capabilities.steer` 的 harness 禁止开启，界面禁用该选项，服务端也拒绝开启；已保存开启值但当前 harness 不再支持时仍可关闭。只修改收信偏好不会重启原生进程、不查询模型目录，也不更换 session。开启后，忙碌 Agent 的可投递未读立即提交原生追加请求，消息仍保留频道、序号、发送者、回复和提及；关闭或不支持时继续排队到下一轮。关闭开关只影响后续调度，已经发出的原生 RPC 仍按实际响应结算。
 
-追加请求原生确认前显示“投递中”（`steering`），确认后继续在当前执行中处理，结果可在执行记录中查看。Codex steer 将 `-32600`、`-32601`、`-32602` 视为明确拒绝，消息退回队列，当前 turn 结束后按下一轮处理；超时、断连或其他未知结果显示“待核对”，由用户核对后决定后续操作。停止 Agent、暂停群、删除群和移出成员分别采用各自的控制规则，已取消投递保持取消状态。本次实现与验收证据见 [Steer 投递验收](docs/steer-delivery-acceptance.md)。
+追加请求原生确认前显示“投递中”（`steering`），确切消费后显示“已送达”（`accepted`），并关联实际消费它的原生 turn 或 execution。每个原生阶段独立保存执行记录；后台、自主及子代理活动持续记录，没有 Isles 输入的阶段显示为原生活动。已送达状态独立保留，执行终态在执行详情中查看。Codex steer 的 `-32600`、`-32601`、`-32602` 属于明确拒绝，消息退回队列；超时、断连或其他未知结果显示“待核对”。迟到的确切 ACK 订正送达事实，保持执行终态及停止意愿。当前实现与验证状态见 [本轮升级记录](docs/harness-upgrade-2026-10-24.md)，此前记录见 [Steer 投递验收](docs/steer-delivery-acceptance.md)。
 
 “删除 Agent”先停止执行，再退出所有群聊并从联系人移除。当前采用保留数据的删除方式：私聊、群聊发言、执行记录、个人工作目录、共享文件与原生 session 都保留；私聊在“历史对话”中只读展示，删除后不能恢复、编辑、继续发言或加入群聊，MCP 身份失效。删除需要确认，尚不提供永久清理文件或恢复已删除 Agent 的入口。
 
-群聊支持创建、列表与详情、改名、成员管理、暂停/继续及确认删除。“删除群聊”将它移至“历史对话”，移出所有成员、取消本群尚未结束的投递，并拒绝后续发言和 Agent 访问；人类可继续查看历史。成员 Agent 保持原运行状态与 thread，仍能在私聊和其他群工作，已经开始的原生任务可能继续完成。群聊历史、执行关联、个人工作目录和共享文件保留；当前不提供撤销删除或永久清理。行为与验证见 [群聊管理验收](docs/group-management-acceptance.md)。
+群聊支持创建、列表与详情、改名、成员管理、暂停/继续及确认删除。“删除群聊”将它移至“历史对话”，移出所有成员、取消本群尚未确认的投递，并拒绝后续发言和 Agent 访问；人类可继续查看历史。成员 Agent 保持原运行状态与 thread，仍能在私聊和其他群工作，已经开始的原生任务可能继续完成。群聊历史、执行关联、个人工作目录和共享文件保留；当前不提供撤销删除或永久清理。行为与验证见 [群聊管理验收](docs/group-management-acceptance.md)。
 
 ## 开发
 
@@ -28,13 +28,13 @@ Web 界面采用工作台布局：左侧分为“群聊”和“Agents”，有�
 
 建议使用 Node.js 24.15+ LTS，也支持 Node.js 26；具体范围见根目录 `package.json`。项目使用 pnpm 12.4.1，并保留依赖锁文件以便重现安装。
 
-Claude Code 同样支持自动发现与“新建 Agent → Claude Code 路径设置”。发现顺序为 `ISLES_CLAUDE_BIN`、界面保存的路径、PATH，以及 `~/.local/bin`、旧本地安装、Homebrew 和 npm/pnpm 的常见目录；Windows npm 启动脚本通过其 JS 入口运行。界面路径独立保存在 `[claude].binary_path`，更新只影响后续启动，原 session 绑定保留。原生模型和 effort 元数据来自 CLI 初始化响应；`default` effort 表示沿用原生设置，其他等级按 CLI 实际返回的支持列表提供。
+Claude Code 同样支持自动发现与“新建 Agent → Claude Code 路径设置”。发现顺序为 `ISLES_CLAUDE_BIN`、界面保存的路径、PATH，以及 `~/.local/bin`、本地安装、Homebrew 和 npm/pnpm 的常见目录；Windows npm/pnpm 启动脚本解析为包内 `bin/claude.exe`，直接运行原生程序。界面路径独立保存在 `[claude].binary_path`，更新只影响后续启动，原 session 绑定保留。原生模型和 effort 元数据来自 CLI 初始化响应；`default` effort 沿用原生设置，其他等级按 CLI 返回的支持列表提供。
 
-Kimi Code 使用“新建 Agent → Kimi Code 路径设置”，发现顺序为 `ISLES_KIMI_BIN`、界面保存的路径、PATH，以及 `~/.local/bin`、Homebrew 和 npm/pnpm 的常见目录；路径保存在 `[kimi].binary_path`。模型与推理等级来自原生 ACP 会话的配置项：Isles 在 `<data_dir>/acp-catalog/kimi` 建立一个不发送消息的临时会话，逐个模型读取支持的 thinking 等级后删除该会话。没有 thinking 选项的模型显示 `default`。
+Kimi Code 使用“新建 Agent → Kimi Code 路径设置”，发现顺序为 `ISLES_KIMI_BIN`、界面保存的路径、PATH 与常见安装目录，路径保存在 `[kimi].binary_path`。每位 Agent 使用本地 `kimi web` 服务，通过 REST/WebSocket 读取原生模型、推理等级、配置和认证状态。模型目录直接来自 `/api/v1/models`，默认模型与 effort 按原生配置和目录选择。目录读取不创建会话或发送模型输入。
 
-OpenCode 使用“新建 Agent → OpenCode 路径设置”，路径保存到 `[opencode].binary_path`，环境覆盖为 `ISLES_OPENCODE_BIN`。当前实现采用本机 OpenCode v2 原生接口，验证基线为 `opencode v2.0.25`。Windows 自动解析 `@opencode/cli` 的 npm/pnpm 启动文件，直接运行包内的 `opencode.exe`。模型目录来自原生已启用模型，推理等级映射为模型 variant；`default` 使用原生默认值。每位 Agent 启动独立的 `opencode serve --stdio`，复用用户原生配置和登录数据库，创建时不调用模型。实现与验证见 [OpenCode 验收](docs/opencode-acceptance.md)。
+OpenCode 使用“新建 Agent → OpenCode 路径设置”，路径保存到 `[opencode].binary_path`，环境覆盖为 `ISLES_OPENCODE_BIN`。当前实现采用本机 OpenCode v2 原生接口，协议基线为 `opencode v2.1.4`。Windows 自动解析 `@opencode/cli` 的 npm/pnpm 启动文件，直接运行包内的 `opencode.exe`。模型目录来自原生已启用模型，推理等级映射为模型 variant；`default` 使用原生默认值。每位 Agent 启动独立的 `opencode serve --stdio`，复用用户原生配置和登录数据库，创建时不调用模型。实现与验证见 [OpenCode 验收](docs/opencode-acceptance.md)。
 
-DeepSeek Harness 使用“新建 Agent → DeepSeek Harness 路径设置”，路径保存在 `[dsh].binary_path`，环境覆盖为 `ISLES_DSH_BIN`。macOS 可自动发现系统或用户 Applications 中的桌面版自带 `dsh`；Windows 从安装登记和常见安装目录发现桌面版自带的 `resources/runtime/cli/bin/dsh.cmd`，支持自定义安装目录，并使用桌面版自带运行时。当前验证基线为 `0.2.0-rc.2`。每位 Agent 启动独立的 `dsh --profile sdk`，通过运行时 overlay 加载 Isles 桥接插件、官方问答工具和 MCP，复用原生登录与 session 存储。模型及推理等级来自原生目录，默认选择采用桌面版保存的配置。实现与验证见 [DSH 验收](docs/dsh-acceptance.md)。
+DeepSeek Harness 使用“新建 Agent → DeepSeek Harness 路径设置”，路径保存在 `[dsh].binary_path`，环境覆盖为 `ISLES_DSH_BIN`。macOS 可自动发现系统或用户 Applications 中的桌面版自带 `dsh`；Windows 从安装登记和常见安装目录发现桌面版自带的 `resources/runtime/cli/bin/dsh.cmd`，支持自定义安装目录，并使用桌面版自带运行时。当前协议基线为 `0.2.1-rc.3`。每位 Agent 启动独立的 `dsh --profile sdk`，通过运行时 overlay 加载 Isles 桥接插件、官方问答工具和 MCP，复用原生登录与 session 存储。模型及推理等级来自原生目录，默认选择采用桌面版保存的配置。实现与验证见 [DSH 验收](docs/dsh-acceptance.md)。
 
 SQLite 驱动包含原生模块。项目已提供 `node-gyp`，本机还需要 Python 3 和 C/C++ 构建工具；macOS 使用 Xcode Command Line Tools。
 
@@ -45,11 +45,11 @@ pnpm dev
 
 打开 [本地 Web](http://127.0.0.1:5173)。Vite 将 `/api` 代理到 [本地服务](http://127.0.0.1:4310/api/health)。开发服务均只监听 `127.0.0.1`。
 
-本机需要已安装并完成原生认证的 Codex CLI。当前协议验证基线为 `codex-cli 0.160.0`，依据 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server) 与该版本生成的类型实现，使用 `instructionSources` 校验规则文件加载。升级 CLI 后应重新验证协议。Web 创建表单从真实 `model/list` 读取可用模型和推理等级。
+本机需要已安装并完成原生认证的 Codex CLI。当前协议基线为 `codex-cli 0.164.0`，依据 [官方 app-server 文档](https://learn.chatgpt.com/docs/app-server) 与该版本生成的类型实现，使用 `instructionSources` 校验规则文件加载。Web 创建表单从真实 `model/list` 读取可用模型和推理等级。当前验证状态见 [本轮升级记录](docs/harness-upgrade-2026-10-24.md)。
 
-使用 Claude 时，本机需要已安装并完成原生认证的 Claude Code CLI。本轮已验证 `2.1.285` 的双向 `stream-json`、模型目录、规则来源、MCP、原生提问、steer 与会话恢复，直接运行本机 CLI。版本变化后重新验证原生协议；实施与真实验收见 [Claude CLI 验收](docs/claude-cli-acceptance.md)。
+使用 Claude 时，本机需要已安装并完成原生认证的 Claude Code CLI。当前基线为 `2.1.310`，直接使用本机 CLI 的双向 `stream-json`。模型目录、规则文件、MCP、原生问题、steer 与同 session 恢复按 [本轮升级记录](docs/harness-upgrade-2026-10-24.md) 验证；此前真实账户验收见 [Claude CLI 验收](docs/claude-cli-acceptance.md)。
 
-使用 Kimi Code 时，本机需要已安装并通过 `kimi login` 登录的 Kimi Code CLI。Isles 以 `kimi acp` 启动原生进程，按 `2.1.1` 的 ACP v1 行为实现；版本变化后重新验证。设计与验收见 [Kimi Code ACP 验收](docs/kimi-acp-acceptance.md)。
+使用 Kimi Code 时，本机需要已安装并通过 `kimi login` 登录的 Kimi Code CLI。当前基线为 `2.3.1`，通过本地 `kimi web` 接入，支持 steer、原生问题、子代理和固定 session 恢复。当前验证见 [本轮升级记录](docs/harness-upgrade-2026-10-24.md)，既有 Web 接入记录见 [Kimi Web 验收](docs/kimi-web-acceptance.md)。
 
 配置默认保存在 `~/.Isles/config.toml`；`~` 表示当前用户主目录。最小配置为：
 
@@ -125,19 +125,19 @@ Codex Agent 的原生进程直接使用你的 Codex 目录：配置、登录、M
 
 Agent 的规则文件包含独立的“Shared workspace”章节：所有 Agent 可直接读写共享文件，交接时通过相关频道发送文件绝对路径和说明。文件写入不会自动唤醒其他 Agent，完成或更新后需要发消息通知；并行修改同一文件前应协调，共享仓库继续遵守自己的项目规则。
 
-Codex 按会话使用 `danger-full-access` 与 `approvalPolicy: never`，不弹出执行审批；原生用户问题仍可在 Web 回答。原生子代理沿用你的 Codex 设置，是否使用由 Agent 自行决定；Isles 只向 Agent 的主 thread 投递消息，也只恢复这个 thread。首次创建仅通过 `thread/inject_items` 写入中性的 assistant 初始化标记 `Isles session initialized.`，使尚未聊天的空 thread 可恢复；标记不含规则，不调用模型、不创建聊天回合。恢复失败会显示错误，不能用新 thread 或 fork 替代。
+Codex 默认使用 `workspace-write` 与 `approvalPolicy: on-request`，授权个人工作区及共享目录；开启完整访问时使用 `danger-full-access` 与 `never`。原生授权和用户问题在 Web 回答。原生子代理沿用 Codex 设置，由 Agent 自行使用，平台持续记录其原生活动；Isles 向固定主 thread 投递消息并恢复该 thread。首次创建通过 `thread/inject_items` 写入中性的 assistant 初始化标记 `Isles session initialized.`，使空 thread 可恢复；规则由工作目录文件加载，初始化不调用模型或生成 run。恢复失败显示具体原因。
 
 Web 和管理 HTTP API 暂无登录鉴权，仅供本机使用，不承诺把人类与本机进程安全隔离。MCP 的 bearer 身份绑定 Agent，每次调用重新校验频道成员关系与权限：所有 Agent 可用 `send_message`、`receive_messages`、`read_messages`、`list_channels`、`list_agents`；只有开启拉群权限的 Agent 能看到并调用 `create_group`、`invite_to_group`。权限修改立即在服务端生效，Agent 空闲时重启原生进程并恢复原 thread 以刷新工具列表。不提供创建 Agent、移出成员或 Agent 之间私聊的工具。全权限执行也不提供 Agent 之间的操作系统沙箱。
 
 `receive_messages` 可指定频道或读取所有成员频道的排队消息（包括暂停群），默认最多 50 条、上限 100 条，按时间取最早未读并按频道返回文本；`[has_more: true]` 表示可继续调用，收件箱为空时立即返回 `[unread: none]`。每条实际返回的消息按接收 Agent 持久化为 `received`，分页中的其余消息继续排队；`read_messages` 同样记录实际返回的消息。执行状态和结果可在 Agent 详情中查看。自动输入保留每频道最近 10 条加全部未读 `@` 的既有规则，私聊中的用户消息全部保留；自动输入中跳过的消息仍可通过历史读取。
 
-停止 Agent 会先保存停止状态，再中断原生执行；后续消息保存排队，显式恢复才处理，`receive_messages` 也不能绕过停止状态。暂停群讨论不中断正在进行的执行，只阻止自动投递；Agent 主动收信或读取历史时仍能读取暂停群，读到的消息算已接收，继续后只自动投递剩余未读。已接受、已通过 MCP 接收、已取消或结果不明的输入不会自动重投。若服务在活动执行中关闭或异常退出，该次执行显示“待核对”，Agent 等待显式恢复；“已完成”仅表示原生 turn 结束。
+停止 Agent 会先保存停止状态，再中断原生执行；后续消息保存排队，显式恢复才处理，`receive_messages` 也不能绕过停止状态。暂停群讨论不中断正在进行的执行，只阻止自动投递；Agent 主动收信或读取历史时仍能读取暂停群，读到的消息算已接收，继续后只自动投递剩余未读。已接受、已通过 MCP 接收、已取消或结果不明的输入不会自动重投。若服务在活动执行中关闭或异常退出，该次执行显示“待核对”，Agent 等待显式恢复；执行记录的“已完成”表示该原生阶段结束；任务目标与验收结论由正式消息和产物表达。
 
 Claude Agent 直接共用用户的 Claude home、原生认证、配置、插件、skills、用户 MCP 与记忆，每位 Agent 保持独立工作目录和固定 UUID。工作目录的 `CLAUDE.md` 通过 `@AGENTS.md` 导入唯一规则来源，托管段之外的用户内容保留；创建和恢复均通过原生 `get_context_usage` 校验加载的文件，并检查 Isles HTTP MCP 已连接。追加的 MCP 配置只用于当前进程，token 从环境变量读取。
 
-Claude 首次创建会发送中性用户消息 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，完成一次模型回合使会话落盘。初始化期间的工具调用被拦截，结果由 adapter 内部处理，成功后 Agent 就绪；初始化不会发布 Isles 聊天消息或生成 Isles run。失败保留已分配的 session 绑定并显示原因。后续使用 `--resume=<UUID>` 恢复原会话，输入确认与结束事件以输入 UUID 关联；原生最终输出保留为执行详情，正式发言继续使用 MCP。Claude 使用原生全权限模式，并将 `AskUserQuestion` 交到 Web 回答。Claude 支持按 Agent 开启 steer，默认关闭。开启时使用批次 UUID 发送追加输入，在原生执行边界进入当前任务，保持原 session 与 run；主线程 replay/started 或 result 的消费 UUID 列表确认接受。当前回合先结束时，Claude Code 接着把尚未消费的追加输入作为下一个原生回合执行，Isles 将其计入同一执行，全部处理完后执行结束。停止同时取消原生队列中的输入。
+Claude 首次创建会发送中性用户消息 `Isles session initialized. Reply only READY. Do not use tools or send messages.`，完成一次模型回合使会话落盘。初始化工具由回调拦截，adapter 内部结算后 Agent 就绪；失败保留已分配的 UUID 并显示原因。后续使用 `--resume=<UUID>` 恢复。默认权限为 `acceptEdits`，开启完整访问时使用 `--dangerously-skip-permissions`，原生授权与 `AskUserQuestion` 交到 Web。steer 以批次 UUID 关联确切消费回执：当前回合消费时归当前 run，后续回合消费时归后续 run，各回合独立结束。停止同时取消原生排队输入。
 
-Kimi Agent 直接共用用户的 Kimi home、登录、配置、skills、用户 MCP 与记忆，每位 Agent 保持独立工作目录和固定 session ID。Kimi 从工作目录加载 `AGENTS.md`。Isles 在 ACP `session/new` 与 `session/resume` 中传入 Isles HTTP MCP 地址及 `Authorization` 请求头，并在每次连接时设置 `yolo` 模式、Agent 的模型和 thinking 等级（Kimi 恢复会话时会重置这些设置）。新会话无需初始化消息即可恢复。工具权限请求按全权限策略自动允许一次；`AskUserQuestion` 以表单交到 Web，在给出的选项中回答。Kimi 的 ACP 一次执行一轮：忙碌时新消息排队，执行中仍可主动收信；Kimi 后台任务占用会话时，Isles 在 60 秒内重试提交。停止发送 `session/cancel` 并关闭原生进程。
+Kimi Agent 共用用户的 Kimi home、登录、配置、skills、用户 MCP 与记忆，每位 Agent 保持独立工作目录和固定 session ID。原生发现工作目录 `AGENTS.md`，Isles 在 `.kimi-code/mcp.json` 的托管项配置 HTTP MCP，token 从独立进程环境读取。REST 配置模型、effort 和 `yolo` 权限模式，WebSocket 记录主阶段、子代理、原生问题与审批。每个阶段使用独立 run；steer 按实际消费阶段归属，后台和自主阶段持续记录。其他客户端占用产生的 `40931` 写入拒绝保留所有权，释放后可重试。停止撤销尚未消费的自有输入、取消原生 prompt 并关闭本地服务。
 
 同一数据目录仅允许一个 Isles 服务。独立的 `runtime-lock.sqlite` 持有进程锁，冲突在初始化/恢复前明确拒绝；正常关闭或进程退出后由 SQLite/操作系统释放。关闭时先释放原生进程、Web SSE 和 MCP 流，再关闭 HTTP 服务与数据库。使用另一数据目录可并行运行另一份服务。
 
@@ -151,7 +151,7 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-`pnpm check` 包含格式、ESLint、类型检查、服务测试与生产构建。独立语义 fake adapter 验证 Runtime 的协议无关派发、相同 session ID 跨 harness 的隔离、注册约束和生命周期；Codex 原生协议模拟验证 adapter 的参数、事件及问题转换。既有测试覆盖规则文件维护与加载校验、文本格式与正文转义、频道序号与回复、即时唤醒、串行队列、MCP 接收去重、暂停与成员权限、停止/恢复、待核对、问题关联和进程锁。浏览器测试使用独立临时数据目录及 `54310`/`55173` 端口，通过真实 REST/SSE/MCP 验证页面链路，原生模型执行采用测试专用模拟 adapter；生产入口不会启用它。适配层阶段的检查和真实 Codex 回归结果见 [Harness 适配层验收](docs/harness-adapter-acceptance.md)；本次 steer 的最终结果另在 [Steer 投递验收](docs/steer-delivery-acceptance.md) 记录。模拟验证不代表新 harness 已接入。
+`pnpm check` 包含格式、ESLint、类型检查、服务测试与生产构建。独立语义 fake adapter 验证 Runtime 的协议无关派发、相同 session ID 跨 harness 的隔离、注册约束和生命周期；Codex 原生协议模拟验证 adapter 的参数、事件及问题转换。既有测试覆盖规则文件维护与加载校验、文本格式与正文转义、频道序号与回复、即时唤醒、串行队列、MCP 接收去重、暂停与成员权限、停止/恢复、待核对、问题关联和进程锁。浏览器测试使用独立临时数据目录及 `54310`/`55173` 端口，通过真实 REST/SSE/MCP 验证页面链路，原生模型执行采用测试专用模拟 adapter；生产入口不会启用它。适配层阶段的检查和真实 Codex 回归结果见 [Harness 适配层验收](docs/harness-adapter-acceptance.md)；本次 steer 的最终结果另在 [Steer 投递验收](docs/steer-delivery-acceptance.md) 记录。本轮完整检查与统一模型原生复验的状态见 [升级记录](docs/harness-upgrade-2026-10-24.md)。
 
 可选执行本机版本对应的类型生成检查（不调用模型）：
 

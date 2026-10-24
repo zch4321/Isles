@@ -22,7 +22,7 @@ async function fixture() {
   const version = async (command: ClaudeCommand) => {
     const entry = command.file === process.execPath ? command.args[0] : command.file;
     if (!entry || !files.has(await realpath(entry))) throw new Error('Not a fixture executable');
-    return '2.1.285 (Claude Code)';
+    return '2.1.310 (Claude Code)';
   };
   return { root, file, version };
 }
@@ -55,25 +55,43 @@ describe('Claude executable discovery', () => {
       ),
     ).rejects.toThrow('配置的 Claude Code 无法运行');
   });
-  it('runs JS installs with Node and Windows npm launchers through their package entry without a shell', async () => {
+  it('runs Windows npm launchers through the native package executable without a shell', async () => {
     const { root, file, version } = await fixture();
-    const script = await file(join(root, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'));
+    const binary = await file(
+      join(root, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+    );
     const launcher = await file(join(root, 'claude.cmd'), '@echo off');
     const executable = await findClaudeExecutable({ binary: launcher, platform: 'win32' }, version);
     expect(executable).toMatchObject({
-      file: process.execPath,
-      args: [await realpath(script)],
+      file: binary,
+      args: [],
       path: launcher,
     });
-    expect((await findClaudeExecutable({ binary: script }, version)).args).toEqual([
-      await realpath(script),
-    ]);
   });
-  it('rejects Windows launchers whose JS path cannot be resolved safely', async () => {
+  it.each(['cmd', 'ps1'])(
+    'resolves a pnpm .%s launcher with a relative native package path',
+    async (extension) => {
+      const { root, file, version } = await fixture();
+      const bin = join(root, '中文 tools', 'bin');
+      const binary = await file(
+        join(root, '中文 tools', 'packages', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+      );
+      const launcher = await file(
+        join(bin, `claude.${extension}`),
+        extension === 'cmd'
+          ? '"%~dp0\\..\\packages\\@anthropic-ai\\claude-code\\bin\\claude.exe" %*'
+          : '& "$basedir/../packages/@anthropic-ai/claude-code/bin/claude.exe" $args',
+      );
+      expect(
+        await findClaudeExecutable({ binary: launcher, platform: 'win32' }, version),
+      ).toMatchObject({ file: binary, args: [], path: launcher });
+    },
+  );
+  it('rejects Windows launchers whose executable path cannot be resolved safely', async () => {
     const { root, file, version } = await fixture();
     const launcher = await file(
       join(root, 'claude.cmd'),
-      'node "%UNKNOWN%\\@anthropic-ai\\claude-code\\cli.js"',
+      '"%UNKNOWN%\\@anthropic-ai\\claude-code\\bin\\claude.exe"',
     );
     await expect(
       findClaudeExecutable({ binary: launcher, platform: 'win32' }, version),

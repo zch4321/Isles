@@ -655,13 +655,15 @@ describe('durable runtime with simulated Codex', () => {
     app.isles.runtime.send(agent.channelId, { body: '第三条', clientId: 'third' });
     expect(duplicate.seq).toBe(one.seq);
     expect(harness.turns).toBe(1);
-    expect(deliveries(agent.channelId, agent.id)).toEqual(['accepted', 'queued', 'queued']);
+    await expect
+      .poll(() => deliveries(agent.channelId, agent.id))
+      .toEqual(['accepted', 'queued', 'queued']);
     harness.latest(agent.id).complete();
     await expect.poll(() => harness.turns).toBe(2);
     expect(harness.bodies(agent.id)).toEqual([['第一条'], ['第二条', '第三条']]);
     harness.latest(agent.id).complete();
     await ready(agent.id);
-    expect(deliveries(agent.channelId, agent.id)).toEqual(['completed', 'completed', 'completed']);
+    expect(deliveries(agent.channelId, agent.id)).toEqual(['accepted', 'accepted', 'accepted']);
     const detail = app.isles.store.agentDetail(agent.id);
     expect(detail.runs).toHaveLength(2);
     expect(detail.runs.every((r) => r.threadId === agent.threadId)).toBe(true);
@@ -689,10 +691,13 @@ describe('durable runtime with simulated Codex', () => {
     expect(conflict.statusCode).toBe(409);
   });
 
-  it('persists stop across restart and resumes queued input on the same thread without retrying cancellation', async () => {
+  it('persists stop and accepted receipts across restart while resuming queued input on the same thread', async () => {
     const { app, harness, create, open } = await fixture();
     const agent = await create();
-    app.isles.runtime.send(agent.channelId, { body: '被取消的输入', clientId: 'cancel' });
+    app.isles.runtime.send(agent.channelId, {
+      body: '停止前已送达',
+      clientId: 'accepted-before-stop',
+    });
     await app.isles.runtime.stop(agent.id);
     app.isles.runtime.send(agent.channelId, { body: '停止后消息', clientId: 'queued' });
     expect(harness.turns).toBe(1);
@@ -702,7 +707,7 @@ describe('durable runtime with simulated Codex', () => {
     expect(restarted.isles.store.publicAgent(agent.id).status).toBe('stopped');
     expect(
       restarted.isles.store.listMessages(agent.channelId).map((m) => m.deliveries[0]!.status),
-    ).toEqual(['cancelled', 'queued']);
+    ).toEqual(['accepted', 'queued']);
     await restarted.isles.runtime.resume(agent.id);
     await expect.poll(() => harness.turns).toBe(2);
     expect(harness.bodies(agent.id)[1]).toEqual(['停止后消息']);
@@ -733,7 +738,7 @@ describe('durable runtime with simulated Codex', () => {
     expect(restarted.isles.store.agentDetail(agent.id).runs).toHaveLength(2);
   });
 
-  it('resumes an Agent after an authentication failure on startup without replaying its failed input', async () => {
+  it('resumes an Agent after an authentication failure while preserving its delivered input', async () => {
     const { app, harness, create, open } = await fixture();
     const agent = await create();
     app.isles.runtime.send(agent.channelId, { body: 'Failed input', clientId: 'failed' });
@@ -764,7 +769,7 @@ describe('durable runtime with simulated Codex', () => {
     });
     expect(
       restarted.isles.store.listMessages(agent.channelId).map((m) => m.deliveries[0]!.status),
-    ).toEqual(['failed', 'accepted']);
+    ).toEqual(['accepted', 'accepted']);
     harness.latest(agent.id).complete();
     await expect.poll(() => restarted.isles.store.publicAgent(agent.id).status).toBe('ready');
     expect(
@@ -811,7 +816,7 @@ describe('durable runtime with simulated Codex', () => {
     await expect.poll(() => retried.isles.store.publicAgent(missing.id).status).toBe('ready');
   });
 
-  it('automatically recovers after an interrupted run without redelivering uncertain input', async () => {
+  it('automatically recovers after an interrupted run while preserving accepted input', async () => {
     const { app, harness, create, open } = await fixture();
     const agent = await create();
     const accepted = app.isles.runtime.send(agent.channelId, {
@@ -823,7 +828,7 @@ describe('durable runtime with simulated Codex', () => {
     const restarted = await open();
     cleanups.push(() => restarted.close());
     const store = restarted.isles.store;
-    expect(store.listMessages(agent.channelId)[0]!.deliveries[0]!.status).toBe('uncertain');
+    expect(store.listMessages(agent.channelId)[0]!.deliveries[0]!.status).toBe('accepted');
     expect(store.agentDetail(agent.id).runs[0]!.status).toBe('uncertain');
     await expect.poll(() => harness.turns).toBe(2);
     expect(store.publicAgent(agent.id)).toMatchObject({ threadId: agent.threadId, error: null });
@@ -925,6 +930,7 @@ describe('durable runtime with simulated Codex', () => {
     const agent = await create();
     app.isles.runtime.send(agent.channelId, { body: '提问', clientId: 'question' });
     const client = harness.latest(agent.id);
+    await expect.poll(() => app.isles.store.agentDetail(agent.id).runs[0]!.status).toBe('running');
     client.question();
     const question = app.isles.store.agentDetail(agent.id).questions[0]!;
     expect(app.isles.store.agentDetail(agent.id).runs[0]!.status).toBe('waiting');
@@ -970,14 +976,22 @@ describe('durable runtime with simulated Codex', () => {
     expect(rules).not.toMatch(/Do not spawn|multi_agent/);
     app.isles.runtime.send(agent.channelId, { body: '交给子代理', clientId: 'delegate' });
     const client = harness.latest(agent.id);
-    // A sub-agent's own turn events do not end the main run.
-    client.handlers.notification('turn/completed', {
-      threadId: 'child-thread',
-      turn: { id: 'child-turn', status: 'completed', error: null },
+    await expect.poll(() => app.isles.store.agentDetail(agent.id).runs[0]!.status).toBe('running');
+    const mainRun = app.isles.store.agentDetail(agent.id).runs[0]!;
+    client.handlers.notification('thread/started', {
+      thread: { id: 'child-thread', parentThreadId: agent.threadId },
     });
-    expect(app.isles.store.agentDetail(agent.id).runs[0]!.status).toBe('running');
+    client.handlers.notification('turn/started', {
+      threadId: 'child-thread',
+      turn: { id: 'child-turn', status: 'inProgress', error: null },
+    });
     client.question(800, { threadId: 'child-thread', turnId: 'child-turn' });
     const question = app.isles.store.agentDetail(agent.id).questions[0]!;
+    const childRun = app.isles.store
+      .agentDetail(agent.id)
+      .runs.find((r) => r.turnId === 'child-turn')!;
+    expect(childRun).toMatchObject({ threadId: 'child-thread', status: 'waiting', inputs: [] });
+    expect(question.runId).toBe(childRun.id);
     const response = await app.inject({
       method: 'POST',
       url: `/api/agents/${agent.id}/questions/${question.id}/answer`,
@@ -988,10 +1002,18 @@ describe('durable runtime with simulated Codex', () => {
       { id: 800, result: { answers: { choice: { answers: ['继续'] } } } },
     ]);
     expect(client.rejections).toEqual([]);
+    client.handlers.notification('turn/completed', {
+      threadId: 'child-thread',
+      turn: { id: 'child-turn', status: 'completed', error: null },
+    });
+    expect(app.isles.store.getRun(childRun.id)).toMatchObject({ status: 'completed', inputs: [] });
+    expect(app.isles.store.getRun(mainRun.id).status).toBe('running');
     client.complete();
-    await expect
-      .poll(() => app.isles.store.agentDetail(agent.id).runs[0]!.status)
-      .toBe('completed');
+    await expect.poll(() => app.isles.store.getRun(mainRun.id).status).toBe('completed');
+    expect(harness.bodies(agent.id)).toEqual([['交给子代理']]);
+    expect(app.isles.store.listMessages(agent.channelId)[0]!.deliveries).toEqual([
+      { agentId: agent.id, status: 'accepted' },
+    ]);
   });
 
   it('immediately wakes every other group member and private chats, but not for system notices or self messages', async () => {
@@ -1218,12 +1240,12 @@ describe('durable runtime with simulated Codex', () => {
     expect(
       app.isles.store.listMessages(removed.id).find((message) => message.seq === groupInput.seq)!
         .deliveries,
-    ).toEqual([{ agentId: agent.id, status: 'cancelled' }]);
+    ).toEqual([{ agentId: agent.id, status: 'accepted' }]);
     for (const input of [privateInput, retainedInput])
       expect(
         app.isles.store.listMessages(input.channelId).find((message) => message.seq === input.seq)!
           .deliveries,
-      ).toEqual([{ agentId: agent.id, status: 'completed' }]);
+      ).toEqual([{ agentId: agent.id, status: 'accepted' }]);
     client.complete();
     await ready(agent.id);
     const history = (await app.inject(`/api/channels/${removed.id}`)).json().messages;

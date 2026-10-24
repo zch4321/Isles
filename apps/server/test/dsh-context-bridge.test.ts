@@ -42,6 +42,7 @@ async function bridgeFixture() {
     },
     '@deepseek-ai/dsh-agent': { installModelSelection: vi.fn() },
     '@deepseek-ai/dsh-user-questions': { UserQuestionError: Error },
+    '@deepseek-ai/dsh-scope': { carrierKeyOf: (carrier: unknown) => carrier },
   };
   const globals = globalThis as unknown as Record<string, unknown>;
   globals[dependencyKey] = dependencies;
@@ -57,8 +58,9 @@ async function bridgeFixture() {
       `const native = async (name) => globalThis[${JSON.stringify(dependencyKey)}][name];`,
     ),
   );
-  const listeners = new Map<string, (...args: unknown[]) => void>();
-  const session = { id: 'root-session', header: { cwd: root }, snapshotEvents: () => [] };
+  const listeners = new Map<string, (this: unknown, ...args: unknown[]) => void>();
+  const history: Record<string, unknown>[] = [];
+  const session = { id: 'root-session', header: { cwd: root }, snapshotEvents: () => history };
   const agent = {
     id: 'root-agent',
     session,
@@ -71,10 +73,12 @@ async function bridgeFixture() {
   let measured = { totalTokens: 600, baseline: { kind: 'usage' }, surfaceDeltaTokens: 0 };
   const measure = vi.fn(() => measured);
   const warnings = vi.fn();
+  const drainDescendants = vi.fn(async () => {});
   const ctx = {
     get(name: string) {
       if (name === 'loader') return { await: async () => {} };
       if (name === 'tokenMeter') return { measure };
+      if (name === 'subagents') return { drainDescendants };
       return undefined;
     },
     logger: { warn: warnings },
@@ -120,6 +124,7 @@ async function bridgeFixture() {
     root,
     request,
     session,
+    history,
     frames,
     measure,
     llm: ctx.llm,
@@ -129,14 +134,30 @@ async function bridgeFixture() {
     interruptedBlocks,
     agent,
     setPermissions,
+    drainDescendants,
     approval(params: Record<string, unknown>) {
       return listeners.get('approval/request')!({ agent, ...params }, () => 'unavailable');
     },
     childApproval(params: Record<string, unknown>) {
-      const child = { ...agent, id: 'child-agent', session: { ...session, id: 'child-session' } };
+      const child = { ...agent, id: 'child-session', session: { ...session, id: 'child-session' } };
       children.set(child, agent);
       listeners.get('agent/created')!({ agent: child });
+      listeners.get('subagent/start')!.call(agent, {
+        runId: 'child-epoch',
+        id: child.id,
+        provider: 'spawn',
+        local: true,
+      });
       return listeners.get('approval/request')!({ agent: child, ...params }, () => 'unavailable');
+    },
+    child(id: string, parent = agent) {
+      const child = { ...agent, id, session: { ...session, id } };
+      children.set(child, parent);
+      listeners.get('agent/created')!({ agent: child });
+      return child;
+    },
+    subagent(type: 'start' | 'end', info: Record<string, unknown>, parent = agent) {
+      listeners.get(`subagent/${type}`)!.call(parent, info);
     },
     stream(frame: Record<string, unknown>) {
       listeners.get('agent/assistant-stream')!({ agent, frame });
@@ -275,9 +296,9 @@ describe('DSH bridge native permissions', () => {
     );
     const frame = f.frames.find((entry) => entry.method === 'isles/permission')!;
     await f.request('isles/permission/reject', {
-      sessionId: f.session.id,
+      sessionId: 'child-session',
       requestId: frame.params.requestId,
-      expectedTurnId: 'turn-1',
+      expectedTurnId: 'child-epoch',
     });
     await expect(pending).resolves.toBe('rejected');
   });
@@ -285,8 +306,11 @@ describe('DSH bridge native permissions', () => {
   it('grants one operation, checks owner and turn, and consumes the approval only once', async () => {
     const f = await bridgeFixture();
     await open(f);
+    const args = JSON.stringify({ command: 'printf "hello"' });
+    f.history.push({ type: 'tool/call', data: { callId: 'call-1', arguments: args } });
     const pending = f.approval({ toolName: 'bash', callId: 'call-1', reason: 'Exact operation' });
     const frame = f.frames.find((entry) => entry.method === 'isles/permission')!;
+    expect(frame.params.text).toBe(`Exact operation\n\n工具：bash\n操作：${args}`);
     const params = {
       sessionId: f.session.id,
       requestId: frame.params.requestId,
@@ -311,6 +335,49 @@ describe('DSH bridge native permissions', () => {
       ),
     ).toBe(false);
     expect(f.setPermissions).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a child approval active after its root turn ends and expires it with the child epoch', async () => {
+    const f = await bridgeFixture();
+    await open(f);
+    const pending = f.childApproval({ toolName: 'write' });
+    const frame = f.frames.find((entry) => entry.method === 'isles/permission')!;
+    expect(frame.params).toMatchObject({
+      rootSessionId: f.session.id,
+      sessionId: 'child-session',
+      turnId: 'child-epoch',
+    });
+    f.emit(f.session, {
+      type: 'turn/end',
+      seq: 2,
+      data: { turn: 'turn-1', reason: { kind: 'completed' } },
+    });
+    expect(
+      f.frames.some(
+        (entry) => (entry.params.event as { type?: string })?.type === 'question_expired',
+      ),
+    ).toBe(false);
+    f.subagent('end', {
+      runId: 'child-epoch',
+      id: 'child-session',
+      provider: 'spawn',
+      local: true,
+      stopReason: 'completed',
+    });
+    await expect(pending).resolves.toBe('cancelled');
+    expect(
+      f.frames.find(
+        (entry) => (entry.params.event as { type?: string })?.type === 'question_expired',
+      )?.params,
+    ).toMatchObject({ sessionId: 'child-session', event: { turnId: 'child-epoch' } });
+    expect(
+      await f.request('isles/permission/answer', {
+        sessionId: 'child-session',
+        expectedTurnId: 'child-epoch',
+        requestId: frame.params.requestId,
+        allow: true,
+      }),
+    ).toMatchObject({ rejected: true });
   });
 
   it.each(['abort', 'end', 'interrupt', 'close'])(
@@ -352,7 +419,213 @@ describe('DSH bridge native permissions', () => {
   );
 });
 
+describe('DSH bridge native subagent lifecycle', () => {
+  async function open(f: Awaited<ReturnType<typeof bridgeFixture>>) {
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      dangerFullAccess: false,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    f.emit(f.session, { type: 'turn/start', seq: 1, data: { turn: 1 } });
+  }
+
+  it.each([
+    ['completed', 'completed'],
+    ['error', 'failed'],
+    ['refusal', 'failed'],
+    ['max-tokens', 'failed'],
+    ['aborted', 'interrupted'],
+  ])(
+    'maps %s child settlement to %s without completing the root turn',
+    async (stopReason, status) => {
+      const f = await bridgeFixture();
+      await open(f);
+      const identity = { runId: 'epoch-1', id: 'child', provider: 'fixture', local: false };
+      f.subagent('start', identity);
+      f.subagent('start', identity);
+      f.subagent('end', {
+        ...identity,
+        stopReason,
+        lastAssistantMessage: [{ type: 'text', text: 'child result' }],
+      });
+      f.subagent('end', { ...identity, stopReason });
+      expect(f.frames.map((frame) => frame.params.event)).toMatchObject([
+        { type: 'turn_started', turnId: '1' },
+        { type: 'turn_started', turnId: 'epoch-1' },
+        {
+          type: 'item',
+          turnId: 'epoch-1',
+          item: {
+            id: 'subagent:epoch-1',
+            type: 'subagent',
+            status: 'running',
+            text: 'fixture · child',
+          },
+        },
+        {
+          type: 'item',
+          turnId: 'epoch-1',
+          item: {
+            id: 'subagent:epoch-1',
+            type: 'subagent',
+            status,
+            text: 'fixture · child\nchild result',
+          },
+        },
+        { type: 'turn_completed', turnId: 'epoch-1', status },
+      ]);
+      expect(f.frames.map((frame) => frame.params.rootSessionId)).toEqual(
+        Array(5).fill(f.session.id),
+      );
+      expect(f.frames.map((frame) => frame.params.sessionId)).toEqual([
+        f.session.id,
+        ...Array(4).fill('child'),
+      ]);
+      f.emit(f.session, {
+        type: 'turn/end',
+        seq: 2,
+        data: { turn: 1, reason: { kind: 'completed' } },
+      });
+      expect(f.frames.at(-1)?.params.event).toMatchObject({
+        type: 'turn_completed',
+        status: 'completed',
+      });
+    },
+  );
+
+  it('routes nested delegations through live ownership and gives a resumed child a new epoch item', async () => {
+    const f = await bridgeFixture();
+    await open(f);
+    const child = f.child('child');
+    const grandchild = f.child('grandchild', child);
+    const identity = { runId: 'nested-1', id: 'leaf', provider: 'spawn', local: true };
+    f.subagent('start', { ...identity, runId: 'stale-parent' }, { ...grandchild });
+    f.subagent('start', identity, grandchild);
+    f.subagent('end', { ...identity, id: 'unrelated', stopReason: 'error' }, grandchild);
+    f.subagent('end', { ...identity, stopReason: 'completed' }, child);
+    f.subagent('end', { ...identity, stopReason: 'completed' }, grandchild);
+    f.subagent('start', { ...identity, runId: 'nested-2' }, grandchild);
+    expect(
+      f.frames
+        .filter((frame) => (frame.params.event as { type: string }).type === 'item')
+        .map((frame) => frame.params.event),
+    ).toMatchObject([
+      { item: { id: 'subagent:nested-1', status: 'running' } },
+      { item: { id: 'subagent:nested-1', status: 'completed', text: 'spawn · leaf\ncompleted' } },
+      { item: { id: 'subagent:nested-2', status: 'running' } },
+    ]);
+  });
+
+  it('keeps child completion and new child starts visible while the root is idle and ignores duplicate epochs', async () => {
+    const f = await bridgeFixture();
+    await open(f);
+    const identity = { runId: 'epoch-1', id: 'child', provider: 'fixture', local: false };
+    f.subagent('start', { ...identity, runId: 'unrelated' }, { ...f.agent, id: 'other-root' });
+    f.subagent('end', { ...identity, stopReason: 'completed' });
+    f.subagent('start', identity);
+    f.emit(f.session, {
+      type: 'turn/end',
+      seq: 2,
+      data: { turn: 1, reason: { kind: 'completed' } },
+    });
+    const count = f.frames.length;
+    f.subagent('end', { ...identity, stopReason: 'completed' });
+    f.subagent('start', identity);
+    expect(f.frames.slice(count).map((frame) => frame.params.event)).toMatchObject([
+      { type: 'item', turnId: 'epoch-1', item: { status: 'completed' } },
+      { type: 'turn_completed', turnId: 'epoch-1', status: 'completed' },
+    ]);
+    f.subagent('start', { ...identity, runId: 'epoch-2' });
+    expect(f.frames.at(-2)?.params).toMatchObject({
+      rootSessionId: f.session.id,
+      sessionId: 'child',
+      event: { type: 'turn_started', turnId: 'epoch-2' },
+    });
+  });
+
+  it('drains background descendants on interrupt and shutdown after the root turn ends', async () => {
+    const f = await bridgeFixture();
+    await open(f);
+    f.subagent('start', { runId: 'epoch-1', id: 'child', provider: 'fixture', local: false });
+    f.emit(f.session, {
+      type: 'turn/end',
+      seq: 2,
+      data: { turn: 1, reason: { kind: 'completed' } },
+    });
+    expect(
+      await f.request('isles/session/interrupt', {
+        sessionId: f.session.id,
+        expectedTurnId: 'epoch-1',
+      }),
+    ).toEqual({});
+    expect(f.drainDescendants).toHaveBeenLastCalledWith([f.agent]);
+    expect(f.agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: true });
+    await f.request('shutdown', {});
+    expect(f.drainDescendants).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('DSH bridge assistant streams', () => {
+  it('shows native JSON tool arguments once and preserves result text and MCP identity', async () => {
+    const f = await bridgeFixture();
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      dangerFullAccess: false,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    const args = JSON.stringify({ text: 'first\nsecond', cwd: 'C:\\workspace\\项目' });
+    f.emit(f.session, {
+      type: 'tool/call',
+      seq: 1,
+      data: {
+        turn: 1,
+        step: 1,
+        callId: 'mcp-1',
+        name: 'mcp__isles__send_message',
+        arguments: args,
+      },
+    });
+    f.emit(f.session, {
+      type: 'tool/result',
+      seq: 2,
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          source: { callId: 'mcp-1' },
+          isError: true,
+          content: [{ type: 'text', text: 'message rejected\n请重试' }],
+        },
+      },
+    });
+    expect(f.frames.map((frame) => frame.params.event)).toMatchObject([
+      {
+        type: 'item',
+        turnId: '1',
+        append: false,
+        item: {
+          id: 'mcp-1',
+          type: 'mcpToolCall',
+          status: 'running',
+          text: `mcp__isles__send_message: ${args}`,
+        },
+      },
+      {
+        type: 'item',
+        turnId: '1',
+        append: false,
+        item: {
+          id: 'mcp-1',
+          type: 'mcpToolCall',
+          status: 'failed',
+          text: 'message rejected\n请重试',
+        },
+      },
+    ]);
+  });
+
   it('forwards only raw text and reasoning deltas and persists the native final snapshot once', async () => {
     const f = await bridgeFixture();
     await f.request('isles/session/resume', {

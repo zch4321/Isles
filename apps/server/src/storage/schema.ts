@@ -124,7 +124,6 @@ export const deliveries = sqliteTable(
         'steering',
         'accepted',
         'received',
-        'completed',
         'cancelled',
         'failed',
         'uncertain',

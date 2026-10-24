@@ -24,7 +24,7 @@ export async function opencodeConfig(root: string) {
   const binary = join(root, 'opencode-fixture.mjs');
   const home = join(root, 'native-home');
   await mkdir(home, { recursive: true });
-  await writeFile(binary, 'console.log("opencode v2.0.25");\n');
+  await writeFile(binary, 'console.log("opencode v2.1.4");\n');
   const config = new ConfigManager({
     configFilePath: join(root, 'config.toml'),
     homeDir: root,
@@ -57,6 +57,7 @@ export class OpenCodeFixture implements OpenCodeConnection {
   env: Record<string, string> = {};
   closed = false;
   sequence = 0;
+  readonly sessionSequences = new Map<string, number>();
   onRequest?: (call: NativeCall) => Promise<unknown> | unknown;
   autoConnected = true;
   async start() {}
@@ -84,7 +85,7 @@ export class OpenCodeFixture implements OpenCodeConnection {
       const parentID = new URLSearchParams(path.split('?')[1]).get('parentID');
       return {
         data: [...this.sessions.values()].filter((session) => session.parentID === parentID),
-        cursor: {},
+        cursor: { next: null },
       };
     }
     if (route === '/api/session/active') return { data: {} };
@@ -146,11 +147,13 @@ export class OpenCodeFixture implements OpenCodeConnection {
     return { done, close: end };
   }
   frame(sessionID: string, type: string, data: Record<string, unknown> = {}): OpenCodeEvent {
+    const seq = (this.sessionSequences.get(sessionID) ?? 0) + 1;
+    this.sessionSequences.set(sessionID, seq);
     return {
       id: `evt_${++this.sequence}`,
       type,
       created: Date.now(),
-      durable: { aggregateID: sessionID, seq: this.sequence, version: 1 },
+      durable: { aggregateID: sessionID, seq, version: 1 },
       data: { sessionID, ...data },
     };
   }

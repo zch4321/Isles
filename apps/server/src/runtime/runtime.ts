@@ -8,7 +8,6 @@ import {
   type QuestionAnswer,
   type QuestionDefinition,
   type Run,
-  type RunItem,
   type SendMessage,
   type UpdateAgent,
 } from '@isles/contracts';
@@ -38,10 +37,7 @@ interface Active {
   run: Run;
   turnId: string | null;
   output: RunOutputBuffer;
-  unboundOutput: Map<string, { output: RunOutputBuffer; items: Map<string, RunItem> }>;
   finished: boolean;
-  done: Promise<void>;
-  finish: () => void;
   requests: Map<string, HarnessRequestId>;
   steerTask?: Promise<void>;
   steerBatchId?: string;
@@ -49,9 +45,18 @@ interface Active {
 }
 interface Handle {
   session?: HarnessSession;
+  rootSessionId?: string;
+  nativeSubagents?: boolean;
   // An exited connection still owns its process until asynchronous cleanup finishes.
   retiring?: Promise<void>;
   active?: Active;
+  activities: Map<string, Active>;
+  submitting?: {
+    active: Active;
+    buffered: ({ event: HarnessEvent } | { question: HarnessQuestion })[];
+  };
+  steerTask?: Promise<void>;
+  steering?: Active;
   task?: Promise<void>;
   // A newer stop/resume/delete supersedes a control request waiting on native I/O.
   controlRevision?: number;
@@ -76,7 +81,7 @@ export class Runtime {
   private handle(id: string) {
     let handle = this.handles.get(id);
     if (!handle) {
-      handle = {};
+      handle = { activities: new Map() };
       this.handles.set(id, handle);
     }
     return handle;
@@ -276,8 +281,16 @@ export class Runtime {
     handle.task = this.pump(id, handle).finally(() => {
       delete handle.task;
       // Also covers input that arrived after the pump decided to stop.
-      if (this.closing || !handle.session || !this.runnable(id)) return;
-      if (handle.refresh || this.store.hasPendingMessages(id)) this.kick(id);
+      if (
+        this.closing ||
+        !handle.session ||
+        handle.steerTask ||
+        (handle.refresh && handle.activities.size) ||
+        !this.runnable(id)
+      )
+        return;
+      if ((!handle.activities.size && handle.refresh) || this.store.hasPendingMessages(id))
+        this.kick(id);
     });
   }
   private canSteer(id: string, handle: Handle, active: Active) {
@@ -296,7 +309,7 @@ export class Runtime {
     );
   }
   private kickSteer(id: string, handle: Handle, active: Active) {
-    if (active.steerTask || !this.canSteer(id, handle, active)) return;
+    if (handle.steerTask || active.steerTask || !this.canSteer(id, handle, active)) return;
     // Let native callbacks finish binding the initial turn before claiming more input.
     active.steerTask = Promise.resolve()
       .then(async () => {
@@ -313,8 +326,27 @@ export class Runtime {
             batchId: batch.id,
             text: formatMessages(this.messageLabels(id), batch.input),
           });
-          if (response.turnId !== turnId) throw new Error('Steer 确认返回了不同的原生 turn');
-          this.store.acceptSteer(batch.id, response.turnId);
+          const actual =
+            this.store.findNativeRun(id, active.run.threadId, response.turnId) ??
+            this.store.observeRun(id, active.run.threadId, response.turnId);
+          if (!actual.finishedAt) {
+            if (
+              handle.session === client &&
+              !this.closing &&
+              this.store.getAgent(id).desiredState === 'running'
+            )
+              this.observe(id, handle, actual.threadId, response.turnId);
+            else {
+              const stopped = this.store.getAgent(id).desiredState === 'stopped';
+              this.store.finishRun(
+                actual.id,
+                stopped ? 'interrupted' : 'uncertain',
+                stopped ? 'cancelled' : 'uncertain',
+                '原生连接已关闭，投递已确认',
+              );
+            }
+          }
+          this.store.acceptSteer(batch.id, response.turnId, actual.id);
           this.log.debug(
             { agentId: id, runId: active.run.id, batchId: batch.id },
             'Steer accepted',
@@ -348,9 +380,13 @@ export class Runtime {
       .finally(() => {
         delete active.steerBatchId;
         delete active.steerTask;
-        if (this.canSteer(id, handle, active) && this.store.hasPendingMessages(id))
-          this.kickSteer(id, handle, active);
+        delete handle.steerTask;
+        delete handle.steering;
+        if (this.store.hasPendingMessages(id) || (!handle.activities.size && handle.refresh))
+          this.kick(id);
       });
+    handle.steerTask = active.steerTask;
+    handle.steering = active;
   }
   private async connect(id: string, handle: Handle, previousSessionId?: string | null) {
     const agent = this.store.getAgent(id);
@@ -368,6 +404,7 @@ export class Runtime {
     });
     await this.workspace.prepareWorkspace(agent);
     let connection: HarnessSession | undefined;
+    let bound = false;
     const session = await adapter.connect(agent, this.baseUrl!, {
       connected: (value) => {
         connection = value;
@@ -383,10 +420,16 @@ export class Runtime {
             );
       },
       event: (event) => {
-        if (connection && handle.session === connection) this.event(id, handle, event);
+        if (
+          (bound || event.type === 'context_usage') &&
+          connection &&
+          handle.session === connection
+        )
+          this.event(id, handle, event);
       },
       question: (question) => {
-        if (connection && handle.session === connection) this.question(id, handle, question);
+        if (bound && connection && handle.session === connection)
+          this.question(id, handle, question);
       },
       exit: (error) => {
         if (connection && handle.session === connection) this.connectionExited(id, handle, error);
@@ -430,6 +473,9 @@ export class Runtime {
       status: this.store.getAgent(id).desiredState === 'running' ? 'ready' : 'stopped',
       error: null,
     });
+    bound = true;
+    handle.rootSessionId = sessionId;
+    handle.nativeSubagents = adapter.descriptor.capabilities.nativeSubagents;
     this.log.info(
       { agentId: id, harness: agent.harness, sessionId },
       agent.threadId ? 'Native session resumed' : 'Native session created',
@@ -438,21 +484,23 @@ export class Runtime {
   private async pump(id: string, handle: Handle) {
     try {
       while (!this.closing && this.runnable(id)) {
+        if (handle.active || handle.submitting || handle.steerTask) break;
         if (handle.retiring) {
           await handle.retiring;
           if (this.closing || !this.runnable(id)) break;
         }
-        if (handle.refresh && handle.session) {
+        if (handle.refresh && handle.activities.size) break;
+        if (handle.refresh && handle.session && !handle.activities.size) {
           // Reconnect through the adapter to reload settings and tools in the same session.
           const client = handle.session;
           delete handle.session;
           await client.close();
         }
-        delete handle.refresh;
+        if (!handle.activities.size) delete handle.refresh;
         if (!handle.session) await this.connect(id, handle);
         // An edit during workspace preparation or initialization must reload guidance
         // before any queued input starts its first turn.
-        if (handle.refresh) continue;
+        if (handle.refresh && !handle.activities.size) continue;
         const agent = this.store.getAgent(id);
         if (
           !handle.session ||
@@ -478,6 +526,80 @@ export class Runtime {
       await handle.retiring;
     }
   }
+  private activity(run: Run, turnId: string | null = run.turnId): Active {
+    return { run, turnId, output: new RunOutputBuffer(), finished: false, requests: new Map() };
+  }
+  private activityKey(sessionId: string, turnId: string) {
+    return JSON.stringify([sessionId, turnId]);
+  }
+  private allActivities(handle: Handle) {
+    return [
+      ...new Set([
+        ...handle.activities.values(),
+        ...(handle.submitting ? [handle.submitting.active] : []),
+        ...(handle.steering?.steerBatchId &&
+        this.store.getSteer(handle.steering.steerBatchId).status === 'pending'
+          ? [handle.steering]
+          : []),
+      ]),
+    ];
+  }
+  private observe(id: string, handle: Handle, sessionId: string, turnId: string) {
+    const key = this.activityKey(sessionId, turnId);
+    const existing = handle.activities.get(key);
+    if (existing) return existing;
+    const run =
+      this.store.findNativeRun(id, sessionId, turnId) ??
+      this.store.observeRun(id, sessionId, turnId);
+    if (run.finishedAt) return undefined;
+    const active = this.activity(run, turnId);
+    handle.activities.set(key, active);
+    if (sessionId === this.store.getAgent(id).threadId) handle.active = active;
+    this.activityStatus(id, handle);
+    return active;
+  }
+  private activityStatus(id: string, handle: Handle) {
+    const agent = this.store.getAgent(id);
+    if (this.closing || agent.desiredState !== 'running' || agent.status === 'error') return;
+    const status = handle.activities.size || handle.submitting ? 'running' : 'ready';
+    if (agent.status !== status) this.store.updateAgent(id, { status });
+  }
+  private finishActivity(
+    handle: Handle,
+    active: Active,
+    status: 'completed' | 'interrupted' | 'failed' | 'uncertain',
+    error: string | null = null,
+  ) {
+    if (active.finished) {
+      if (status === 'interrupted' || status === 'uncertain')
+        this.store.finishRun(
+          active.run.id,
+          status,
+          status === 'interrupted' ? 'cancelled' : 'uncertain',
+          error,
+        );
+      return;
+    }
+    this.flushOutput(active, status === 'uncertain' ? 'failed' : status);
+    this.store.finishRun(
+      active.run.id,
+      status,
+      status === 'interrupted' ? 'cancelled' : status === 'failed' ? 'failed' : 'uncertain',
+      error,
+    );
+    active.finished = true;
+    active.requests.clear();
+    if (active.turnId)
+      handle.activities.delete(this.activityKey(active.run.threadId, active.turnId));
+    if (handle.active === active) delete handle.active;
+  }
+  private replay(id: string, handle: Handle, pending: NonNullable<Handle['submitting']>) {
+    if (!handle.session || this.closing || this.store.getAgent(id).desiredState !== 'running')
+      return;
+    for (const entry of pending.buffered)
+      if ('event' in entry) this.event(id, handle, entry.event);
+      else this.question(id, handle, entry.question);
+  }
   private async turn(
     id: string,
     handle: Handle,
@@ -486,22 +608,10 @@ export class Runtime {
     run: Run,
     input: ClaimedChannel[],
   ) {
-    let finish = () => {};
-    const done = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    const active: Active = {
-      run,
-      turnId: null,
-      output: new RunOutputBuffer(),
-      unboundOutput: new Map(),
-      finished: false,
-      done,
-      finish,
-      requests: new Map(),
-    };
-    handle.active = active;
-    this.store.updateAgent(id, { status: 'running' });
+    const active = this.activity(run, null);
+    const pending: NonNullable<Handle['submitting']> = { active, buffered: [] };
+    handle.submitting = pending;
+    this.activityStatus(id, handle);
     try {
       const response = await client.submit({
         sessionId: run.threadId,
@@ -511,51 +621,47 @@ export class Runtime {
         reasoningEffort: agent.reasoningEffort,
         workspace: agent.workspace,
       });
-      if (active.turnId && active.turnId !== response.turnId)
-        throw new Error('原生 turn 确认与已绑定的运行不一致，结果待核对');
-      this.bindTurn(active, response.turnId);
+      const existing = this.store.findNativeRun(id, run.threadId, response.turnId);
+      if (existing && existing.id !== run.id)
+        throw new Error('原生提交返回已记录的活动，请核对投递结果');
       this.store.acceptRun(run.id, response.turnId);
-      this.log.info({ agentId: id, runId: run.id, turnId: response.turnId }, 'Run started');
-      this.kickSteer(id, handle, active);
-      await done;
+      active.turnId = response.turnId;
+      active.run = this.store.getRun(run.id);
+      delete handle.submitting;
+      if (
+        !active.finished &&
+        handle.session === client &&
+        this.store.getAgent(id).desiredState === 'running'
+      ) {
+        handle.activities.set(this.activityKey(run.threadId, response.turnId), active);
+        handle.active = active;
+        this.replay(id, handle, pending);
+        this.kickSteer(id, handle, active);
+      }
+      this.log.info({ agentId: id, runId: run.id, turnId: response.turnId }, 'Input accepted');
     } catch (error) {
-      const rejected = error instanceof HarnessSubmissionRejected && !active.turnId;
+      delete handle.submitting;
+      const rejected = error instanceof HarnessSubmissionRejected;
       this.log.error(
         { err: error, agentId: id, runId: run.id },
-        rejected ? 'Run submission rejected' : 'Run result is uncertain',
+        rejected ? 'Input rejected' : 'Input result is uncertain',
       );
-      if (!active.finished) {
-        this.flushOutput(active, 'failed');
-        this.store.finishRun(
-          run.id,
-          rejected ? 'failed' : 'uncertain',
-          rejected ? 'failed' : 'uncertain',
-          this.workspace.redactor.text(error),
-        );
-        active.finished = true;
-      }
+      this.finishActivity(
+        handle,
+        active,
+        rejected ? 'failed' : 'uncertain',
+        this.workspace.redactor.text(error),
+      );
+      this.replay(id, handle, pending);
       if (this.store.getAgent(id).desiredState === 'running')
-        this.store.updateAgent(id, {
-          status: 'error',
-          error: this.workspace.redactor.text(error),
-        });
-      // An uncertain initial submission must not leave its pending steer RPC waiting
-      // on an untracked native turn. Closing settles outstanding adapter requests.
-      if (active.steerTask) await client.close();
-      return;
+        this.store.updateAgent(id, { status: 'error', error: this.workspace.redactor.text(error) });
     } finally {
-      // A completion event can precede the steer ACK. Settle it before another turn
-      // starts, so definite refusal can safely return the claimed messages to the queue.
-      await active.steerTask;
-      if (handle.active === active) delete handle.active;
+      if (handle.submitting === pending) delete handle.submitting;
+      this.activityStatus(id, handle);
     }
-    if (!this.closing && this.runnable(id)) this.store.updateAgent(id, { status: 'ready' });
   }
   private connectionExited(id: string, handle: Handle, error: Error) {
-    this.log.error(
-      { err: error, agentId: id, runId: handle.active?.run.id },
-      'Native process exited unexpectedly',
-    );
+    this.log.error({ err: error, agentId: id }, 'Native process exited unexpectedly');
     const exited = handle.session;
     delete handle.session;
     if (exited) {
@@ -569,38 +675,10 @@ export class Runtime {
         if (handle.retiring === retiring) delete handle.retiring;
       });
     }
-    if (handle.active) {
-      this.flushOutput(handle.active, 'failed');
-      this.store.finishRun(
-        handle.active.run.id,
-        'uncertain',
-        'uncertain',
-        this.workspace.redactor.text(error),
-      );
-      handle.active.finished = true;
-      handle.active.finish();
-    }
+    for (const active of this.allActivities(handle))
+      this.finishActivity(handle, active, 'uncertain', this.workspace.redactor.text(error));
     if (!this.closing && this.store.getAgent(id).desiredState === 'running')
-      this.store.updateAgent(id, {
-        status: 'error',
-        error: this.workspace.redactor.text(error),
-      });
-  }
-  private bindTurn(active: Active, turnId: string) {
-    if (active.turnId || active.finished) return;
-    active.turnId = turnId;
-    const buffered = active.unboundOutput.get(turnId);
-    if (buffered) {
-      active.output.adopt(buffered.output);
-      this.store.updateItems(
-        active.run.id,
-        [...buffered.items.values()].map((item) => ({
-          ...item,
-          text: this.workspace.redactor.output(item.text),
-        })),
-      );
-    }
-    active.unboundOutput.clear();
+      this.store.updateAgent(id, { status: 'error', error: this.workspace.redactor.text(error) });
   }
   private flushOutput(active: Active, status: 'completed' | 'interrupted' | 'failed') {
     if (active.finished) return;
@@ -613,57 +691,48 @@ export class Runtime {
     );
   }
   private event(id: string, handle: Handle, event: HarnessEvent) {
+    if (!handle.session || this.closing) return;
     if (event.type === 'context_usage') {
-      this.store.recordContextUsage(id, event.sessionId, event.usage);
+      if (event.sessionId === this.store.getAgent(id).threadId)
+        this.store.recordContextUsage(id, event.sessionId, event.usage);
       return;
     }
-    const active = handle.active;
-    if (!active || active.finished || event.sessionId !== active.run.threadId) return;
-    if (event.type === 'turn_started' || event.type === 'turn_completed') {
-      if (active.turnId && active.turnId !== event.turnId) return;
-      this.bindTurn(active, event.turnId);
-      this.store.acceptRun(active.run.id, event.turnId);
-      if (event.type === 'turn_started') this.kickSteer(id, handle, active);
-      if (event.type === 'turn_completed') {
-        const error = event.error ? this.workspace.redactor.text(event.error) : null;
-        this.flushOutput(active, event.status);
-        this.store.finishRun(
-          active.run.id,
-          event.status,
-          event.status === 'completed'
-            ? 'completed'
-            : event.status === 'interrupted'
-              ? 'cancelled'
-              : 'failed',
-          error,
-        );
-        active.finished = true;
-        if (event.status === 'failed')
-          this.store.updateAgent(id, { status: 'error', error: error ?? '原生 turn 失败' });
-        const context = { agentId: id, runId: active.run.id, status: event.status, reason: error };
-        if (event.status === 'failed') this.log.warn(context, 'Run finished');
-        else this.log.info(context, 'Run finished');
-        active.finish();
+    const main = event.sessionId === handle.rootSessionId;
+    if (!main && !handle.nativeSubagents) return;
+    if (main && handle.submitting) {
+      handle.submitting.buffered.push({ event });
+      return;
+    }
+    const turnId = event.turnId ?? (main ? handle.active?.turnId : undefined);
+    if (!turnId) return;
+    // Finished identities remain in storage, so late fragments cannot reopen an activity.
+    const active =
+      event.type === 'question_expired'
+        ? handle.activities.get(this.activityKey(event.sessionId, turnId))
+        : this.observe(id, handle, event.sessionId, turnId);
+    if (!active || active.finished) return;
+    if (event.type === 'turn_started') {
+      if (main) {
+        handle.active = active;
+        this.kickSteer(id, handle, active);
       }
       return;
     }
-    if (event.turnId && active.turnId && event.turnId !== active.turnId) return;
+    if (event.type === 'turn_completed') {
+      const error = event.error ? this.workspace.redactor.text(event.error) : null;
+      this.finishActivity(handle, active, event.status, error);
+      if (main && event.status === 'failed')
+        this.store.updateAgent(id, { status: 'error', error: error ?? '原生活动失败' });
+      this.activityStatus(id, handle);
+      this.kick(id);
+      return;
+    }
     if (event.type === 'question_expired') {
       for (const [questionId, requestId] of active.requests)
         if (requestId === event.requestId) {
           this.store.expireQuestion(questionId);
           active.requests.delete(questionId);
         }
-      return;
-    }
-    if (event.turnId && !active.turnId) {
-      let buffered = active.unboundOutput.get(event.turnId);
-      if (!buffered) {
-        buffered = { output: new RunOutputBuffer(), items: new Map() };
-        active.unboundOutput.set(event.turnId, buffered);
-      }
-      const item = buffered.output.update(event.item, event.append, event.type === 'item_delta');
-      if (event.type === 'item') buffered.items.set(item.id, item);
       return;
     }
     const item = active.output.update(event.item, event.append, event.type === 'item_delta');
@@ -675,61 +744,60 @@ export class Runtime {
   private question(id: string, handle: Handle, request: HarnessQuestion) {
     const session = handle.session;
     if (!session) return;
-    const active = handle.active;
-    const main = request.sessionId === active?.run.threadId;
-    const capabilities = this.harnesses.get(this.store.getAgent(id).harness).descriptor
-      .capabilities;
-    if (
-      capabilities.userQuestions &&
-      (main || capabilities.nativeSubagents) &&
-      active &&
-      (!main || !active.turnId || request.turnId === active.turnId) &&
-      this.store.getAgent(id).desiredState === 'running' &&
-      !this.store.getRun(active.run.id).finishedAt
-    ) {
-      if (main) {
-        active.turnId = request.turnId;
-        this.store.acceptRun(active.run.id, active.turnId);
-        this.kickSteer(id, handle, active);
-      }
-      const definitions: QuestionDefinition[] = request.questions.map((definition) => {
-        const q = questionDefinitionSchema.parse(definition);
-        return {
-          ...q,
-          question: this.workspace.redactor.text(q.question),
-          options:
-            q.options?.map((option) => ({
-              label: this.workspace.redactor.text(option.label),
-              description: this.workspace.redactor.text(option.description),
-            })) ?? null,
-        };
-      });
-      const questionId = this.store.createQuestion(
-        id,
-        active.run.id,
-        request.turnId,
-        request.requestId,
-        definitions,
-      );
-      active.requests.set(questionId, request.requestId);
+    const agent = this.store.getAgent(id);
+    const main = request.sessionId === agent.threadId;
+    const capabilities = this.harnesses.get(agent.harness).descriptor.capabilities;
+    if (main && handle.submitting && !this.closing && agent.desiredState === 'running') {
+      handle.submitting.buffered.push({ question: request });
       return;
     }
-    session.rejectQuestion(
+    const active =
+      !this.closing &&
+      agent.desiredState === 'running' &&
+      capabilities.userQuestions &&
+      (main || capabilities.nativeSubagents)
+        ? this.observe(id, handle, request.sessionId, request.turnId)
+        : undefined;
+    if (!active || active.finished) {
+      session.rejectQuestion(request.requestId, 'Native activity is unavailable');
+      return;
+    }
+    const definitions: QuestionDefinition[] = request.questions.map((definition) => {
+      const q = questionDefinitionSchema.parse(definition);
+      return {
+        ...q,
+        header: this.workspace.redactor.text(q.header),
+        question: this.workspace.redactor.text(q.question),
+        options:
+          q.options?.map((option) => ({
+            label: this.workspace.redactor.text(option.label),
+            description: this.workspace.redactor.text(option.description),
+          })) ?? null,
+      };
+    });
+    const questionId = this.store.createQuestion(
+      id,
+      active.run.id,
+      request.turnId,
       request.requestId,
-      'Isles cannot accept this native question in the current run',
+      definitions,
     );
+    active.requests.set(questionId, request.requestId);
   }
   answer(id: string, questionId: string, value: QuestionAnswer) {
     const answers = answerQuestionSchema.parse(value);
     const question = this.store.getQuestion(questionId);
     const handle = this.handles.get(id);
-    const requestId = handle?.active?.requests.get(questionId);
+    const active =
+      handle &&
+      [...handle.activities.values()].find((activity) => activity.run.id === question.runId);
+    const requestId = active?.requests.get(questionId);
     if (question.agentId !== id) throw new HttpError(404, '问题不存在');
     if (
       question.status !== 'pending' ||
       requestId === undefined ||
       !handle?.session ||
-      handle.active?.run.id !== question.runId ||
+      !active ||
       this.store.getAgent(id).desiredState !== 'running' ||
       this.store.getRun(question.runId).finishedAt
     )
@@ -755,7 +823,7 @@ export class Runtime {
     // The live connection/request identity is checked before responding. If it
     // closes afterwards, crash recovery marks any still pending question expired.
     handle.session.answer(requestId, answers);
-    handle.active.requests.delete(questionId);
+    active.requests.delete(questionId);
     this.store.answerQuestion(questionId, answers);
   }
   async stop(id: string) {
@@ -772,45 +840,41 @@ export class Runtime {
     const handle = this.handles.get(id);
     if (!handle) return;
     const client = handle.session;
-    if (handle.active) {
-      const active = handle.active;
-      this.flushOutput(active, 'interrupted');
-      this.store.finishRun(
-        active.run.id,
-        'interrupted',
-        'cancelled',
-        '用户停止了 Agent；该输入不会再次投递。',
-      );
-      active.finished = true;
-      active.finish();
-      if (
-        client &&
-        active.turnId &&
-        this.harnesses.get(this.store.getAgent(id).harness).descriptor.capabilities.interrupt
-      )
-        await Promise.race([
-          client
-            .interrupt(active.run.threadId, active.turnId)
-            .catch((error: unknown) =>
-              this.log.warn(
-                { err: error, agentId: id, runId: active.run.id },
-                'Native interrupt failed',
+    // Fence native callbacks while every recorded activity is stopped together.
+    delete handle.session;
+    const activities = this.allActivities(handle);
+    const interruptions = activities.filter((active) => !active.finished && active.turnId);
+    for (const active of activities)
+      this.finishActivity(handle, active, 'interrupted', '用户停止了 Agent');
+    if (
+      client &&
+      this.harnesses.get(this.store.getAgent(id).harness).descriptor.capabilities.interrupt
+    )
+      await Promise.all(
+        interruptions.map((active) =>
+          Promise.race([
+            client
+              .interrupt(active.run.threadId, active.turnId!)
+              .catch((error: unknown) =>
+                this.log.warn(
+                  { err: error, agentId: id, runId: active.run.id },
+                  'Native interrupt failed',
+                ),
               ),
-            ),
-          new Promise((resolve) => {
-            const timer = setTimeout(resolve, 2_000);
-            timer.unref();
-          }),
-        ]);
-    }
+            new Promise((resolve) => {
+              const timer = setTimeout(resolve, 2_000);
+              timer.unref();
+            }),
+          ]),
+        ),
+      );
     await client?.close();
-    if (handle.session === client) delete handle.session;
     await handle.retiring;
   }
   async resume(id: string) {
     let agent = this.managed(id);
     const handle = this.handle(id);
-    if (agent.desiredState === 'running' && handle.active)
+    if (agent.desiredState === 'running' && (handle.activities.size || handle.submitting))
       throw new HttpError(409, 'Agent 正在执行，请先停止');
     const revision = (handle.controlRevision ?? 0) + 1;
     handle.controlRevision = revision;
@@ -821,6 +885,7 @@ export class Runtime {
       return agent;
     };
     await handle.task;
+    await handle.steerTask;
     await handle.retiring;
     agent = current();
     if (agent.threadCreationAttempted && !agent.threadId)
@@ -840,7 +905,13 @@ export class Runtime {
     const handle = this.handle(id);
     // Native initialization and outstanding turn cleanup must finish before their
     // connection can be replaced; the displayed status alone does not imply work.
-    if (handle.task || handle.active || this.store.hasActiveRun(id))
+    if (
+      handle.task ||
+      handle.steerTask ||
+      handle.submitting ||
+      handle.activities.size ||
+      this.store.hasActiveRun(id)
+    )
       throw new HttpError(409, 'Agent 正在执行或初始化，请等待空闲后新建会话。');
     this.resetting.add(id);
     handle.controlRevision = (handle.controlRevision ?? 0) + 1;
@@ -895,6 +966,7 @@ export class Runtime {
     try {
       await this.halt(id);
       await this.handles.get(id)?.task;
+      await handle.steerTask;
       const deleted = this.store.deleteAgent(id);
       this.handles.delete(id);
       this.log.info({ agentId: id }, 'Agent deleted');
@@ -905,39 +977,28 @@ export class Runtime {
   }
   async close() {
     this.closing = true;
-    for (const handle of this.handles.values()) {
-      if (
-        handle.active &&
-        (!this.store.getRun(handle.active.run.id).finishedAt ||
-          (handle.active.steerBatchId &&
-            this.store.getSteer(handle.active.steerBatchId).status === 'pending'))
-      ) {
-        this.flushOutput(handle.active, 'interrupted');
-        this.store.finishRun(
-          handle.active.run.id,
+    for (const [id, handle] of this.handles) {
+      const activities = this.allActivities(handle);
+      for (const active of activities) this.flushOutput(active, 'interrupted');
+      for (const active of activities)
+        this.finishActivity(
+          handle,
+          active,
           'uncertain',
-          'uncertain',
-          '服务关闭时原生执行尚未结束，结果待核对；不会自动重投。',
+          '服务关闭时原生活动仍在执行，请恢复后查看原生状态',
         );
-        handle.active.finished = true;
-        this.log.warn(
-          { agentId: handle.active.run.agentId, runId: handle.active.run.id },
-          'Run left uncertain at shutdown',
-        );
-        if (this.store.getAgent(handle.active.run.agentId).desiredState === 'running')
-          this.store.updateAgent(handle.active.run.agentId, {
-            status: 'error',
-            error: '上次执行结果待核对，请查看原生记录后显式恢复。',
-          });
-        handle.active.finish();
-      }
+      if (activities.length && this.store.getAgent(id).desiredState === 'running')
+        this.store.updateAgent(id, { status: 'error', error: '原生活动状态待核对，请恢复 Agent' });
     }
     await Promise.all(
       [...this.handles.values()].map(async (handle) => {
-        await handle.session?.close();
+        const session = handle.session;
+        delete handle.session;
+        await session?.close();
         await handle.task?.catch((error: unknown) =>
           this.log.warn({ err: error }, 'Agent initialization ended during shutdown'),
         );
+        await handle.steerTask;
         await handle.retiring;
       }),
     );

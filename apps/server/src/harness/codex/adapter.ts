@@ -109,7 +109,8 @@ class CodexSession implements HarnessSession {
   private sessionId: string | undefined;
   private client: NativeClient | undefined;
   private closing: Promise<void> | undefined;
-  private submissions = new Map<string, { accepted: boolean }>();
+  private submissions = new Map<string, { clientId: string; accepted: boolean }>();
+  private live = false;
   private pendingRejections: { id: HarnessRequestId; reason: string }[] = [];
   private approvals = new Map<
     HarnessRequestId,
@@ -121,7 +122,11 @@ class CodexSession implements HarnessSession {
     }
   >();
   private children = new Set<string>();
-  private mainTurnId: string | undefined;
+  private inputs = new Map<HarnessRequestId, { threadId: string; turnId: string }>();
+  private reasoning = new Map<
+    string,
+    { summary: Map<number, string>; content: Map<number, string> }
+  >();
   private fileChanges = new Map<string, string>();
   readonly handlers: NativeHandlers;
   constructor(
@@ -134,7 +139,8 @@ class CodexSession implements HarnessSession {
       notification: (method, params) => this.notification(method, params),
       request: (id, method, params) => this.question(id, method, params),
       exit: (error) => {
-        this.expireApprovals();
+        this.live = false;
+        this.expireRequests();
         output.exit(new Error(environment.redactor.text(error)));
       },
     };
@@ -180,6 +186,8 @@ class CodexSession implements HarnessSession {
     return parsed.thread.id;
   }
   async createSession(onCreated: (sessionId: string) => void) {
+    this.live = false;
+    this.children.clear();
     const response = await this.native().request('thread/start', {
       ...this.threadParams(),
       ephemeral: false,
@@ -198,9 +206,15 @@ class CodexSession implements HarnessSession {
         },
       ],
     });
-    return this.verifyGuidance(response);
+    const verified = this.verifyGuidance(response);
+    this.observeHistory(response);
+    if (this.closing) throw new Error('Codex 连接已关闭');
+    this.live = true;
+    return verified;
   }
   async resumeSession(sessionId: string) {
+    this.live = false;
+    this.children.clear();
     this.sessionId = sessionId;
     const response = await this.native().request('thread/resume', {
       ...this.threadParams(),
@@ -208,10 +222,14 @@ class CodexSession implements HarnessSession {
     });
     const id = z.object({ thread: z.object({ id: z.string().min(1) }) }).parse(response).thread.id;
     if (id !== sessionId) throw new Error('恢复返回了不同 thread，已拒绝继续执行。');
-    return this.verifyGuidance(response);
+    const verified = this.verifyGuidance(response);
+    this.observeHistory(response);
+    if (this.closing) throw new Error('Codex 连接已关闭');
+    this.live = true;
+    return verified;
   }
   async submit(input: HarnessTurnInput) {
-    const submission = { accepted: false };
+    const submission = { clientId: input.runId, accepted: false };
     this.submissions.set(input.sessionId, submission);
     try {
       const response = turnResponseSchema.parse(
@@ -234,7 +252,6 @@ class CodexSession implements HarnessSession {
               },
         }),
       );
-      this.mainTurnId = response.turn.id;
       return { turnId: response.turn.id };
     } catch (error) {
       if (error instanceof NativeRpcError && !submission.accepted)
@@ -246,7 +263,7 @@ class CodexSession implements HarnessSession {
     }
   }
   async interrupt(sessionId: string, turnId: string) {
-    this.expireApprovals(undefined, true);
+    this.expireRequests(undefined, true);
     await this.native().request('turn/interrupt', { threadId: sessionId, turnId });
   }
   async steer(input: HarnessSteerInput) {
@@ -280,10 +297,11 @@ class CodexSession implements HarnessSession {
       this.native().respond(requestId, this.approvalResponse(approval, allowed));
       return;
     }
-    if (answer.answers.permission) throw new Error('Codex 原生权限请求已失效');
+    if (!this.inputs.delete(requestId)) throw new Error('Codex 原生请求已失效');
     this.native().respond(requestId, answer);
   }
   rejectQuestion(requestId: HarnessRequestId, reason: string) {
+    this.inputs.delete(requestId);
     const approval = this.approvals.get(requestId);
     if (approval) {
       this.approvals.delete(requestId);
@@ -294,13 +312,39 @@ class CodexSession implements HarnessSession {
     else this.pendingRejections.push({ id: requestId, reason });
   }
   async close() {
-    this.expireApprovals(undefined, true);
+    this.live = false;
+    this.expireRequests(undefined, true);
     this.closing ??= this.client?.close() ?? Promise.resolve();
     await this.closing;
   }
-  private accepted(sessionId: string) {
+  private ownedThread(sessionId: string) {
+    return sessionId === this.sessionId || this.children.has(sessionId);
+  }
+  private observeItem(item: Record<string, unknown>) {
+    if (item.type === 'subAgentActivity' && typeof item.agentThreadId === 'string')
+      this.children.add(item.agentThreadId);
+  }
+  private observeHistory(response: unknown) {
+    const history = z
+      .object({
+        thread: z.object({
+          turns: z
+            .array(
+              z.object({
+                items: z.array(z.record(z.string(), z.unknown())),
+              }),
+            )
+            .optional(),
+        }),
+      })
+      .parse(response);
+    for (const turn of history.thread.turns ?? [])
+      for (const item of turn.items) this.observeItem(item);
+  }
+  private accepted(sessionId: string, item: Record<string, unknown>) {
     const submission = this.submissions.get(sessionId);
-    if (submission) submission.accepted = true;
+    if (submission && item.type === 'userMessage' && item.clientId === submission.clientId)
+      submission.accepted = true;
   }
   private notification(method: string, params: Record<string, unknown>) {
     if (method === 'thread/started') {
@@ -315,14 +359,24 @@ class CodexSession implements HarnessSession {
         this.children.add(thread.data.id);
       return;
     }
+    if (typeof params.threadId !== 'string' || !this.ownedThread(params.threadId)) return;
+    if (method === 'item/started' || method === 'item/completed') {
+      const item = z.record(z.string(), z.unknown()).safeParse(params.item);
+      if (item.success) this.observeItem(item.data);
+    }
+    // Initialization may replay history; only live notifications describe new work.
+    if (!this.live) return;
     if (method === 'serverRequest/resolved') {
-      if (typeof params.requestId === 'string' || typeof params.requestId === 'number')
-        this.expireApprovals(undefined, false, params.requestId);
+      if (
+        typeof params.threadId === 'string' &&
+        (typeof params.requestId === 'string' || typeof params.requestId === 'number')
+      )
+        this.expireRequests(params.threadId, false, params.requestId);
       return;
     }
     if (method === 'thread/tokenUsage/updated') {
       const parsed = tokenUsageNotificationSchema.safeParse(params);
-      if (!parsed.success || parsed.data.threadId !== this.sessionId) return;
+      if (!parsed.success) return;
       const { last, modelContextWindow } = parsed.data.tokenUsage;
       this.output.event({
         type: 'context_usage',
@@ -335,14 +389,23 @@ class CodexSession implements HarnessSession {
       const parsed = turnNotificationSchema.safeParse(params);
       if (!parsed.success) return;
       const { threadId: sessionId, turn } = parsed.data;
-      if (sessionId === this.sessionId && method === 'turn/started') this.mainTurnId = turn.id;
       if (method === 'turn/completed') {
-        if (sessionId === this.sessionId) {
-          this.expireApprovals();
-          this.fileChanges.clear();
-        } else this.expireApprovals(sessionId, false, undefined, turn.id);
+        this.expireRequests(sessionId, false, undefined, turn.id);
+        for (const key of this.fileChanges.keys())
+          if (key.startsWith(`${sessionId}:${turn.id}:`)) this.fileChanges.delete(key);
+        for (const key of this.reasoning.keys())
+          if (key.startsWith(`${sessionId}:${turn.id}:`)) this.reasoning.delete(key);
       }
-      this.accepted(sessionId);
+      const snapshot = z
+        .object({
+          items: z.array(z.record(z.string(), z.unknown())),
+        })
+        .safeParse(params.turn);
+      if (snapshot.success)
+        for (const item of snapshot.data.items) {
+          this.observeItem(item);
+          this.accepted(sessionId, item);
+        }
       this.output.event(
         method === 'turn/started'
           ? { type: 'turn_started', sessionId, turnId: turn.id }
@@ -364,7 +427,51 @@ class CodexSession implements HarnessSession {
     if (typeof params.threadId !== 'string') return;
     const sessionId = params.threadId;
     const turnId = typeof params.turnId === 'string' ? params.turnId : null;
-    if (method === 'item/agentMessage/delta' || method === 'item/commandExecution/outputDelta') {
+    if (
+      method === 'item/reasoning/summaryTextDelta' ||
+      method === 'item/reasoning/textDelta' ||
+      method === 'item/reasoning/summaryPartAdded'
+    ) {
+      if (typeof params.itemId !== 'string') return;
+      const summary = method !== 'item/reasoning/textDelta';
+      const index = summary ? params.summaryIndex : params.contentIndex;
+      if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return;
+      if (method !== 'item/reasoning/summaryPartAdded' && typeof params.delta !== 'string') return;
+      const key = `${sessionId}:${turnId}:${params.itemId}`;
+      let parts = this.reasoning.get(key);
+      if (!parts) {
+        parts = { summary: new Map(), content: new Map() };
+        this.reasoning.set(key, parts);
+      }
+      const section = summary ? parts.summary : parts.content;
+      section.set(
+        index,
+        (section.get(index) ?? '') + (typeof params.delta === 'string' ? params.delta : ''),
+      );
+      this.output.event({
+        type: 'item_delta',
+        sessionId,
+        turnId,
+        append: false,
+        item: {
+          id: params.itemId,
+          type: 'reasoning',
+          status: 'running',
+          text: this.environment.redactor.output(
+            [parts.summary, parts.content]
+              .flatMap((sections) =>
+                [...sections].sort(([a], [b]) => a - b).map(([, text]) => text),
+              )
+              .filter(Boolean)
+              .join('\n'),
+          ),
+        },
+      });
+    } else if (
+      method === 'item/agentMessage/delta' ||
+      method === 'item/commandExecution/outputDelta' ||
+      method === 'item/plan/delta'
+    ) {
       if (typeof params.itemId !== 'string' || typeof params.delta !== 'string') return;
       this.output.event({
         type: 'item_delta',
@@ -373,7 +480,12 @@ class CodexSession implements HarnessSession {
         append: true,
         item: {
           id: params.itemId,
-          type: method === 'item/agentMessage/delta' ? 'agentMessage' : 'commandExecution',
+          type:
+            method === 'item/agentMessage/delta'
+              ? 'agentMessage'
+              : method === 'item/plan/delta'
+                ? 'plan'
+                : 'commandExecution',
           status: 'running',
           text: this.environment.redactor.output(params.delta),
         },
@@ -385,11 +497,21 @@ class CodexSession implements HarnessSession {
         .safeParse(params.item);
       if (!parsed.success) return;
       const item = parsed.data;
+      this.accepted(sessionId, item);
       if (item.type === 'fileChange' && Array.isArray(item.changes))
-        this.fileChanges.set(`${sessionId}:${item.id}`, JSON.stringify(item.changes));
+        this.fileChanges.set(`${sessionId}:${turnId}:${item.id}`, JSON.stringify(item.changes));
       if (method === 'item/started' && (item.type === 'agentMessage' || item.type === 'reasoning'))
         return;
       const detail: string[] = [];
+      if (item.type === 'reasoning') {
+        for (const sections of [item.summary, item.content])
+          if (Array.isArray(sections))
+            detail.push(...sections.filter((text): text is string => typeof text === 'string'));
+        if (method === 'item/completed') this.reasoning.delete(`${sessionId}:${turnId}:${item.id}`);
+      }
+      if (item.type === 'subAgentActivity')
+        for (const key of ['kind', 'agentThreadId', 'agentPath', 'model', 'reasoningEffort'])
+          if (typeof item[key] === 'string') detail.push(`${key}: ${item[key]}`);
       for (const key of [
         'text',
         'command',
@@ -427,7 +549,8 @@ class CodexSession implements HarnessSession {
       const parsed = approvalRequestSchema.safeParse(params);
       if (
         !parsed.success ||
-        (parsed.data.threadId !== this.sessionId && !this.children.has(parsed.data.threadId)) ||
+        !this.live ||
+        !this.ownedThread(parsed.data.threadId) ||
         (method === 'item/permissions/requestApproval' && !parsed.data.permissions)
       ) {
         this.native().respond(
@@ -440,7 +563,6 @@ class CodexSession implements HarnessSession {
       }
       const request = parsed.data;
       this.approvals.set(id, { method, ...request });
-      this.accepted(request.threadId);
       this.output.question({
         requestId: id,
         sessionId: request.threadId,
@@ -455,7 +577,7 @@ class CodexSession implements HarnessSession {
               request.grantRoot,
               request.permissions ? JSON.stringify(request.permissions) : '',
               request.additionalPermissions ? JSON.stringify(request.additionalPermissions) : '',
-              this.fileChanges.get(`${request.threadId}:${request.itemId}`),
+              this.fileChanges.get(`${request.threadId}:${request.turnId}:${request.itemId}`),
             ]
               .filter(Boolean)
               .join('\n'),
@@ -465,12 +587,17 @@ class CodexSession implements HarnessSession {
       return;
     }
     const parsed = inputRequestSchema.safeParse(params);
-    if (method !== 'item/tool/requestUserInput' || !parsed.success) {
+    if (
+      method !== 'item/tool/requestUserInput' ||
+      !parsed.success ||
+      !this.live ||
+      !this.ownedThread(parsed.data.threadId)
+    ) {
       this.rejectQuestion(id, 'Isles does not support this native request');
       return;
     }
     const request = parsed.data;
-    this.accepted(request.threadId);
+    this.inputs.set(id, { threadId: request.threadId, turnId: request.turnId });
     this.output.question({
       requestId: id,
       sessionId: request.threadId,
@@ -509,7 +636,7 @@ class CodexSession implements HarnessSession {
       scope: 'turn',
     };
   }
-  private expireApprovals(
+  private expireRequests(
     threadId?: string,
     deny = false,
     requestId?: HarnessRequestId,
@@ -526,8 +653,24 @@ class CodexSession implements HarnessSession {
       if (deny && this.client) this.client.respond(id, this.approvalResponse(approval, false));
       this.output.event({
         type: 'question_expired',
-        sessionId: this.sessionId!,
-        turnId: this.mainTurnId ?? approval.turnId,
+        sessionId: approval.threadId,
+        turnId: approval.turnId,
+        requestId: id,
+      });
+    }
+    for (const [id, input] of this.inputs) {
+      if (
+        (threadId && input.threadId !== threadId) ||
+        (turnId && input.turnId !== turnId) ||
+        (requestId !== undefined && id !== requestId)
+      )
+        continue;
+      this.inputs.delete(id);
+      if (deny && this.client) this.client.reject(id, 'Codex input request cancelled');
+      this.output.event({
+        type: 'question_expired',
+        sessionId: input.threadId,
+        turnId: input.turnId,
         requestId: id,
       });
     }

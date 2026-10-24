@@ -1,4 +1,4 @@
-// Deliberately small projection of Codex CLI 0.161.0 generated protocol.
+// Deliberately small projection of Codex CLI 0.164.0 generated protocol.
 // Regenerate for comparison: codex app-server generate-ts --out /tmp/isles-protocol
 // Official wire format: https://learn.chatgpt.com/docs/app-server (JSONL, no jsonrpc header).
 import { questionDefinitionSchema } from '@isles/contracts';

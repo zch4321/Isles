@@ -49,8 +49,6 @@ interface PendingInput {
   timer: ReturnType<typeof setTimeout>;
 }
 interface Turn {
-  promptId: string;
-  // The public ID remains the first native turn throughout chained native phases.
   id?: string;
   currentPhaseId?: string;
   phases: Map<string, NativePhase>;
@@ -59,12 +57,12 @@ interface Turn {
   inputs: Map<string, PendingInput>;
 }
 interface NativePhase {
-  promptId: string;
+  promptId?: string;
   ended?: { status: 'completed' | 'interrupted' | 'failed'; error: string | null };
 }
 interface Child {
+  parentAgentId: string;
   turnId: string;
-  phaseId: string;
   name: string;
   model?: string;
 }
@@ -130,6 +128,9 @@ class KimiWebSession implements HarnessSession {
   private cursor = 0;
   private epoch?: string;
   private readonly children = new Map<string, Child>();
+  private readonly activities = new Map<string, NativePhase>();
+  private readonly currentTurns = new Map<string, string>();
+  private readonly interactionOwners = new Map<string, { agentId: string; turnId: string }>();
   private readonly childEvents = new Map<string, KimiWebEvent[]>();
   private readonly segments = new Map<string, Segment>();
   private readonly offsets = new Map<string, number>();
@@ -304,14 +305,14 @@ class KimiWebSession implements HarnessSession {
     );
     if (this.stopped || this.active || prompts.active || prompts.queued.length)
       throw new HarnessSubmissionRejected('Kimi Code 原生会话有待处理输入，请等待原执行结束');
+    const promptId = this.promptId(input.runId);
     const active: Turn = {
-      promptId: this.promptId(input.runId),
       inputs: new Map(),
       phases: new Map(),
       admitting: 0,
     };
     this.active = active;
-    return this.send(active, active.promptId, input.text);
+    return this.send(active, promptId, input.text);
   }
   async steer(input: HarnessSteerInput) {
     const active = this.active;
@@ -333,6 +334,7 @@ class KimiWebSession implements HarnessSession {
       this.active !== active ||
       this.stopped ||
       active.cancelling ||
+      !phase?.promptId ||
       phase?.ended ||
       prompts.active?.prompt_id !== phase?.promptId
     )
@@ -423,7 +425,9 @@ class KimiWebSession implements HarnessSession {
         !admitted &&
         (error instanceof HarnessSubmissionRejected ||
           (error instanceof KimiWebError &&
-            [40001, 40110, 40111, 40112, 40113, 40401].includes(error.code)));
+            // 2.3.1 refuses a write owned by another client before admitting it.
+            // Keep native ownership intact; the user can retry after it is released.
+            [40001, 40110, 40111, 40112, 40113, 40401, 40931].includes(error.code)));
       const reason = refused
         ? new HarnessSubmissionRejected(this.environment.redactor.text(error))
         : this.error(error);
@@ -462,7 +466,13 @@ class KimiWebSession implements HarnessSession {
     }
   }
   private event(frame: KimiWebEvent) {
-    if (this.stopped || (frame.session_id ?? frame.payload.sessionId) !== this.sessionId) return;
+    if (
+      this.stopped ||
+      (frame.session_id ?? frame.payload.sessionId) !== this.sessionId ||
+      (frame.payload.sessionId !== undefined && frame.payload.sessionId !== this.sessionId) ||
+      (frame.payload.session_id !== undefined && frame.payload.session_id !== this.sessionId)
+    )
+      return;
     if (
       frame.type === 'resync_required' ||
       (frame.epoch && this.epoch && frame.epoch !== this.epoch)
@@ -479,7 +489,13 @@ class KimiWebSession implements HarnessSession {
   private consume(frame: KimiWebEvent) {
     const payload = frame.payload;
     const agentId = payload.agentId ?? 'main';
-    const active = this.active;
+    if (typeof payload.agent_id === 'string' && payload.agent_id !== agentId) return;
+    if (agentId !== 'main' && !this.children.has(agentId)) {
+      const queued = this.childEvents.get(agentId) ?? [];
+      queued.push(frame);
+      this.childEvents.set(agentId, queued);
+      return;
+    }
     if (agentId === 'main' && frame.type === 'agent.status.updated') {
       const status = z
         .object({
@@ -501,70 +517,72 @@ class KimiWebSession implements HarnessSession {
       ['turn.step.completed', 'turn.ended', 'compaction.completed'].includes(frame.type)
     )
       void this.refreshContext();
-    if (!active) return;
-    if (agentId === 'main' && frame.type === 'turn.started') {
-      const data = z.object({ turnId: z.number().int(), promptId: z.string() }).parse(payload);
-      const receipt = active.inputs.get(data.promptId);
-      if (!receipt || receipt.cancelled || !this.owned.has(data.promptId)) return;
+    if (frame.type === 'turn.started') {
+      const data = z
+        .object({ turnId: z.number().int(), promptId: z.string().optional() })
+        .parse(payload);
       const phaseId = String(data.turnId);
-      const known = active.phases.get(phaseId);
+      const key = `${agentId}:${phaseId}`;
+      const known = this.activities.get(key);
       if (known) {
         if (known.promptId !== data.promptId)
           this.fail(new Error('Kimi Code 原生执行身份冲突，结果待核对'));
         return;
       }
-      if (receipt.accepted) {
-        this.fail(new Error('Kimi Code 已消费输入重复启动，结果待核对'));
-        return;
-      }
-      active.phases.set(phaseId, { promptId: data.promptId });
-      active.currentPhaseId = phaseId;
-      this.expireInteractions();
-      if (!active.id) {
-        active.id = phaseId;
-        this.handlers.event({
-          type: 'turn_started',
-          sessionId: this.sessionId!,
-          turnId: active.id,
+      const phase: NativePhase = data.promptId === undefined ? {} : { promptId: data.promptId };
+      this.activities.set(key, phase);
+      this.expireAgentInteractions(agentId);
+      this.currentTurns.set(agentId, phaseId);
+      if (agentId === 'main') {
+        const active: Turn = (this.active ??= {
+          inputs: new Map(),
+          phases: new Map(),
+          admitting: 0,
         });
+        active.phases.set(phaseId, phase);
+        active.currentPhaseId = phaseId;
+        active.id = phaseId;
       }
-      this.accept(active, data.promptId);
+      this.handlers.event({
+        type: 'turn_started',
+        sessionId: this.address(agentId),
+        turnId: phaseId,
+      });
+      if (agentId === 'main' && this.active && data.promptId)
+        this.accept(this.active, data.promptId, phaseId);
       return;
     }
+    const active = this.active;
     if (agentId === 'main' && frame.type === 'prompt.steered') {
       const data = z
         .object({ activePromptId: z.string(), promptIds: z.array(z.string()) })
         .parse(payload);
+      const phase = [...this.activities.entries()].find(
+        ([key, phase]) => key.startsWith('main:') && phase.promptId === data.activePromptId,
+      );
+      if (!active || !phase) return;
+      const phaseId = phase[0].slice('main:'.length);
       for (const id of data.promptIds) {
         const pending = active.inputs.get(id);
         if (!pending || pending.accepted || pending.cancelled) continue;
-        if (
-          !active.id ||
-          ![...active.phases.values()].some((phase) => phase.promptId === data.activePromptId) ||
-          pending.expectedTurnId !== active.id
-        ) {
-          this.fail(new Error('Kimi Code 追加输入进入了不同执行，结果待核对'));
-          return;
-        }
-        this.accept(active, id);
+        this.accept(active, id, phaseId);
       }
       return;
     }
     if (agentId === 'main' && frame.type === 'prompt.aborted') {
       const id = z.string().parse(payload.promptId);
-      const pending = active.inputs.get(id);
+      const pending = active?.inputs.get(id);
       if (pending && !pending.accepted && !pending.cancelled) {
         clearTimeout(pending.timer);
         pending.cancelled = true;
         pending.reject(new HarnessSubmissionRejected('Kimi Code 已取消待处理输入'));
       }
-      this.finish(active);
+      if (active) this.finish(active);
       return;
     }
-    if (!active.id) return;
-    if (agentId === 'main' && frame.type === 'turn.ended') {
-      const phaseId = String(payload.turnId);
-      const phase = active.phases.get(phaseId);
+    const phaseId = String(payload.turnId ?? payload.turn_id ?? this.currentTurns.get(agentId));
+    const phase = this.activities.get(`${agentId}:${phaseId}`);
+    if (frame.type === 'turn.ended') {
       if (!phase || phase.ended) return;
       const reason = z.enum(['completed', 'cancelled', 'failed', 'blocked']).parse(payload.reason);
       phase.ended = {
@@ -578,37 +596,43 @@ class KimiWebSession implements HarnessSession {
             : this.error(payload.error).message,
       };
       for (const [key, segment] of this.segments)
-        if (segment.phaseId === phaseId)
-          this.endSegment(key, active.id, segment.agentId, 'item', phase.ended.status);
-      if (phaseId === active.currentPhaseId) {
-        this.expireInteractions();
-      }
-      this.finish(active);
+        if (segment.agentId === agentId && segment.phaseId === phaseId)
+          this.endSegment(key, phaseId, agentId, 'item', phase.ended.status);
+      this.expireAgentInteractions(agentId, phaseId);
+      if (agentId === 'main' && active) this.finish(active);
+      this.handlers.event({
+        type: 'turn_completed',
+        sessionId: this.address(agentId),
+        turnId: phaseId,
+        ...phase.ended,
+      });
       return;
     }
-    const phaseId =
-      agentId === 'main'
-        ? String(payload.turnId ?? payload.turn_id ?? active.currentPhaseId)
-        : (this.children.get(agentId)?.phaseId ?? active.currentPhaseId!);
-    if (agentId === 'main' && (!active.phases.has(phaseId) || active.phases.get(phaseId)?.ended))
-      return;
     if (frame.type === 'subagent.spawned') {
       const childId = z.string().parse(payload.subagentId);
       const parent = typeof payload.parentAgentId === 'string' ? payload.parentAgentId : agentId;
-      if (parent !== 'main' && this.children.get(parent)?.turnId !== active.id) return;
+      if (parent !== agentId || childId === 'main' || childId === parent || !phase) return;
+      const known = this.children.get(childId);
+      if (known && known.parentAgentId !== parent) return;
       const child: Child = {
-        turnId: active.id,
-        phaseId,
+        parentAgentId: parent,
+        turnId: phaseId,
         name: z.string().parse(payload.subagentName),
         ...(typeof payload.model === 'string' ? { model: payload.model } : {}),
       };
       this.children.set(childId, child);
-      this.item(active.id, {
-        id: this.childItemId(childId, child),
-        type: 'subagent',
-        status: 'running',
-        text: `${this.childLabel(childId, child)}\n${kimiText(payload.description)}`,
-      });
+      this.item(
+        phaseId,
+        {
+          id: this.childItemId(childId, child),
+          type: 'subagent',
+          status: 'running',
+          text: `${this.childLabel(childId, child)}\n${kimiText(payload.description)}`,
+        },
+        'item',
+        false,
+        parent,
+      );
       const queued = this.childEvents.get(childId) ?? [];
       this.childEvents.delete(childId);
       for (const event of queued) this.consume(event);
@@ -617,40 +641,40 @@ class KimiWebSession implements HarnessSession {
     if (frame.type.startsWith('subagent.')) {
       const childId = z.string().parse(payload.subagentId);
       const child = this.children.get(childId);
-      if (!child || child.turnId !== active.id) return;
+      if (!child || child.parentAgentId !== agentId) return;
       const terminal = ['subagent.completed', 'subagent.failed', 'subagent.cancelled'].includes(
         frame.type,
       );
-      this.item(active.id, {
-        id: this.childItemId(childId, child),
-        type: 'subagent',
-        status:
-          frame.type === 'subagent.failed'
-            ? 'failed'
-            : frame.type === 'subagent.cancelled'
-              ? 'interrupted'
-              : terminal
-                ? 'completed'
-                : 'running',
-        text: `${this.childLabel(childId, child)}\n${kimiText(payload.resultSummary ?? payload.error ?? payload.reason ?? frame.type)}`,
-      });
+      this.item(
+        child.turnId,
+        {
+          id: this.childItemId(childId, child),
+          type: 'subagent',
+          status:
+            frame.type === 'subagent.failed'
+              ? 'failed'
+              : frame.type === 'subagent.cancelled'
+                ? 'interrupted'
+                : terminal
+                  ? 'completed'
+                  : 'running',
+          text: `${this.childLabel(childId, child)}\n${kimiText(payload.resultSummary ?? payload.error ?? payload.reason ?? frame.type)}`,
+        },
+        'item',
+        false,
+        child.parentAgentId,
+      );
       return;
     }
-    if (agentId !== 'main' && this.children.get(agentId)?.turnId !== active.id) {
-      if (!this.children.has(agentId)) {
-        const queued = this.childEvents.get(agentId) ?? [];
-        queued.push(frame);
-        this.childEvents.set(agentId, queued);
-      }
-      return;
-    }
+    if (!phase || phase.ended) return;
     if (frame.type === 'event.question.requested') {
-      if (phaseId !== active.currentPhaseId || active.phases.get(phaseId)?.ended) return;
+      if (phaseId !== this.currentTurns.get(agentId)) return;
       const question = kimiQuestionSchema.parse(payload);
       this.questions.set(question.question_id, question);
+      this.interactionOwners.set(question.question_id, { agentId, turnId: phaseId });
       this.handlers.question({
-        sessionId: this.sessionId!,
-        turnId: active.id,
+        sessionId: this.address(agentId),
+        turnId: phaseId,
         requestId: question.question_id,
         questions: question.questions.map((item) => ({
           id: item.id,
@@ -668,16 +692,21 @@ class KimiWebSession implements HarnessSession {
       return;
     }
     if (['event.question.answered', 'event.question.dismissed'].includes(frame.type)) {
-      this.expireInteractions([z.string().parse(payload.question_id)]);
+      this.expireNativeInteraction(z.string().parse(payload.question_id), agentId, phaseId);
       return;
     }
     if (frame.type === 'event.approval.resolved') {
-      this.expireInteractions([`approval:${z.string().parse(payload.approval_id)}`]);
+      this.expireNativeInteraction(
+        `approval:${z.string().parse(payload.approval_id)}`,
+        agentId,
+        phaseId,
+      );
       return;
     }
     if (frame.type === 'event.approval.requested') {
-      if (phaseId !== active.currentPhaseId || active.phases.get(phaseId)?.ended) return;
+      if (phaseId !== this.currentTurns.get(agentId)) return;
       const approval = kimiApprovalSchema.parse(payload);
+      this.interactionOwners.set(`approval:${approval.approval_id}`, { agentId, turnId: phaseId });
       const plan = z
         .object({
           kind: z.literal('plan_review'),
@@ -693,8 +722,8 @@ class KimiWebSession implements HarnessSession {
         const requestId = `approval:${approval.approval_id}`;
         this.approvals.set(requestId, { id: approval.approval_id, labels });
         this.handlers.question({
-          sessionId: this.sessionId!,
-          turnId: active.id,
+          sessionId: this.address(agentId),
+          turnId: phaseId,
           requestId,
           questions: [
             {
@@ -713,8 +742,8 @@ class KimiWebSession implements HarnessSession {
       const requestId = `approval:${approval.approval_id}`;
       this.approvals.set(requestId, { id: approval.approval_id, labels: [], permission: true });
       this.handlers.question({
-        sessionId: this.sessionId!,
-        turnId: active.id,
+        sessionId: this.address(agentId),
+        turnId: phaseId,
         requestId,
         questions: permissionQuestions(
           this.environment.redactor.output(
@@ -724,33 +753,48 @@ class KimiWebSession implements HarnessSession {
       });
       return;
     }
-    this.detail(active.id, agentId, phaseId, frame);
+    this.detail(phaseId, agentId, phaseId, frame);
   }
-  private accept(active: Turn, id: string) {
+  private accept(active: Turn, id: string, turnId: string) {
     const pending = active.inputs.get(id);
-    if (!pending || pending.accepted || pending.cancelled || !active.id) return;
-    pending.accepted = { turnId: active.id };
+    if (!pending || pending.accepted || pending.cancelled) return;
+    pending.accepted = { turnId };
     clearTimeout(pending.timer);
     pending.resolve(pending.accepted);
     this.finish(active);
   }
   private expireInteractions(requestIds = [...this.questions.keys(), ...this.approvals.keys()]) {
-    const turnId = this.active?.id;
     for (const requestId of requestIds) {
+      const owner = this.interactionOwners.get(requestId);
       const question = this.questions.delete(requestId);
       const approval = this.approvals.delete(requestId);
-      if (!this.stopped && !this.exitReported && turnId && (question || approval))
+      this.interactionOwners.delete(requestId);
+      if (!this.stopped && !this.exitReported && owner && (question || approval))
         this.handlers.event({
           type: 'question_expired',
-          sessionId: this.sessionId!,
-          turnId,
+          sessionId: this.address(owner.agentId),
+          turnId: owner.turnId,
           requestId,
         });
     }
   }
+  private address(agentId: string) {
+    return agentId === 'main' ? this.sessionId! : `${this.sessionId}/agents/${agentId}`;
+  }
+  private expireAgentInteractions(agentId: string, turnId?: string) {
+    this.expireInteractions(
+      [...this.interactionOwners]
+        .filter(([, owner]) => owner.agentId === agentId && (!turnId || owner.turnId === turnId))
+        .map(([id]) => id),
+    );
+  }
+  private expireNativeInteraction(requestId: string, agentId: string, turnId: string) {
+    const owner = this.interactionOwners.get(requestId);
+    if (owner?.agentId === agentId && owner.turnId === turnId) this.expireInteractions([requestId]);
+  }
   private detail(turnId: string, agentId: string, phaseId: string, frame: KimiWebEvent) {
     const payload = frame.payload;
-    const key = `${agentId}:${payload.turnId ?? phaseId}${agentId !== 'main' && phaseId !== turnId ? `:phase${phaseId}` : ''}`;
+    const key = `${agentId}:${turnId}`;
     if (frame.type === 'turn.step.started') {
       this.endSegment(key, turnId, agentId);
       this.offsets.delete(`${key}:agentMessage`);
@@ -786,6 +830,7 @@ class KimiWebSession implements HarnessSession {
         },
         'item_delta',
         append,
+        agentId,
       );
       return;
     }
@@ -833,26 +878,15 @@ class KimiWebSession implements HarnessSession {
         },
         frame.type === 'tool.progress' ? 'item_delta' : 'item',
         append,
+        agentId,
       );
     }
-    if (agentId !== 'main' && frame.type === 'turn.ended')
-      this.endSegment(
-        key,
-        turnId,
-        agentId,
-        'item',
-        payload.reason === 'cancelled'
-          ? 'interrupted'
-          : payload.reason === 'failed' || payload.reason === 'blocked'
-            ? 'failed'
-            : 'completed',
-      );
   }
   private childLabel(id: string, child: Child) {
     return `子代理 ${child.name} (${id})${child.model ? ` · ${child.model}` : ''}`;
   }
   private childItemId(id: string, child: Child) {
-    return `subagent:${child.phaseId === child.turnId ? '' : `${child.phaseId}:`}${id}`;
+    return `subagent:${child.turnId}:${id}`;
   }
   private prefix(agentId: string) {
     const child = this.children.get(agentId);
@@ -876,6 +910,8 @@ class KimiWebSession implements HarnessSession {
         text: this.prefix(agentId) + segment.text,
       },
       type,
+      false,
+      agentId,
     );
     this.segments.delete(key);
   }
@@ -884,10 +920,11 @@ class KimiWebSession implements HarnessSession {
     item: RunItem,
     type: 'item' | 'item_delta' = 'item',
     append = false,
+    agentId = 'main',
   ) {
     this.handlers.event({
       type,
-      sessionId: this.sessionId!,
+      sessionId: this.address(agentId),
       turnId,
       append,
       item: { ...item, text: this.environment.redactor.output(item.text) },
@@ -903,31 +940,7 @@ class KimiWebSession implements HarnessSession {
       [...active.phases.values()].some((phase) => !phase.ended)
     )
       return;
-    if (!active.id) {
-      this.active = undefined;
-      for (const id of active.inputs.keys()) this.owned.delete(id);
-      return;
-    }
-    // Preserve failures and interruption from earlier phases in the public run outcome.
-    const outcomes = [...active.phases.values()].map((phase) => phase.ended!);
-    const ended =
-      outcomes.find((outcome) => outcome.status === 'failed') ??
-      outcomes.find((outcome) => outcome.status === 'interrupted') ??
-      outcomes.at(-1)!;
-    for (const [key, segment] of this.segments)
-      this.endSegment(key, active.id, segment.agentId, 'item', ended.status);
-    this.expireInteractions();
     this.active = undefined;
-    this.tools.clear();
-    this.childEvents.clear();
-    this.children.clear();
-    this.offsets.clear();
-    this.handlers.event({
-      type: 'turn_completed',
-      sessionId: this.sessionId!,
-      turnId: active.id,
-      ...ended,
-    });
     for (const id of active.inputs.keys()) this.owned.delete(id);
   }
   private refreshContext() {
@@ -978,9 +991,11 @@ class KimiWebSession implements HarnessSession {
     const approval = this.approvals.get(String(requestId));
     if (approval) {
       if (approval.permission) {
-        if (!this.active?.id) throw new Error('Kimi Code 原生权限请求已失效');
+        if (!this.interactionOwners.has(String(requestId)))
+          throw new Error('Kimi Code 原生权限请求已失效');
         const allowed = permissionAllowed(answer);
         this.approvals.delete(String(requestId));
+        this.interactionOwners.delete(String(requestId));
         void this.native()
           .request('POST', this.path(`approvals/${encodeURIComponent(approval.id)}`), {
             decision: allowed ? 'approved' : 'rejected',
@@ -994,6 +1009,7 @@ class KimiWebSession implements HarnessSession {
       const approved = approval.labels.includes(label);
       const known = approved || label === 'Reject' || label === 'Revise';
       this.approvals.delete(String(requestId));
+      this.interactionOwners.delete(String(requestId));
       void this.native()
         .request('POST', this.path(`approvals/${encodeURIComponent(approval.id)}`), {
           decision: approved ? 'approved' : 'rejected',
@@ -1005,7 +1021,8 @@ class KimiWebSession implements HarnessSession {
     }
     if (answer.answers.permission) throw new Error('Kimi Code 原生权限请求已失效');
     const question = this.questions.get(String(requestId));
-    if (!question || !this.active?.id) throw new Error('Kimi Code 原生问题已失效');
+    if (!question || !this.interactionOwners.has(String(requestId)))
+      throw new Error('Kimi Code 原生问题已失效');
     const answers: Record<string, unknown> = {};
     for (const item of question.questions) {
       const values = answer.answers[item.id]?.answers;
@@ -1031,6 +1048,7 @@ class KimiWebSession implements HarnessSession {
       }
     }
     this.questions.delete(question.question_id);
+    this.interactionOwners.delete(question.question_id);
     void this.native()
       .request('POST', this.path(`questions/${encodeURIComponent(question.question_id)}`), {
         answers,
@@ -1042,6 +1060,7 @@ class KimiWebSession implements HarnessSession {
     const approval = this.approvals.get(String(requestId));
     if (approval && !this.stopped) {
       this.approvals.delete(String(requestId));
+      this.interactionOwners.delete(String(requestId));
       void this.native()
         .request('POST', this.path(`approvals/${encodeURIComponent(approval.id)}`), {
           decision: 'cancelled',
@@ -1052,6 +1071,7 @@ class KimiWebSession implements HarnessSession {
     const question = this.questions.get(String(requestId));
     if (!question || this.stopped) return;
     this.questions.delete(question.question_id);
+    this.interactionOwners.delete(question.question_id);
     void this.native()
       .request('POST', this.path(`questions/${encodeURIComponent(question.question_id)}:dismiss`))
       .catch((error: unknown) => {
@@ -1061,9 +1081,19 @@ class KimiWebSession implements HarnessSession {
   async interrupt(sessionId: string, turnId: string) {
     if (sessionId !== this.sessionId || this.active?.id !== turnId) return;
     this.active.cancelling = true;
-    const questions = [...this.questions.values()];
-    const approvals = [...this.approvals.values()];
-    await this.clearInputs();
+    const belongs = (id: string) => {
+      const owner = this.interactionOwners.get(id);
+      return owner?.agentId === 'main' && owner.turnId === turnId;
+    };
+    const questions = [...this.questions.values()].filter((q) => belongs(q.question_id));
+    const approvals = [...this.approvals.values()].filter((a) => belongs(`approval:${a.id}`));
+    const promptId = this.activities.get(`main:${turnId}`)?.promptId;
+    await this.clearInputs(promptId);
+    if (!promptId && this.currentTurns.get('main') === turnId)
+      await this.native().request(
+        'POST',
+        `/api/v1/sessions/${encodeURIComponent(this.sessionId!)}:abort`,
+      );
     await this.clearQuestions(questions, approvals);
   }
   private async clearQuestions(
@@ -1071,7 +1101,10 @@ class KimiWebSession implements HarnessSession {
     approvals = [...this.approvals.values()],
   ) {
     if (!this.client || !this.sessionId) return;
-    this.expireInteractions();
+    this.expireInteractions([
+      ...questions.map((question) => question.question_id),
+      ...approvals.map((approval) => `approval:${approval.id}`),
+    ]);
     for (const question of questions) {
       try {
         await this.client.request(
@@ -1095,13 +1128,13 @@ class KimiWebSession implements HarnessSession {
       }
     }
   }
-  private async clearInputs() {
+  private async clearInputs(activePromptId?: string) {
     if (!this.client || !this.sessionId) return;
     await Promise.allSettled(this.admissions);
     // Cancel queued inputs before the active prompt so none can launch on cancellation.
     const prompts = kimiPromptsSchema.parse(await this.client.request('GET', this.path('prompts')));
     const activeId = prompts.active?.prompt_id;
-    const ids = [...this.owned]
+    const ids = [...new Set([...this.owned, ...(activePromptId ? [activePromptId] : [])])]
       .filter((id) => {
         const receipt = this.active?.inputs.get(id);
         return (

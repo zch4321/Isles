@@ -110,7 +110,7 @@ describe('Claude application integration', () => {
     await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
     expect(app.isles.store.publicAgent(agent.id).threadId).toBe(binding);
   });
-  it('enables Claude steer and completes busy input in the same platform run and native session', async () => {
+  it('records native consumption of busy input and preserves the native session', async () => {
     const { app, cli } = await fixture();
     const result = await app.inject({
       method: 'POST',
@@ -153,7 +153,7 @@ describe('Claude application integration', () => {
     expect(app.isles.store.agentDetail(agent.id).runs).toHaveLength(1);
     expect(
       app.isles.store.listMessages(agent.channelId).map((message) => message.deliveries[0]!.status),
-    ).toEqual(['completed', 'completed']);
+    ).toEqual(['accepted', 'accepted']);
     const frames = await cli.records();
     const batchId = frames.filter((frame) => frame.type === 'user').at(-1)!.uuid as string;
     expect(app.isles.store.getSteer(batchId)).toMatchObject({
@@ -170,6 +170,62 @@ describe('Claude application integration', () => {
     expect(edited.json()).toMatchObject({ steerEnabled: false, threadId: binding });
     expect((await cli.records()).filter((frame) => frame.type === 'launch')).toHaveLength(launches);
   });
+  it('links queued steer to the native turn that consumes it after the first result', async () => {
+    const { app, cli } = await fixture();
+    const agent = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/agents',
+        payload: {
+          harness: 'claude',
+          name: 'Native queue',
+          model: 'default',
+          reasoningEffort: 'high',
+          steerEnabled: true,
+        },
+      })
+    ).json() as Agent;
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('ready'));
+    await cli.set({ holdTurn: true });
+    await app.inject({
+      method: 'POST',
+      url: `/api/channels/${agent.channelId}/messages`,
+      payload: { body: 'initial', clientId: randomUUID() },
+    });
+    await vi.waitFor(() => expect(app.isles.store.publicAgent(agent.id).status).toBe('running'));
+    const first = app.isles.store.agentDetail(agent.id).runs[0]!;
+    await cli.set({ finishBeforeSteer: true });
+    await app.inject({
+      method: 'POST',
+      url: `/api/channels/${agent.channelId}/messages`,
+      payload: { body: 'next native turn', clientId: randomUUID() },
+    });
+    await vi.waitFor(() =>
+      expect(
+        app.isles.store.agentDetail(agent.id).runs.filter((run) => run.status === 'completed'),
+      ).toHaveLength(2),
+    );
+    const frames = await cli.records();
+    const batchId = frames.filter((frame) => frame.type === 'user').at(-1)!.uuid as string;
+    const runs = app.isles.store.agentDetail(agent.id).runs;
+    expect(runs).toHaveLength(2);
+    expect(runs.find((run) => run.id === first.id)).toMatchObject({
+      inputs: [{ messageSeqs: [1] }],
+    });
+    expect(runs.find((run) => run.turnId === batchId)).toMatchObject({
+      inputs: [{ messageSeqs: [2] }],
+      threadId: first.threadId,
+    });
+    const messages = app.isles.store.listMessages(agent.channelId);
+    expect(messages.map((message) => message.deliveries[0]!.status)).toEqual([
+      'accepted',
+      'accepted',
+    ]);
+    expect(app.isles.store.getSteer(batchId)).toMatchObject({
+      status: 'accepted',
+    });
+  });
+
   it('keeps Claude busy input queued when steer is off', async () => {
     const { app, cli } = await fixture();
     const agent = (

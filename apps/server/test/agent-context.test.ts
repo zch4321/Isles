@@ -355,11 +355,15 @@ describe('Agent context and explicit new sessions', () => {
       { deliveries: [{ status: 'cancelled' }] },
       { seq: later.seq, deliveries: [{ status: 'queued' }] },
     ]);
-    // A stale admission confirmation cannot turn a cancelled delivery into accepted input.
+    // The receipt confirms the original input while the later message stays queued.
     f.app.isles.store.acceptRun(claimed!.run.id, 'late-old-turn');
     expect(f.app.isles.store.listMessages(f.agent.channelId)[0]!.deliveries).toEqual([
-      { agentId: f.agent.id, status: 'cancelled' },
+      { agentId: f.agent.id, status: 'accepted' },
     ]);
+    expect(f.app.isles.store.listMessages(f.agent.channelId)[2]!).toMatchObject({
+      seq: later.seq,
+      deliveries: [{ status: 'queued' }],
+    });
   });
 
   it('settles old steer admissions and expires their native questions at the boundary', async () => {
@@ -414,7 +418,7 @@ describe('Agent context and explicit new sessions', () => {
     f.app.isles.store.rejectSteer(batch.id, 'Late refusal');
     f.app.isles.store.acceptSteer(batch.id, 'stored-turn');
     expect(f.app.isles.store.listMessages(f.agent.channelId)[1]!.deliveries).toEqual([
-      { agentId: f.agent.id, status: 'cancelled' },
+      { agentId: f.agent.id, status: 'accepted' },
     ]);
   });
 

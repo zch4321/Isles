@@ -1,7 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
-/** A real stdio process replaying the CLI 2.1.285 wire shapes captured in native probes. */
+/** A real stdio process replaying CLI 2.1.310 wire shapes captured in native probes. */
 export async function claudeFixture(root: string) {
   const home = join(root, 'claude-home');
   await mkdir(home, { recursive: true });
@@ -16,7 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const readline = require('node:readline');
-if (process.argv.includes('--version')) { console.log('2.1.285 (Claude Code)'); process.exit(0); }
+if (process.argv.includes('--version')) { console.log('2.1.310 (Claude Code)'); process.exit(0); }
 const home = process.env.CLAUDE_CONFIG_DIR;
 const settings = () => JSON.parse(fs.readFileSync(path.join(home, 'fixture.json'), 'utf8'));
 if (process.argv.includes('auth')) { console.log(JSON.stringify({ loggedIn: !settings().unauthenticated, authMethod: 'oauth_token' })); process.exit(0); }
@@ -77,10 +78,17 @@ lines.on('line', (line) => {
     const request = frame.request;
     if (request.subtype === 'initialize') {
       if (config.blockInitialize) return;
-      response = { hooks_applied: true, models: [
-        { value: 'default', displayName: 'Default', supportsEffort: true, supportedEffortLevels: ['low', 'high', 'max'] },
-        { value: 'haiku', displayName: 'Haiku' },
-      ] };
+      response = {
+        claude_code_version: '2.1.310',
+        current_permission_mode: args.includes('--dangerously-skip-permissions') ? 'bypassPermissions' : value('--permission-mode') || 'default',
+        models: config.models ?? [
+          { value: 'default', resolvedModel: 'claude-opus-5-5', displayName: 'Default (recommended)' },
+          { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus' },
+          { value: 'fable', resolvedModel: 'claude-fable-5-1', displayName: 'Fable' },
+          { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5', displayName: 'Sonnet' },
+          { value: 'haiku', resolvedModel: 'claude-haiku-5-5', displayName: 'Haiku' },
+        ].map((model) => ({ ...model, supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], supportsAdaptiveThinking: true })),
+      };
     } else if (request.subtype === 'get_context_usage') {
       if (config.contextError) { send({ type: 'control_response', response: { subtype: 'error', request_id: frame.request_id, error: config.contextError } }); return; }
       response = { totalTokens: config.contextTokens ?? 1024, maxTokens: 200000, rawMaxTokens: 200000, memoryFiles: ['CLAUDE.md', ...(config.missingGuidance ? [] : ['AGENTS.md'])].map((name) => ({ path: path.join(process.cwd(), name), type: 'Project', tokens: 10 })) };
@@ -184,7 +192,15 @@ function begin(frame) {
     set: async (settings: Record<string, unknown>) => {
       const temporary = `${scenario}.tmp`;
       await writeFile(temporary, JSON.stringify(settings));
-      await rename(temporary, scenario);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await rename(temporary, scenario);
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EPERM' || attempt >= 20) throw error;
+          await sleep(5);
+        }
+      }
     },
     records: async () =>
       (await readFile(log, 'utf8').catch(() => ''))

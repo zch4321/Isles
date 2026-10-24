@@ -123,6 +123,215 @@ async function fixture() {
 }
 
 describe('Claude CLI adapter', () => {
+  it('records native turns and autonomous wakeups without an Isles input receipt', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const nativeId = randomUUID();
+    const wakeupId = randomUUID();
+    f.emit({ type: 'user', session_id: id, isReplay: true, uuid: randomUUID() });
+    f.emit({
+      type: 'assistant',
+      session_id: id,
+      isReplay: true,
+      uuid: randomUUID(),
+      message: { content: [] },
+    });
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(0);
+    f.emit({ type: 'command_lifecycle', state: 'started', session_id: id, command_uuid: nativeId });
+    f.emit({
+      type: 'result',
+      subtype: 'success',
+      session_id: id,
+      user_message_uuid: nativeId,
+      is_error: false,
+    });
+    f.emit({
+      type: 'assistant',
+      session_id: id,
+      uuid: wakeupId,
+      message: { content: [{ type: 'text', text: 'Automatic follow-up' }] },
+    });
+    f.emit({
+      type: 'result',
+      subtype: 'success',
+      session_id: id,
+      is_error: false,
+      origin: { kind: 'task-notification' },
+    });
+    expect(f.events.filter((event) => event.type === 'turn_started')).toEqual([
+      { type: 'turn_started', sessionId: id, turnId: nativeId },
+      { type: 'turn_started', sessionId: id, turnId: wakeupId },
+    ]);
+    expect(
+      f.events.filter((event) => event.type === 'turn_completed').map((event) => event.turnId),
+    ).toEqual([nativeId, wakeupId]);
+    expect(f.events).toContainEqual(
+      expect.objectContaining({
+        type: 'item',
+        turnId: wakeupId,
+        item: expect.objectContaining({ text: 'Automatic follow-up' }),
+      }),
+    );
+  });
+
+  it('keeps background output and questions attached to their native child after the root finishes', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    f.emit({
+      type: 'system',
+      subtype: 'task_started',
+      session_id: id,
+      task_id: 'native-child',
+      run_id: 'child-run',
+      tool_use_id: 'spawn-tool',
+    });
+    const childId = `${id}/agents/native-child`;
+    const child = { session_id: id, parent_tool_use_id: 'spawn-tool', agent_id: 'native-child' };
+    const questionInput = {
+      questions: [
+        {
+          question: 'Child choice?',
+          header: 'Child',
+          options: [
+            { label: 'One', description: 'First' },
+            { label: 'Two', description: 'Second' },
+          ],
+        },
+      ],
+    };
+    f.emit({
+      ...child,
+      type: 'assistant',
+      uuid: randomUUID(),
+      message: {
+        content: [
+          { type: 'tool_use', id: 'child-tool', name: 'AskUserQuestion', input: questionInput },
+        ],
+      },
+    });
+    f.requestNative('child-question', {
+      subtype: 'can_use_tool',
+      tool_name: 'AskUserQuestion',
+      tool_use_id: 'child-tool',
+      input: questionInput,
+    });
+    expect(f.questions[0]).toMatchObject({ sessionId: childId, turnId: 'child-run' });
+    f.emit({
+      type: 'result',
+      subtype: 'success',
+      session_id: id,
+      user_message_uuid: input.runId,
+      is_error: false,
+    });
+    expect(f.events.filter((event) => event.type === 'question_expired')).toHaveLength(0);
+    expect(() =>
+      session.answer('child-question', { answers: { 'question-0': { answers: ['One'] } } }),
+    ).not.toThrow();
+    const contexts = f.events.filter((event) => event.type === 'context_usage').length;
+    f.emit({
+      ...child,
+      type: 'assistant',
+      uuid: randomUUID(),
+      message: { content: [{ type: 'text', text: 'Background complete' }] },
+    });
+    f.emit({
+      type: 'system',
+      subtype: 'task_notification',
+      session_id: id,
+      task_id: 'native-child',
+      run_id: 'child-run',
+      status: 'completed',
+      summary: 'Child done',
+    });
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
+      expect.objectContaining({ sessionId: id, turnId: input.runId, status: 'completed' }),
+      expect.objectContaining({ sessionId: childId, turnId: 'child-run', status: 'completed' }),
+    ]);
+    expect(f.events).toContainEqual(
+      expect.objectContaining({
+        type: 'item',
+        sessionId: childId,
+        turnId: 'child-run',
+        item: expect.objectContaining({ text: 'Background complete' }),
+      }),
+    );
+    expect(f.events.filter((event) => event.type === 'context_usage')).toHaveLength(contexts);
+  });
+
+  it('keeps nested children separate and stops background work after the root result', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input('hold', id);
+    await session.submit(input);
+    f.emit({
+      type: 'system',
+      subtype: 'task_started',
+      session_id: id,
+      task_id: 'child',
+      run_id: 'child-run',
+      tool_use_id: 'spawn-child',
+    });
+    f.emit({
+      type: 'system',
+      subtype: 'task_started',
+      session_id: id,
+      parent_tool_use_id: 'spawn-child',
+      task_id: 'nested',
+      run_id: 'nested-run',
+      tool_use_id: 'spawn-nested',
+    });
+    f.emit({
+      type: 'result',
+      subtype: 'success',
+      session_id: id,
+      user_message_uuid: input.runId,
+      is_error: false,
+    });
+    f.emit({
+      type: 'assistant',
+      session_id: id,
+      parent_tool_use_id: 'unknown-child',
+      uuid: randomUUID(),
+      message: { content: [{ type: 'text', text: 'Unverified' }] },
+    });
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(3);
+    await session.interrupt(id, input.runId);
+    f.emit({
+      type: 'system',
+      subtype: 'task_notification',
+      session_id: id,
+      task_id: 'child',
+      status: 'stopped',
+    });
+    f.emit({
+      type: 'system',
+      subtype: 'task_notification',
+      session_id: id,
+      parent_tool_use_id: 'spawn-child',
+      task_id: 'nested',
+      status: 'stopped',
+    });
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
+      expect.objectContaining({ sessionId: id, status: 'completed' }),
+      expect.objectContaining({ sessionId: `${id}/agents/child`, status: 'interrupted' }),
+      expect.objectContaining({ sessionId: `${id}/agents/nested`, status: 'interrupted' }),
+    ]);
+    await session.close();
+    const before = f.events.length;
+    f.emit({
+      type: 'command_lifecycle',
+      state: 'started',
+      session_id: id,
+      command_uuid: randomUUID(),
+    });
+    expect(f.events).toHaveLength(before);
+  });
+
   it('keeps native dedicated interactions distinct from one-time tool approvals', async () => {
     const f = await fixture();
     const session = await f.connect();
@@ -391,16 +600,28 @@ describe('Claude CLI adapter', () => {
     expect(await f.adapter.catalog.status()).toMatchObject({
       authenticated: true,
       available: true,
-      version: '2.1.285 (Claude Code)',
+      version: '2.1.310 (Claude Code)',
     });
-    expect(await f.adapter.catalog.models()).toMatchObject([
-      {
-        model: 'default',
-        supportedReasoningEfforts: ['default', 'low', 'high', 'max'],
-        defaultReasoningEffort: 'default',
-      },
-      { model: 'haiku', supportedReasoningEfforts: ['default'] },
+    const models = await f.adapter.catalog.models();
+    expect(models.map((model) => model.model)).toEqual([
+      'default',
+      'opus',
+      'fable',
+      'sonnet',
+      'haiku',
     ]);
+    expect(models.map((model) => model.isDefault)).toEqual([true, false, false, false, false]);
+    for (const model of models) {
+      expect(model.supportedReasoningEfforts).toEqual([
+        'default',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+      expect(model.defaultReasoningEffort).toBe('default');
+    }
     expect((await f.cli.records()).filter((frame) => frame.type === 'user')).toEqual([]);
     await f.cli.set({ unauthenticated: true });
     f.adapter.invalidate();
@@ -408,6 +629,28 @@ describe('Claude CLI adapter', () => {
       available: true,
       authenticated: false,
     });
+  });
+  it('uses only native effort support for custom provider models', async () => {
+    const f = await fixture();
+    await f.cli.set({
+      models: [
+        { value: 'provider/no-effort', displayName: 'No effort' },
+        {
+          value: 'provider/custom-effort',
+          displayName: 'Custom effort',
+          supportsEffort: true,
+          supportedEffortLevels: ['high', 'ultracode'],
+        },
+      ],
+    });
+    expect(await f.adapter.catalog.models()).toMatchObject([
+      { model: 'provider/no-effort', isDefault: true, supportedReasoningEfforts: ['default'] },
+      {
+        model: 'provider/custom-effort',
+        isDefault: false,
+        supportedReasoningEfforts: ['default', 'high', 'ultracode'],
+      },
+    ]);
   });
   it('persists the ID before neutral initialization, blocks bootstrap tools, preserves user guidance, and resumes the exact session', async () => {
     const f = await fixture();
@@ -592,7 +835,7 @@ describe('Claude CLI adapter', () => {
       ).rejects.toBeInstanceOf(HarnessSubmissionRejected);
     },
   );
-  it('keeps the run open while input queued behind a finished turn runs as the next native turn', async () => {
+  it('publishes each native turn when queued input runs after the first result', async () => {
     const f = await fixture();
     const session = await f.connect();
     const id = await session.createSession(() => {});
@@ -602,15 +845,22 @@ describe('Claude CLI adapter', () => {
     const batchId = randomUUID();
     expect(
       await session.steer!({ sessionId: id, expectedTurnId: input.runId, batchId, text: 'late' }),
-    ).toEqual({ turnId: input.runId });
+    ).toEqual({ turnId: batchId });
     await vi.waitFor(() =>
-      expect(f.events).toContainEqual(expect.objectContaining({ type: 'turn_completed' })),
+      expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(2),
     );
     expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
       {
         type: 'turn_completed',
         sessionId: id,
         turnId: input.runId,
+        status: 'completed',
+        error: null,
+      },
+      {
+        type: 'turn_completed',
+        sessionId: id,
+        turnId: batchId,
         status: 'completed',
         error: null,
       },
@@ -621,9 +871,9 @@ describe('Claude CLI adapter', () => {
       ),
     ).toEqual([
       { turnId: input.runId, text: 'Original completed' },
-      { turnId: input.runId, text: 'Reply: late' },
+      { turnId: batchId, text: 'Reply: late' },
     ]);
-    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(1);
+    expect(f.events.filter((event) => event.type === 'turn_started')).toHaveLength(2);
     expect(f.output.exit).not.toHaveBeenCalled();
     await session.submit(f.input('next normal turn', id));
   });
@@ -646,11 +896,13 @@ describe('Claude CLI adapter', () => {
         expect.objectContaining({ type: 'result', user_message_uuid: input.runId }),
       ),
     );
-    expect(f.events.filter((event) => event.type === 'turn_completed')).toHaveLength(0);
+    expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
+      expect.objectContaining({ turnId: input.runId, status: 'completed' }),
+    ]);
     await session.interrupt(id, input.runId);
     await expect(pending).rejects.toBeInstanceOf(HarnessSubmissionRejected);
     expect(f.events.filter((event) => event.type === 'turn_completed')).toEqual([
-      expect.objectContaining({ turnId: input.runId, status: 'interrupted' }),
+      expect.objectContaining({ turnId: input.runId, status: 'completed' }),
     ]);
     expect(f.output.exit).not.toHaveBeenCalled();
   });
@@ -762,7 +1014,7 @@ describe('Claude CLI adapter', () => {
     expect(f.output.exit).not.toHaveBeenCalled();
     vi.useRealTimers();
     await f.cli.set({ releaseHeld: true });
-    await expect(pending).resolves.toEqual({ turnId: input.runId });
+    await expect(pending).resolves.toEqual({ turnId: batchId });
     await vi.waitFor(() =>
       expect(f.events).toContainEqual(
         expect.objectContaining({ type: 'turn_completed', status: 'completed' }),

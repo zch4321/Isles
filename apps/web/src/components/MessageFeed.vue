@@ -29,14 +29,13 @@ const nameOf = (message: Message) => senderName(message, props.directory);
 const excerpt = (body: string) => body.replace(/\s+/g, ' ').slice(0, 80);
 
 // Worst state first; a group message settles once no member is still waiting for it.
-const pending = ['uncertain', 'failed', 'queued', 'submitting', 'steering', 'accepted'] as const;
+const pending = ['uncertain', 'failed', 'queued', 'submitting', 'steering'] as const;
 const groupLabels = {
   uncertain: '待核对',
   failed: '部分投递失败',
   queued: '等待投递',
   submitting: '处理中',
   steering: '投递中',
-  accepted: '处理中',
 };
 function deliveryOf(message: Message) {
   if (message.sender !== 'user' || !message.deliveries.length) return undefined;
@@ -45,7 +44,12 @@ function deliveryOf(message: Message) {
     return { status, label: deliveryLabels[status] };
   }
   const status = pending.find((s) => message.deliveries.some((d) => d.status === s));
-  if (!status) return undefined;
+  if (!status)
+    return message.deliveries.every((delivery) =>
+      ['accepted', 'received'].includes(delivery.status),
+    )
+      ? { status: 'accepted' as const, label: '已送达' }
+      : undefined;
   const detail = message.deliveries
     .map((d) => `${props.directory.get(d.agentId)?.name ?? 'Agent'}：${deliveryLabels[d.status]}`)
     .join('\n');

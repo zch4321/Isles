@@ -70,6 +70,200 @@ async function fixture(steerEnabled?: boolean) {
 }
 
 describe('steer delivery storage', () => {
+  it.each(['completed', 'interrupted', 'failed', 'uncertain'] as const)(
+    'preserves a %s native activity when its question answer is persisted after completion',
+    async (status) => {
+      const f = await fixture(true);
+      const questionId = f.store.createQuestion(
+        f.agent.id,
+        f.run.id,
+        'turn-one',
+        'native-question',
+        [
+          {
+            id: 'choice',
+            header: 'Choice',
+            question: 'Choose a result',
+            isOther: true,
+            isSecret: false,
+            multiSelect: false,
+            options: null,
+          },
+        ],
+      );
+      expect(f.store.getRun(f.run.id).status).toBe('waiting');
+      // The native answer callback can end the turn before Runtime persists the answer.
+      f.store.finishRun(
+        f.run.id,
+        status,
+        status === 'interrupted' ? 'cancelled' : 'uncertain',
+        'native end',
+      );
+      const terminal = f.store.getRun(f.run.id);
+      const answers = { answers: { choice: { answers: ['result'] } } };
+      f.store.answerQuestion(questionId, answers);
+      expect(f.store.getQuestion(questionId)).toMatchObject({
+        status: 'answered',
+        answer: JSON.stringify(answers),
+      });
+      expect(f.store.getRun(f.run.id)).toEqual(terminal);
+    },
+  );
+
+  it('resumes a live waiting activity after its final question is answered', async () => {
+    const f = await fixture(true);
+    const questionId = f.store.createQuestion(f.agent.id, f.run.id, 'turn-one', 'native-question', [
+      {
+        id: 'choice',
+        header: 'Choice',
+        question: 'Choose a result',
+        isOther: true,
+        isSecret: false,
+        multiSelect: false,
+        options: null,
+      },
+    ]);
+    f.store.answerQuestion(questionId, { answers: { choice: { answers: ['result'] } } });
+    expect(f.store.getRun(f.run.id)).toMatchObject({ status: 'running', finishedAt: null });
+  });
+
+  it('observes autonomous activity once without claiming queued messages or changing Agent state', async () => {
+    const f = await fixture(true);
+    const queued = f.send();
+    f.store.updateAgent(f.agent.id, { desiredState: 'stopped', status: 'stopped' });
+    const cursor = f.store.cursor();
+    const observed = f.store.observeRun(f.agent.id, 'native-thread', 'automatic-turn');
+    expect(observed).toMatchObject({
+      status: 'running',
+      turnId: 'automatic-turn',
+      inputs: [],
+      items: [],
+    });
+    expect(f.store.observeRun(f.agent.id, 'native-thread', 'automatic-turn')).toEqual(observed);
+    expect(f.store.eventsAfter(cursor).filter((event) => event.type === 'run')).toHaveLength(1);
+    expect(f.store.findNativeRun(f.agent.id, 'native-thread', 'automatic-turn')).toEqual(observed);
+    expect(f.store.findNativeRun(f.agent.id, 'other-session', 'automatic-turn')).toBeUndefined();
+    expect(f.store.findNativeRun(randomUUID(), 'native-thread', 'automatic-turn')).toBeUndefined();
+    expect(f.status(queued)).toBe('queued');
+    expect(f.store.getAgent(f.agent.id)).toMatchObject({
+      desiredState: 'stopped',
+      status: 'stopped',
+    });
+    f.store.finishRun(observed.id, 'failed', 'failed', 'background failure');
+    expect(f.store.observeRun(f.agent.id, 'native-thread', 'automatic-turn').status).toBe('failed');
+    expect(f.status(queued)).toBe('queued');
+  });
+
+  it.each(['completed', 'interrupted', 'failed', 'uncertain'] as const)(
+    'keeps delivered messages accepted after a %s activity',
+    async (status) => {
+      const f = await fixture(true);
+      const message = f.send();
+      const batch = f.claim()!;
+      f.store.acceptSteer(batch.id, 'turn-one');
+      f.store.finishRun(f.run.id, status, status === 'interrupted' ? 'cancelled' : 'uncertain');
+      expect(f.status(message)).toBe('accepted');
+      const first = f.store.getRun(f.run.id).inputs[0]!;
+      expect(f.status({ channelId: first.channelId, seq: first.messageSeqs[0]! })).toBe('accepted');
+      expect(f.store.getRun(f.run.id).status).toBe(status);
+    },
+  );
+
+  it.each(['completed', 'interrupted', 'failed', 'uncertain'] as const)(
+    'records a late initial receipt without reopening a %s activity',
+    async (status) => {
+      const f = await fixture(true);
+      f.store.finishRun(f.run.id, 'completed', 'uncertain');
+      const message = f.send();
+      const next = f.store.startRun(f.agent.id, 'native-thread')!.run;
+      f.store.updateAgent(f.agent.id, { desiredState: 'stopped', status: 'stopped' });
+      f.store.finishRun(
+        next.id,
+        status,
+        status === 'interrupted' ? 'cancelled' : 'uncertain',
+        'terminal',
+      );
+      const terminal = f.store.getRun(next.id);
+      f.store.acceptRun(next.id, 'late-turn');
+      expect(f.store.getRun(next.id)).toMatchObject({
+        status,
+        error: terminal.error,
+        finishedAt: terminal.finishedAt,
+        turnId: 'late-turn',
+      });
+      expect(f.status(message)).toBe('accepted');
+      expect(f.store.getAgent(f.agent.id)).toMatchObject({
+        desiredState: 'stopped',
+        status: 'stopped',
+      });
+      expect(() => f.store.acceptRun(next.id, 'other-turn')).toThrow('turn');
+    },
+  );
+
+  it('binds a confirmed steer to its actual native activity and retains the target audit', async () => {
+    const f = await fixture(true);
+    const message = f.send();
+    const batch = f.claim()!;
+    f.store.finishRun(f.run.id, 'completed', 'uncertain');
+    const actual = f.store.observeRun(f.agent.id, 'native-thread', 'automatic-next');
+    f.store.finishRun(actual.id, 'failed', 'failed', 'model failed after receipt');
+    f.store.acceptSteer(batch.id, 'automatic-next', actual.id);
+    expect(f.delivery(message)).toMatchObject({
+      status: 'accepted',
+      run_id: actual.id,
+      turn_id: 'automatic-next',
+      steer_id: batch.id,
+    });
+    expect(f.store.getRun(actual.id)).toMatchObject({
+      status: 'failed',
+      inputs: [{ channelId: message.channelId, messageSeqs: [message.seq] }],
+    });
+    expect(f.store.getRun(f.run.id).inputs.flatMap((input) => input.messageSeqs)).not.toContain(
+      message.seq,
+    );
+    expect(f.store.getSteer(batch.id)).toMatchObject({
+      runId: f.run.id,
+      turnId: 'turn-one',
+      status: 'accepted',
+    });
+  });
+
+  it('does not accept a steer receipt from another root session', async () => {
+    const f = await fixture(true);
+    const message = f.send();
+    const batch = f.claim()!;
+    const other = f.store.observeRun(f.agent.id, 'different-session', 'other-turn');
+    expect(() => f.store.acceptSteer(batch.id, 'other-turn', other.id)).toThrow('turn');
+    expect(f.status(message)).toBe('steering');
+  });
+
+  it.each(['delete-agent', 'delete-group', 'new-session'] as const)(
+    'retains confirmed delivery facts after %s',
+    async (action) => {
+      const f = await fixture(true);
+      const group = f.store.createGroup('user', 'confirmed delivery', [f.agent.id]);
+      f.store.receiveMessages(f.agent.id, { limit: 100 });
+      const message = f.send(group.id);
+      f.store.acceptSteer(f.claim()!.id, 'turn-one');
+      if (action === 'delete-agent') f.store.deleteAgent(f.agent.id);
+      else if (action === 'delete-group') f.store.deleteGroup(group.id);
+      else f.store.beginNewSession(f.agent.id);
+      expect(f.status(message)).toBe('accepted');
+    },
+  );
+
+  it('confirms only included steer references after their group membership was removed', async () => {
+    const f = await fixture(true);
+    const group = f.store.createGroup('user', 'trimmed delivery', [f.agent.id]);
+    f.store.receiveMessages(f.agent.id, { limit: 100 });
+    const messages = Array.from({ length: 14 }, () => f.send(group.id));
+    const batch = f.claim()!;
+    f.store.removeMember(group.id, f.agent.id);
+    f.store.acceptSteer(batch.id, 'turn-one');
+    for (const message of messages.slice(0, 4)) expect(f.status(message)).toBe('cancelled');
+    for (const message of messages.slice(4)) expect(f.status(message)).toBe('accepted');
+  });
+
   it('defaults steering off, allows editing it, and refuses wrong or terminal run targets', async () => {
     const f = await fixture();
     const message = f.send();
@@ -93,7 +287,7 @@ describe('steer delivery storage', () => {
     f.store.updateAgent(f.agent.id, { desiredState: 'stopped' });
     expect(f.claim()).toBeUndefined();
     f.store.updateAgent(f.agent.id, { desiredState: 'running' });
-    f.store.finishRun(f.run.id, 'completed', 'completed');
+    f.store.finishRun(f.run.id, 'completed', 'uncertain');
     expect(f.claim()).toBeUndefined();
     expect(f.status(message)).toBe('queued');
   });
@@ -133,16 +327,16 @@ describe('steer delivery storage', () => {
     const f = await fixture(true);
     const message = f.send();
     const batch = f.claim()!;
-    f.store.finishRun(f.run.id, 'completed', 'completed');
+    f.store.finishRun(f.run.id, 'completed', 'uncertain');
     expect(f.status(message)).toBe('steering');
     expect(f.store.getSteer(batch.id).status).toBe('pending');
     expect(() => f.store.acceptSteer(batch.id, 'wrong-turn')).toThrow('turn');
     expect(f.status(message)).toBe('steering');
     f.store.acceptSteer(batch.id, 'turn-one');
-    expect(f.status(message)).toBe('completed');
+    expect(f.status(message)).toBe('accepted');
     expect(f.store.getSteer(batch.id).status).toBe('accepted');
     f.store.rejectSteer(batch.id, 'late rejection');
-    expect(f.status(message)).toBe('completed');
+    expect(f.status(message)).toBe('accepted');
     expect(f.store.startRun(f.agent.id, 'native-thread')).toBeUndefined();
   });
 
@@ -150,7 +344,7 @@ describe('steer delivery storage', () => {
     const f = await fixture(true);
     const message = f.send();
     const batch = f.claim()!;
-    f.store.finishRun(f.run.id, 'completed', 'completed');
+    f.store.finishRun(f.run.id, 'completed', 'uncertain');
     f.store.rejectSteer(batch.id, 'turn already finished');
     expect(f.delivery(message)).toEqual({
       status: 'queued',
@@ -180,25 +374,25 @@ describe('steer delivery storage', () => {
     f.store.finishRun(f.run.id, 'failed', 'failed', 'model failure');
     expect(f.status(message)).toBe('steering');
     f.store.acceptSteer(batch.id, 'turn-one');
-    expect(f.status(message)).toBe('failed');
+    expect(f.status(message)).toBe('accepted');
   });
 
-  it('does not requeue unknown outcomes or let a late result override them', async () => {
+  it('records a late confirmed receipt without requeueing an unknown outcome', async () => {
     const f = await fixture(true);
     const message = f.send();
     const batch = f.claim()!;
     f.store.uncertainSteer(batch.id, 'connection lost');
     f.store.rejectSteer(batch.id, 'late rejection');
     f.store.acceptSteer(batch.id, 'turn-one');
-    expect(f.status(message)).toBe('uncertain');
-    expect(f.store.getSteer(batch.id).status).toBe('uncertain');
+    expect(f.status(message)).toBe('accepted');
+    expect(f.store.getSteer(batch.id).status).toBe('accepted');
     expect(f.store.receiveMessages(f.agent.id, { limit: 100 }).input).toEqual([]);
-    f.store.finishRun(f.run.id, 'completed', 'completed');
+    f.store.finishRun(f.run.id, 'completed', 'uncertain');
     expect(f.store.startRun(f.agent.id, 'native-thread')).toBeUndefined();
   });
 
   it.each(['stop', 'shutdown', 'delete-agent', 'stop-after-complete'] as const)(
-    'settles pending batches without late ACK resurrection (%s)',
+    'keeps the run terminal while a late receipt confirms delivery (%s)',
     async (action) => {
       const f = await fixture(true);
       const message = f.send();
@@ -207,16 +401,19 @@ describe('steer delivery storage', () => {
       else if (action === 'shutdown')
         f.store.finishRun(f.run.id, 'uncertain', 'uncertain', 'shutdown');
       else {
-        if (action === 'stop-after-complete') f.store.finishRun(f.run.id, 'completed', 'completed');
+        if (action === 'stop-after-complete') f.store.finishRun(f.run.id, 'completed', 'uncertain');
         f.store.updateAgent(f.agent.id, { desiredState: 'stopped', status: 'stopped' });
         f.store.finishRun(f.run.id, 'interrupted', 'cancelled');
       }
-      const expected = action === 'shutdown' ? 'uncertain' : 'cancelled';
+      const expected = action === 'delete-agent' ? 'cancelled' : 'uncertain';
       expect(f.status(message)).toBe(expected);
       expect(f.store.getSteer(batch.id).status).toBe('uncertain');
       f.store.acceptSteer(batch.id, 'turn-one');
       f.store.rejectSteer(batch.id, 'late refusal');
-      expect(f.status(message)).toBe(expected);
+      expect(f.status(message)).toBe('accepted');
+      expect(f.store.getAgent(f.agent.id).desiredState).toBe(
+        action === 'shutdown' ? 'running' : 'stopped',
+      );
     },
   );
 
@@ -225,25 +422,22 @@ describe('steer delivery storage', () => {
     ['delete-group', 'reject'],
     ['remove-member', 'accept'],
     ['remove-member', 'reject'],
-  ] as const)(
-    'keeps cancelled group input terminal after %s and late %s',
-    async (action, outcome) => {
-      const f = await fixture(true);
-      const group = f.store.createGroup('user', 'group', [f.agent.id]);
-      f.store.receiveMessages(f.agent.id, { limit: 100 });
-      const message = f.send(group.id);
-      const privateMessage = f.send();
-      const batch = f.claim()!;
-      if (action === 'delete-group') f.store.deleteGroup(group.id);
-      else f.store.removeMember(group.id, f.agent.id);
-      expect(f.status(message)).toBe('cancelled');
-      if (outcome === 'accept') f.store.acceptSteer(batch.id, 'turn-one');
-      else f.store.rejectSteer(batch.id, 'late refusal');
-      f.store.markMessagesReceived(f.agent.id, [message]);
-      expect(f.status(message)).toBe('cancelled');
-      expect(f.status(privateMessage)).toBe(outcome === 'accept' ? 'accepted' : 'queued');
-    },
-  );
+  ] as const)('records confirmed group delivery after %s and late %s', async (action, outcome) => {
+    const f = await fixture(true);
+    const group = f.store.createGroup('user', 'group', [f.agent.id]);
+    f.store.receiveMessages(f.agent.id, { limit: 100 });
+    const message = f.send(group.id);
+    const privateMessage = f.send();
+    const batch = f.claim()!;
+    if (action === 'delete-group') f.store.deleteGroup(group.id);
+    else f.store.removeMember(group.id, f.agent.id);
+    expect(f.status(message)).toBe('cancelled');
+    if (outcome === 'accept') f.store.acceptSteer(batch.id, 'turn-one');
+    else f.store.rejectSteer(batch.id, 'late refusal');
+    f.store.markMessagesReceived(f.agent.id, [message]);
+    expect(f.status(message)).toBe(outcome === 'accept' ? 'accepted' : 'cancelled');
+    expect(f.status(privateMessage)).toBe(outcome === 'accept' ? 'accepted' : 'queued');
+  });
 
   it('does not revive trimmed skipped references after membership revocation', async () => {
     const f = await fixture(true);
@@ -281,8 +475,8 @@ describe('steer delivery storage', () => {
       messages.slice(-10).map((m) => m.seq),
     );
     f.store.acceptSteer(retried.id, 'turn-one');
-    f.store.finishRun(f.run.id, 'completed', 'completed');
-    for (const message of messages.slice(-10)) expect(f.status(message)).toBe('completed');
+    f.store.finishRun(f.run.id, 'completed', 'uncertain');
+    for (const message of messages.slice(-10)) expect(f.status(message)).toBe('accepted');
     expect(f.status(pausedMessage)).toBe('queued');
   });
 
@@ -345,8 +539,8 @@ describe('steer delivery storage', () => {
     expect(f.status(groupMessage)).toBe('queued');
     expect(f.status(privateMessage)).toBe('steering');
     f.store.acceptSteer(batch.id, 'turn-one');
-    f.store.finishRun(f.run.id, 'completed', 'completed');
-    expect(f.status(privateMessage)).toBe('completed');
+    f.store.finishRun(f.run.id, 'completed', 'uncertain');
+    expect(f.status(privateMessage)).toBe('accepted');
     expect(f.status(groupMessage)).toBe('queued');
   });
 
@@ -356,7 +550,7 @@ describe('steer delivery storage', () => {
       const f = await fixture(true);
       const message = f.send();
       const batch = f.claim()!;
-      if (state === 'completed') f.store.finishRun(f.run.id, 'completed', 'completed');
+      if (state === 'completed') f.store.finishRun(f.run.id, 'completed', 'uncertain');
       const recovered = f.reopen();
       recovered.recoverOnBoot();
       expect(recovered.getSteer(batch.id)).toMatchObject({
@@ -367,7 +561,7 @@ describe('steer delivery storage', () => {
       expect(f.status(message)).toBe('uncertain');
       recovered.acceptSteer(batch.id, 'turn-one');
       recovered.rejectSteer(batch.id, 'late refusal');
-      expect(f.status(message)).toBe('uncertain');
+      expect(f.status(message)).toBe('accepted');
       expect(recovered.startRun(f.agent.id, 'native-thread')).toBeUndefined();
     },
   );
@@ -378,7 +572,7 @@ describe('steer delivery storage', () => {
       const f = await fixture(true);
       const message = f.send();
       const batch = f.claim()!;
-      f.store.finishRun(f.run.id, 'completed', 'completed');
+      f.store.finishRun(f.run.id, 'completed', 'uncertain');
       if (state === 'deleted') f.store.deleteAgent(f.agent.id);
       else f.store.updateAgent(f.agent.id, { desiredState: 'stopped', status: 'stopped' });
       const recovered = f.reopen();
