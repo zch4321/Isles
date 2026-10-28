@@ -222,6 +222,7 @@ const agent: AgentRecord = {
   model: 'default',
   reasoningEffort: 'high',
   workspace: join(root, 'workspace'),
+  workspacePaths: [],
   nativeHome: home,
   threadId: null,
   threadCreationAttempted: false,

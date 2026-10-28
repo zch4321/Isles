@@ -1,6 +1,6 @@
 import { ConfigManager } from '@isles/config';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -41,6 +41,7 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
     model: 'kimi-code/k3',
     reasoningEffort: 'high',
     workspace: join(root, 'workspace'),
+    workspacePaths: [],
     nativeHome: cli.home,
     threadId: null,
     threadCreationAttempted: false,
@@ -197,12 +198,21 @@ describe('Kimi Code discovery', () => {
 describe('Kimi Code ACP adapter', () => {
   it('uses declared ordinary/full modes and resets full access on resume', async () => {
     const f = await fixture({ dangerFullAccess: true });
+    f.agent.workspacePaths = await Promise.all(
+      ['external one', 'external-two'].map(async (name) => {
+        const path = join(f.root, name);
+        await mkdir(path);
+        return realpath(path);
+      }),
+    );
+    const workspacePaths = [f.workspace.sharedDir, ...f.agent.workspacePaths];
     const first = await f.created();
     expect(
       (await f.frames('session/set_config_option')).map((frame) => frame.params),
     ).toContainEqual({ sessionId: first.id, configId: 'mode', value: 'yolo' });
     expect((await f.frames('session/new'))[0]?.params).toMatchObject({
-      additionalDirectories: [f.workspace.sharedDir],
+      cwd: f.agent.workspace,
+      additionalDirectories: workspacePaths,
     });
     await first.session.close();
     await f.cli.set({ initialMode: 'yolo' });
@@ -213,7 +223,8 @@ describe('Kimi Code ACP adapter', () => {
       (await f.frames('session/set_config_option')).map((frame) => frame.params).at(-2),
     ).toMatchObject({ configId: 'mode', value: 'default' });
     expect((await f.frames('session/resume'))[0]?.params).toMatchObject({
-      additionalDirectories: [f.workspace.sharedDir],
+      cwd: f.agent.workspace,
+      additionalDirectories: workspacePaths,
     });
   });
 
@@ -234,6 +245,21 @@ describe('Kimi Code ACP adapter', () => {
     await f.created();
     expect((await f.frames('session/new'))[0]?.params).not.toHaveProperty('additionalDirectories');
   });
+
+  it.each(['create', 'resume'])(
+    'reports missing additional-directory capability on %s',
+    async (method) => {
+      const f = await fixture();
+      f.agent.workspacePaths = [await realpath(f.root)];
+      await f.cli.set({ noAdditionalDirectories: true });
+      const session = await f.connect();
+      await expect(
+        method === 'create' ? session.createSession(() => {}) : session.resumeSession('existing'),
+      ).rejects.toThrow('additionalDirectories');
+      expect(await f.frames('session/new')).toEqual([]);
+      expect(await f.frames('session/resume')).toEqual([]);
+    },
+  );
 
   it('declines native permissions and expires pending requests on interruption', async () => {
     const f = await fixture();

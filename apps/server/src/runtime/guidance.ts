@@ -10,15 +10,21 @@ const quote = (value: string) =>
   JSON.stringify(value).replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
 
 /** Update only the managed section, keeping user guidance before/after it byte-for-byte. */
-export async function prepareGuidance(agent: AgentRecord, sharedDir: string) {
+export async function prepareGuidance(
+  agent: Pick<AgentRecord, 'name' | 'workspace' | 'workspacePaths' | 'dangerFullAccess'>,
+  sharedDir: string,
+) {
   const template = await readFile(templateUrl, 'utf8');
   const values: Record<string, string> = {
     AGENT_NAME: quote(agent.name),
     WORKSPACE: quote(agent.workspace),
     SHARED_DIR: quote(sharedDir),
+    ADDITIONAL_WORKSPACES: agent.workspacePaths.length
+      ? agent.workspacePaths.map((path) => `- ${quote(path)}`).join('\n')
+      : 'Add project directories in Agent settings to include them here.',
     EXECUTION_ACCESS: agent.dangerFullAccess
       ? 'Native execution uses full access.'
-      : "Native execution uses the harness's native permissions. The personal and shared workspace directories are supplied to the harness. Follow its native permission prompts for operations that require approval.",
+      : "Native execution uses the harness's native permissions. The personal, shared and additional workspace directories are supplied to the harness. Follow its native permission prompts for operations that require approval.",
   };
   const content = template.replace(/\{\{([A-Z_]+)\}\}/g, (_match, key: string) => {
     if (values[key] === undefined) throw new Error(`Unknown guidance placeholder: ${key}`);

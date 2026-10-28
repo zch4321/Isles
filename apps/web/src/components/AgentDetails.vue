@@ -4,7 +4,13 @@ import { useMutation, useQueryClient } from '@tanstack/vue-query';
 import { ChartPie, Check, Copy, LoaderCircle, Pencil, SquareTerminal, Trash2 } from '@lucide/vue';
 import { computed, onBeforeUnmount, ref } from 'vue';
 import { updateAgent } from '@/api/isles';
-import { invalidateAll, useChannels, useHarnessName, useHarnessCapability } from '@/api/queries';
+import {
+  invalidateAll,
+  useChannels,
+  useHarnessName,
+  useHarnessCapability,
+  useWorkspaceSettings,
+} from '@/api/queries';
 import ParticipantAvatar from './ParticipantAvatar.vue';
 import RunCard from './RunCard.vue';
 import StatusBadge from './StatusBadge.vue';
@@ -21,6 +27,7 @@ defineEmits<{ deleted: [] }>();
 
 const queryClient = useQueryClient();
 const channels = useChannels();
+const workspaceSettings = useWorkspaceSettings();
 const harnessName = useHarnessName(() => props.agent.harness);
 const supportsSteer = useHarnessCapability(() => props.agent.harness, 'steer');
 const editOpen = ref(false);
@@ -161,6 +168,34 @@ function inputs(run: Run) {
         每个 Agent
         在私聊和所有群中共用一个原生会话，拥有独立的上下文和工作目录。原生配置、插件和长期记忆由
         {{ harnessName }} 管理。
+      </p>
+    </section>
+    <section class="grid gap-3 border-b border-line p-4">
+      <h3 class="text-[13px] font-semibold">共享与额外工作目录</h3>
+      <div v-if="workspaceSettings.data.value" class="grid gap-1 text-xs">
+        <p class="text-ink-3">内置共享目录 · 所有 Agent 共用</p>
+        <code class="leading-5 break-all">{{ workspaceSettings.data.value.defaultSharedDir }}</code>
+      </div>
+      <ul v-if="agent.workspacePaths.length" aria-label="Agent 额外工作目录" class="grid gap-2">
+        <li
+          v-for="path in agent.workspacePaths"
+          :key="path"
+          class="flex min-w-0 items-start gap-1 rounded-md border border-line bg-surface-2 px-3 py-2"
+        >
+          <code class="min-w-0 flex-1 text-xs leading-5 break-all">{{ path }}</code>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            :aria-label="`复制目录 ${path}`"
+            @click="copy(path, path)"
+          >
+            <Check v-if="copied === path" /><Copy v-else />
+          </Button>
+        </li>
+      </ul>
+      <p v-else class="text-xs text-ink-3">额外目录为空。</p>
+      <p v-if="agent.status !== 'deleted'" class="text-xs leading-relaxed text-ink-3">
+        编辑 Agent 可增删这些目录。当前原生活动结束后应用修改。
       </p>
     </section>
     <section v-if="agent.status !== 'deleted'" class="border-b border-line p-4">

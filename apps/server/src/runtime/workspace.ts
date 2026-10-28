@@ -6,6 +6,7 @@ import { Redactor } from '../errors.js';
 import { silentLogger, type Logger } from '../logging.js';
 import type { AgentRecord } from '../storage/store.js';
 import { prepareGuidance } from './guidance.js';
+import { normalizeWorkspacePaths } from './workspace-paths.js';
 
 export const MCP_TOKEN_ENV = 'ISLES_MCP_TOKEN';
 export const agentRoot = (dataDir: string, agent: Pick<AgentRecord, 'id'>) =>
@@ -19,12 +20,25 @@ export class AgentWorkspace {
   readonly dataDir: string;
   readonly sharedDir: string;
   constructor(
-    config: ConfigManager,
+    private readonly config: ConfigManager,
     readonly log: Logger = silentLogger,
     readonly redactor = new Redactor(),
   ) {
     this.dataDir = config.current.dataDir;
     this.sharedDir = config.current.sharedDir;
+  }
+  get sharedWorkspacePaths() {
+    return this.config.current.sharedWorkspacePaths;
+  }
+  workspaceSettings() {
+    return {
+      workspacePaths: [...this.sharedWorkspacePaths],
+      defaultSharedDir: this.sharedDir,
+      configFilePath: this.config.current.configFilePath,
+    };
+  }
+  configureSharedWorkspaces(paths: string[]) {
+    return this.config.configureSharedWorkspaces(paths);
   }
   async token(dir: string): Promise<string> {
     const path = join(dir, 'isles-mcp-token');
@@ -44,6 +58,7 @@ export class AgentWorkspace {
     return token;
   }
   async prepareWorkspace(agent: AgentRecord) {
+    normalizeWorkspacePaths(agent.workspacePaths);
     await mkdir(agent.workspace, { recursive: true });
     await mkdir(this.sharedDir, { recursive: true });
     await writeFile(join(agent.workspace, '.isles-root'), 'Isles Agent workspace\n');

@@ -41,6 +41,7 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
     model: 'kimi-code/k3',
     reasoningEffort: 'high',
     workspace: join(root, 'workspace'),
+    workspacePaths: [],
     nativeHome: cli.home,
     threadId: null,
     threadCreationAttempted: false,
@@ -159,8 +160,16 @@ describe('Kimi Code local Web adapter', () => {
     ).toThrow('已失效');
     expect(await f.requests('/approvals/external-tool')).toHaveLength(0);
   });
-  it('registers shared context without persistence before cold snapshot and keeps yolo after full access', async () => {
+  it('registers all additional context without persistence before cold snapshot and keeps yolo after full access', async () => {
     const f = await fixture({ dangerFullAccess: true });
+    f.agent.workspacePaths = await Promise.all(
+      ['external one', 'external-two'].map(async (name) => {
+        const path = join(f.root, name);
+        await mkdir(path);
+        return realpath(path);
+      }),
+    );
+    const workspacePaths = [f.workspace.sharedDir, ...f.agent.workspacePaths];
     const first = await f.created();
     expect((await f.requests('/profile')).at(-1)?.body).toMatchObject({
       agent_config: { permission_mode: 'yolo' },
@@ -174,8 +183,14 @@ describe('Kimi Code local Web adapter', () => {
     });
     const records = await f.cli.records();
     const adds = records.filter((record) => record.path?.endsWith('/add-dir'));
-    expect(adds).toHaveLength(2);
-    expect(adds[0]?.body).toEqual({ path: f.workspace.sharedDir, persist: false });
+    expect(adds.map((record) => record.body)).toEqual(
+      [...workspacePaths, ...workspacePaths].map((path) => ({ path, persist: false })),
+    );
+    const registrations = records.filter((record) => record.path === '/api/v1/workspaces');
+    expect(registrations.map((record) => record.body)).toEqual([
+      { root: f.agent.workspace },
+      { root: f.agent.workspace },
+    ]);
     expect(records.indexOf(adds[0]!)).toBeLessThan(
       records.findIndex((record) => record.path?.endsWith('/snapshot')),
     );

@@ -1,6 +1,6 @@
 # Agent 消息文本协议
 
-> 日期：2026-10-04 · 自动 turn 输入、当前 turn 的 steer 追加、MCP `receive_messages` 和 `read_messages` 共用此格式。
+> 日期：2026-10-28 · 自动 turn 输入、当前 turn 的 steer 追加、MCP `receive_messages` 和 `read_messages` 共用此格式。
 >
 > Agent 运行时的说明由 [AGENTS.md 模板](../apps/server/resources/AGENTS.template.md)生成到它的工作目录，交给 harness 原生加载。本文说明接口与数据版本边界，不通过首次聊天注入。
 
@@ -28,6 +28,19 @@
 | `mentions` | 可选，被提及的 Agent 名称；各 JSON 字符串以引号外的 `\|` 分隔，不改变群聊接收范围。 |
 
 频道和 Agent 的完整 ID、REST 对象与 SQLite schema 保持不变。名称与短后缀只是显示标签，工具不接受它们作为地址。平台从存储记录和连接身份生成头部，不从正文解析身份。发送者角色始终显式保留；例如名为 `user` 的 Agent 显示为 `agent:"user"`，不会成为人类消息。
+
+## 群项目路径
+
+配置了共享目录的群，在一组消息前提供当前项目路径：
+
+```text
+[channel: "项目开发", workspace_paths: "F:\\projects\\my-app"|"F:\\资料\\设计"]
+
+[channel: "项目开发", seq: 7, from: user]
+一起检查登录功能。
+```
+
+`workspace_paths` 中每条路径都是 JSON 字符串，以引号外的 `|` 分隔。它描述群当前配置，历史读取也使用当前列表。每组消息显示一次，空历史保持 `[history: empty]`。MCP `list_channels` 同时以数组返回 `workspace_paths`。Agent 在指定目录执行项目命令，个人原生 cwd 保持固定。
 
 ## 名称、重名与改名
 

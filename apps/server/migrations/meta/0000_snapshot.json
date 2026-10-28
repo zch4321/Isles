@@ -49,6 +49,14 @@
           "notNull": true,
           "autoincrement": false
         },
+        "workspace_paths": {
+          "name": "workspace_paths",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
+        },
         "native_home": {
           "name": "native_home",
           "type": "text",
@@ -242,6 +250,14 @@
           "notNull": true,
           "autoincrement": false,
           "default": false
+        },
+        "workspace_paths": {
+          "name": "workspace_paths",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
         },
         "next_message_seq": {
           "name": "next_message_seq",

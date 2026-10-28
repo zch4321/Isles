@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import type { Channel } from '@isles/contracts';
 import { useQueryClient } from '@tanstack/vue-query';
-import { CircleAlert, LoaderCircle, Plus, RefreshCw, Search, Trash2, X } from '@lucide/vue';
+import {
+  CircleAlert,
+  FolderOpen,
+  LoaderCircle,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+  X,
+} from '@lucide/vue';
 import { computed, ref } from 'vue';
 import { invalidateAll, useAgents, useChannels, useDirectory } from '@/api/queries';
 import ChannelListItem from './ChannelListItem.vue';
@@ -16,6 +25,7 @@ defineEmits<{
   select: [id: string];
   create: [kind: 'agent' | 'group'];
   bulkDelete: [kind: 'agent' | 'group'];
+  workspaces: [];
 }>();
 
 const queryClient = useQueryClient();
@@ -206,7 +216,18 @@ async function refresh() {
       </template>
     </div>
 
-    <footer class="flex h-14 shrink-0 items-center border-t border-line px-5 text-ink-3">
+    <footer
+      class="flex shrink-0 flex-col items-start gap-2 border-t border-line px-4 py-3 text-ink-3"
+    >
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        class="w-full justify-start"
+        @click="$emit('workspaces')"
+      >
+        <FolderOpen />共享工作目录
+      </Button>
       <ConnectionStatus />
     </footer>
   </aside>

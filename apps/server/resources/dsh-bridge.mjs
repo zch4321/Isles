@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { setImmediate } from 'node:timers';
+import { additionalRoots } from './dsh-shared-roots.mjs';
 
 // Resolve against the installed carrier, including Desktop's bundled runtime.
 // The plugin itself is a deployment resource and has no npm dependency tree.
@@ -260,7 +261,7 @@ export function apply(ctx, config = {}) {
       text: ({ agent }) => {
         const rec = agent && ownedRecord(agent);
         if (!rec || rec.dangerFullAccess) return '';
-        return `Isles shared workspace is writable under workspace-write mode: ${JSON.stringify(config.sharedDir)}. For a denied operation outside the writable roots, retry with sandbox_permissions and justification to request approval in Isles.`;
+        return `Isles writable directories under workspace-write mode: ${JSON.stringify([rec.cwd, ...additionalRoots(config)])}. To request approval for another directory, retry with sandbox_permissions and justification in Isles.`;
       },
     });
   });

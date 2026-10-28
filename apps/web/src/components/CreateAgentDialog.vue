@@ -6,6 +6,7 @@ import { createAgents, fetchHarnesses, fetchHarnessStatus, fetchModels } from '@
 import { invalidateAll } from '@/api/queries';
 import HarnessPathSettings from '@/components/HarnessPathSettings.vue';
 import ExecutionAccessSetting from './ExecutionAccessSetting.vue';
+import WorkspacePathEditor from './WorkspacePathEditor.vue';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -34,6 +35,7 @@ const form = ref({
   canCreateGroups: false,
   steerEnabled: false,
   dangerFullAccess: false,
+  workspacePaths: [] as string[],
 });
 const quantity = ref('1');
 const count = computed(() => Number(quantity.value));
@@ -134,6 +136,7 @@ const create = useMutation({
     form.value.canCreateGroups = false;
     form.value.steerEnabled = false;
     form.value.dangerFullAccess = false;
+    form.value.workspacePaths = [];
     quantity.value = '1';
   },
 });
@@ -310,6 +313,15 @@ function preventBusyClose(event: Event) {
             class="rounded-md border px-3 py-2.5"
             :disabled="create.isPending.value"
           />
+          <WorkspacePathEditor
+            id="agent-workspaces"
+            v-model="form.workspacePaths"
+            label="额外工作目录"
+            :disabled="create.isPending.value"
+          />
+          <p class="-mt-2 text-xs leading-relaxed text-muted-foreground">
+            Agent 自动获得全局目录。这里添加的目录供本次创建的 Agent 使用。
+          </p>
           <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
             <div class="min-w-0 flex-1">
               <p id="agent-groups" class="text-[13px] font-medium">允许拉群</p>

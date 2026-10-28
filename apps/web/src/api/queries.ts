@@ -8,9 +8,12 @@ import {
   fetchChannelDetail,
   fetchChannels,
   fetchHarnesses,
+  fetchWorkspaceSettings,
 } from './isles';
 
 export const useHarnesses = () => useQuery({ queryKey: ['harnesses'], queryFn: fetchHarnesses });
+export const useWorkspaceSettings = () =>
+  useQuery({ queryKey: ['workspaces'], queryFn: fetchWorkspaceSettings });
 
 export function useHarnessName(id: MaybeRefOrGetter<string>) {
   const harnesses = useHarnesses();

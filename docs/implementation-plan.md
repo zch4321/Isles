@@ -1,10 +1,12 @@
 # Isles 实现计划
 
-> 版本：0.25 · 日期：2026-10-24 · 状态：五种 harness 升级及统一原生活动模型已完成验收
+> 版本：0.26 · 日期：2026-10-28 · 状态：附加共享工作区已完成验收
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
 ## 1. 已确定的方向
+
+- 2026-10-28 增加 Agent、全局和群组附加目录配置，按创建、入群和新增路径自动追加。共享配置移除、退群和删除群保留 Agent 已保存的路径，最终列表由用户在 Agent 设置中维护。当前实现和验证见 [附加共享工作区](shared-workspaces.md)。
 
 - 采用已讨论的 Vue 3、Vite、TypeScript、shadcn-vue、Tailwind CSS、Fastify、SQLite/Drizzle 和 pnpm workspace。
 - 以官方原生接口为主；通用 harness 适配层已完成；当前注册 Codex、Claude CLI、Kimi Code（本地 Web）、OpenCode 与 DSH，按能力配置 steer。

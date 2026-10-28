@@ -2,6 +2,7 @@ import type { QuestionAnswer, RunItem } from '@isles/contracts';
 import { realpath } from 'node:fs/promises';
 import { z } from 'zod';
 import type { AgentRecord } from '../../storage/store.js';
+import { additionalWorkspacePaths } from '../../runtime/workspace-paths.js';
 import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import {
   HarnessSubmissionRejected,
@@ -119,6 +120,7 @@ export class KimiWebAdapter implements HarnessAdapter {
 }
 
 class KimiWebSession implements HarnessSession {
+  private readonly workspacePaths: string[];
   private client?: KimiWebConnection;
   private sessionId?: string;
   private active: Turn | undefined;
@@ -154,7 +156,9 @@ class KimiWebSession implements HarnessSession {
     private readonly environment: KimiWebEnvironment,
     private readonly factory: KimiWebClientFactory,
     private readonly handlers: HarnessHandlers,
-  ) {}
+  ) {
+    this.workspacePaths = additionalWorkspacePaths(agent, environment.workspace.sharedDir);
+  }
   async prepare() {
     const env = await this.environment.prepare(this.agent, this.baseUrl);
     if (this.stopped) throw new Error('Kimi Code 连接已停止');
@@ -202,11 +206,12 @@ class KimiWebSession implements HarnessSession {
       'POST',
       `/api/v1/workspaces/${encodeURIComponent(workspace.id)}/trust`,
     );
-    await this.native().request(
-      'POST',
-      `/api/v1/workspaces/${encodeURIComponent(workspace.id)}/add-dir`,
-      { path: this.environment.workspace.sharedDir, persist: false },
-    );
+    for (const path of this.workspacePaths)
+      await this.native().request(
+        'POST',
+        `/api/v1/workspaces/${encodeURIComponent(workspace.id)}/add-dir`,
+        { path, persist: false },
+      );
   }
   async createSession(onCreated: (sessionId: string) => void) {
     await this.trustWorkspace();

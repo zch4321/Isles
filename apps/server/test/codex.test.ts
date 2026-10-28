@@ -42,12 +42,27 @@ describe('Codex native boundaries', () => {
     const appConfig = testConfig(dir, { ISLES_CODEX_HOME: home });
     const appWorkspace = new AgentWorkspace(appConfig);
     const environment = new NativeEnvironment(appConfig, appWorkspace);
-    const agent = {
+    const agent: AgentRecord = {
       id: 'agent-1',
       name: 'Test Agent',
       channelId: 'private-1',
       workspace,
-    } as AgentRecord;
+      workspacePaths: [],
+      harness: 'codex',
+      model: 'default',
+      reasoningEffort: 'high',
+      nativeHome: home,
+      threadId: null,
+      threadCreationAttempted: false,
+      canCreateGroups: false,
+      steerEnabled: false,
+      dangerFullAccess: false,
+      desiredState: 'running',
+      status: 'creating',
+      error: null,
+      createdAt: '2026-10-28T00:00:00.000Z',
+      updatedAt: '2026-10-28T00:00:00.000Z',
+    };
     const env = await environment.launch(agent);
     expect(env.CODEX_HOME).toBe(home);
     const token = env[MCP_TOKEN_ENV]!;

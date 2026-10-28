@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -39,6 +39,7 @@ async function fixture() {
     model: 'fixture/fixture-model',
     reasoningEffort: 'high',
     workspace: join(root, 'workspace'),
+    workspacePaths: [],
     nativeHome: environment.nativeHome,
     threadId: null,
     threadCreationAttempted: false,
@@ -97,6 +98,19 @@ function sseChunks(chunks: Uint8Array[]) {
   });
 }
 
+// OpenCode 2.1.4 packages/core/src/util/wildcard.ts and permission.ts:
+// both inputs normalize backslashes; the last whole-resource rule match wins.
+function nativeWildcardMatch(input: string, pattern: string) {
+  const normalized = input.replaceAll('\\', '/');
+  let escaped = pattern
+    .replaceAll('\\', '/')
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  if (escaped.endsWith(' .*')) escaped = `${escaped.slice(0, -3)}( .*)?`;
+  return new RegExp(`^${escaped}$`, process.platform === 'win32' ? 'si' : 's').test(normalized);
+}
+
 describe('OpenCode native SSE', () => {
   it('preserves UTF-8 and CRLF frame boundaries across byte-sized transport chunks', async () => {
     const text =
@@ -152,25 +166,26 @@ describe('OpenCode v2 adapter', () => {
   function decide(allowed: boolean) {
     return { answers: { permission: { answers: [allowed ? '允许本次' : '拒绝'] } } };
   }
-  it('allows own and shared file tools, asks about other paths and preserves native non-edit policies', async () => {
+  it('allows own and additional file tools, asks about other paths and preserves native non-edit policies', async () => {
     const f = await fixture();
     f.agent.workspace = join(f.root, 'workspace', 'agents', f.agent.id, 'workspace');
+    f.agent.workspacePaths = await Promise.all(
+      ['external one', 'external-two'].map(async (name) => {
+        const path = join(f.root, name);
+        await mkdir(path);
+        return realpath(path);
+      }),
+    );
+    const workspacePaths = [f.config.current.sharedDir, ...f.agent.workspacePaths];
     const session = await f.connect();
+    f.agent.workspacePaths.push(join(f.root, 'added-after-connect'));
     const id = await session.createSession(() => {});
     const rules = f.native.sessions.get(id)!.permissions as OpenCodePermissionRule[];
-    // OpenCode v2 wildcard evaluation: last whole-resource match wins, '*' includes '/'.
-    const match = (value: string, pattern: string) =>
-      new RegExp(
-        `^${pattern
-          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-          .replaceAll('*', '.*')
-          .replaceAll('?', '.')}$`,
-      ).test(value);
     // Native FileAccess emits slash-normalized resources on Windows as well.
     const effect = (action: string, resource: string) =>
       rules.findLast(
         (rule) =>
-          match(action, rule.action) && match(resource.replaceAll('\\', '/'), rule.resource),
+          nativeWildcardMatch(action, rule.action) && nativeWildcardMatch(resource, rule.resource),
       )?.effect;
     expect(effect('edit', 'notes/draft.txt')).toBe('allow');
     expect(effect('edit', '../../agents/other/file.txt')).toBe('ask');
@@ -181,9 +196,68 @@ describe('OpenCode v2 adapter', () => {
       effect('edit', join(relative(f.agent.workspace, f.config.current.sharedDir), 'report.txt')),
     ).toBe('allow');
     expect(effect('external_directory', `${f.config.current.sharedDir}/*`)).toBe('allow');
+    for (const path of workspacePaths) {
+      for (const root of [path, relative(f.agent.workspace, path)]) {
+        for (const resource of [root, join(root, 'nested', 'report.txt')]) {
+          expect(effect('edit', resource)).toBe('allow');
+          expect(effect('external_directory', resource)).toBe('allow');
+        }
+      }
+    }
+    expect(effect('edit', join(f.root, 'added-after-connect', 'report.txt'))).toBe('ask');
+    expect(f.native.sessions.get(id)!.location).toEqual({ directory: f.agent.workspace });
     expect(effect('shell', 'python script.py')).toBeUndefined();
     expect(effect('read', '/reference/readme.txt')).toBeUndefined();
     expect(effect('external_directory', '/other/*')).toBeUndefined();
+  });
+
+  it.each([
+    { name: 'repo*', sibling: 'repo-secret' },
+    { name: 'repo?', sibling: 'repoX' },
+  ])(
+    'rejects a literal $name root that native permissions would expand',
+    async ({ name, sibling }) => {
+      const f = await fixture();
+      const path = join(f.root, name);
+      // These Unix filenames cannot be escaped in the native permission language.
+      expect(nativeWildcardMatch(join(f.root, sibling, 'file.txt'), `${path}/*`)).toBe(true);
+      expect(nativeWildcardMatch(path, path.replace(/[*?]/g, '\\$&'))).toBe(false);
+      expect(nativeWildcardMatch(path, path.replace(/[*?]/g, '[$&]'))).toBe(false);
+      f.agent.workspacePaths = [path];
+      await expect(f.connect()).rejects.toThrow(`OpenCode 无法按字面匹配附加工作区路径“${path}”`);
+      expect(f.native.calls).toEqual([]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects literal Unix backslashes normalized by native permissions',
+    async () => {
+      const f = await fixture();
+      const path = join(f.root, 'repo\\secret');
+      expect(nativeWildcardMatch(join(f.root, 'repo', 'secret', 'file.txt'), `${path}/*`)).toBe(
+        true,
+      );
+      f.agent.workspacePaths = [path];
+      await expect(f.connect()).rejects.toThrow('请重命名目录');
+      expect(f.native.calls).toEqual([]);
+    },
+  );
+
+  it('preserves literal regex characters in additional directory rules', async () => {
+    const f = await fixture();
+    const path = join(f.root, 'repo[one].(copy)+^$');
+    await mkdir(path);
+    f.agent.workspacePaths = [await realpath(path)];
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const rules = f.native.sessions.get(id)!.permissions as OpenCodePermissionRule[];
+    const allowed = (resource: string) =>
+      rules.findLast(
+        (rule) =>
+          rule.action === 'external_directory' && nativeWildcardMatch(resource, rule.resource),
+      );
+    expect(allowed(join(path, 'nested', 'file.txt'))?.effect).toBe('allow');
+    expect(allowed(join(f.root, 'repooneXcopy', 'file.txt'))).toBeUndefined();
   });
   it('sets full access only for the configured Agent session', async () => {
     const f = await fixture();
@@ -399,6 +473,13 @@ describe('OpenCode v2 adapter', () => {
   });
   it('updates existing descendants on resume, follows pagination and rejects recovered pending permissions', async () => {
     const f = await fixture();
+    f.agent.workspacePaths = await Promise.all(
+      ['external one', 'external-two'].map(async (name) => {
+        const path = join(f.root, name);
+        await mkdir(path);
+        return realpath(path);
+      }),
+    );
     const session = await f.connect();
     const id = await session.createSession(() => {});
     const info = f.native.sessions.get(id)!;
@@ -430,6 +511,12 @@ describe('OpenCode v2 adapter', () => {
       expect(f.native.sessions.get(value.id)!.permissions).toEqual(
         f.native.sessions.get(id)!.permissions,
       );
+      for (const path of [f.config.current.sharedDir, ...f.agent.workspacePaths])
+        expect(f.native.sessions.get(value.id)!.permissions).toContainEqual({
+          action: 'external_directory',
+          resource: path.replaceAll('\\', '/'),
+          effect: 'allow',
+        });
     }
     expect(f.native.calls).toContainEqual({
       method: 'POST',

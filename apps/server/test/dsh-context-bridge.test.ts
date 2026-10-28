@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -53,10 +53,15 @@ async function bridgeFixture() {
   const path = join(root, 'bridge.mjs');
   await writeFile(
     path,
-    source.replace(
-      'const native = (name) => import(pathToFileURL(carrierRequire.resolve(name)).href);',
-      `const native = async (name) => globalThis[${JSON.stringify(dependencyKey)}][name];`,
-    ),
+    source
+      .replace(
+        'const native = (name) => import(pathToFileURL(carrierRequire.resolve(name)).href);',
+        `const native = async (name) => globalThis[${JSON.stringify(dependencyKey)}][name];`,
+      )
+      .replace(
+        "'./dsh-shared-roots.mjs'",
+        JSON.stringify(new URL('../resources/dsh-shared-roots.mjs', import.meta.url).href),
+      ),
   );
   const listeners = new Map<string, (this: unknown, ...args: unknown[]) => void>();
   const history: Record<string, unknown>[] = [];
@@ -74,6 +79,7 @@ async function bridgeFixture() {
   const measure = vi.fn(() => measured);
   const warnings = vi.fn();
   const drainDescendants = vi.fn(async () => {});
+  let prompt!: (input: { agent: typeof agent }) => string;
   const ctx = {
     get(name: string) {
       if (name === 'loader') return { await: async () => {} };
@@ -88,7 +94,8 @@ async function bridgeFixture() {
       callback({
         systemPrompt: {
           getContextOrder: () => 10,
-          context: (section: { order: number }) => {
+          context: (section: { order: number; text: typeof prompt }) => {
+            prompt = section.text;
             if (!Number.isFinite(section.order))
               throw new TypeError('prompt context order must be finite');
           },
@@ -117,7 +124,9 @@ async function bridgeFixture() {
     effect() {},
   };
   const module = await import(pathToFileURL(path).href);
-  module.apply(ctx, { sharedDir: join(root, 'shared'), exit: vi.fn() });
+  const additionalDirs = [join(root, 'shared'), join(root, 'external workspace')];
+  await Promise.all(additionalDirs.map((path) => mkdir(path)));
+  module.apply(ctx, { additionalDirs, exit: vi.fn() });
   const emit = (nativeSession: unknown, event: Record<string, unknown>) =>
     listeners.get('session/event')!(nativeSession, event);
   return {
@@ -135,6 +144,8 @@ async function bridgeFixture() {
     agent,
     setPermissions,
     drainDescendants,
+    additionalDirs,
+    prompt: (target = agent) => prompt({ agent: target }),
     approval(params: Record<string, unknown>) {
       return listeners.get('approval/request')!({ agent, ...params }, () => 'unavailable');
     },
@@ -169,6 +180,20 @@ async function bridgeFixture() {
 }
 
 describe('DSH bridge native context meter', () => {
+  it('shows all current allowed directories to the root and native child prompt context', async () => {
+    const f = await bridgeFixture();
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      dangerFullAccess: false,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    const directories = await Promise.all(
+      [f.root, ...f.additionalDirs].map((path) => realpath(path)),
+    );
+    expect(f.prompt()).toContain(JSON.stringify(directories));
+    expect(f.prompt(f.child('native-child'))).toContain(JSON.stringify(directories));
+  });
   it('restores native measurement and reports latest calls and compacted surface instead of cumulative billing', async () => {
     const f = await bridgeFixture();
     const opened = await f.request('isles/session/resume', {

@@ -10,6 +10,7 @@ import {
   type Run,
   type SendMessage,
   type UpdateAgent,
+  type UpdateChannel,
 } from '@isles/contracts';
 import type { HarnessRegistry } from '../harness/registry.js';
 import {
@@ -32,6 +33,12 @@ import type {
 import { formatMessages, MessageLabels } from './envelope.js';
 import { RunOutputBuffer } from './output.js';
 import type { AgentWorkspace } from './workspace.js';
+import {
+  mergeWorkspacePaths,
+  normalizeWorkspacePaths,
+  workspacePathIdentity,
+  workspacePathKey,
+} from './workspace-paths.js';
 
 interface Active {
   run: Run;
@@ -44,6 +51,7 @@ interface Active {
   steerRejected?: boolean;
 }
 interface Handle {
+  workspacePaths?: string[];
   session?: HarnessSession;
   rootSessionId?: string;
   nativeSubagents?: boolean;
@@ -70,6 +78,7 @@ export class Runtime {
   private baseUrl: string | undefined;
   private closing = false;
   private readonly log: Logger;
+  private workspaceSettingsTask: Promise<void> = Promise.resolve();
   constructor(
     readonly store: Store,
     readonly harnesses: HarnessRegistry,
@@ -99,19 +108,60 @@ export class Runtime {
   }
 
   async createAgent(input: CreateAgent) {
-    const agent = this.store.createAgent(await this.prepareAgent(input));
+    const prepared = await this.prepareAgent(input);
+    const agent = this.store.createAgent(this.withSharedWorkspaces(prepared));
     this.startCreatedAgent(agent);
     return this.store.publicAgent(agent.id);
   }
   async createAgents(input: CreateAgents) {
     const { count = 1, ...configuration } = input;
-    const agents = this.store.createAgents(await this.prepareAgent(configuration), count);
+    const prepared = await this.prepareAgent(configuration);
+    const agents = this.store.createAgents(this.withSharedWorkspaces(prepared), count);
     for (const agent of agents) this.startCreatedAgent(agent);
     return agents.map((agent) => this.store.publicAgent(agent.id));
   }
   private startCreatedAgent(agent: AgentRecord) {
     this.log.info({ agentId: agent.id, harness: agent.harness }, 'Agent created');
     this.kick(agent.id);
+  }
+  private withSharedWorkspaces(agent: NewAgent): NewAgent {
+    return {
+      ...agent,
+      workspacePaths: normalizeWorkspacePaths(
+        mergeWorkspacePaths(this.workspace.sharedWorkspacePaths, agent.workspacePaths ?? []),
+      ),
+    };
+  }
+  configureSharedWorkspaces(paths: string[]) {
+    if (this.closing) throw new HttpError(503, 'Isles 正在关闭，请稍后重试');
+    // Keep the saved defaults and their one-way additions ordered across concurrent UI saves.
+    const operation = this.workspaceSettingsTask.then(async () => {
+      const selected = normalizeWorkspacePaths(paths);
+      const previous = new Set(this.workspace.sharedWorkspacePaths.map(workspacePathIdentity));
+      const additions = selected.filter((path) => !previous.has(workspacePathKey(path)));
+      await this.workspace.configureSharedWorkspaces(selected);
+      const changed = this.store.appendWorkspacePaths(
+        this.store.listAgents().map((agent) => agent.id),
+        additions,
+      );
+      this.refreshWorkspaceConfiguration(changed);
+      return this.workspace.workspaceSettings();
+    });
+    this.workspaceSettingsTask = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+  private refreshWorkspaceConfiguration(ids: readonly string[]) {
+    for (const id of new Set(ids)) {
+      const handle = this.handles.get(id);
+      if (!handle) continue;
+      const paths = this.store.getAgent(id).workspacePaths;
+      if (JSON.stringify(paths) === JSON.stringify(handle.workspacePaths)) continue;
+      handle.refresh = true;
+      this.kick(id);
+    }
   }
   private async prepareAgent(input: CreateAgent): Promise<NewAgent> {
     if (!this.baseUrl) throw new HttpError(503, 'Runtime 尚未监听本机端口');
@@ -125,6 +175,7 @@ export class Runtime {
       throw new HttpError(400, '请选择实际可用的模型和推理等级');
     return {
       ...input,
+      workspacePaths: normalizeWorkspacePaths(input.workspacePaths ?? []),
       canCreateGroups: input.canCreateGroups ?? false,
       steerEnabled: input.steerEnabled ?? false,
       dangerFullAccess: input.dangerFullAccess ?? false,
@@ -162,9 +213,15 @@ export class Runtime {
         }
       }
     }
+    if (update.workspacePaths !== undefined)
+      update = { ...update, workspacePaths: normalizeWorkspacePaths(update.workspacePaths) };
     const changed = Object.fromEntries(
       Object.entries(update).filter(
-        ([key, value]) => value !== undefined && value !== agent[key as keyof AgentRecord],
+        ([key, value]) =>
+          value !== undefined &&
+          (key === 'workspacePaths'
+            ? JSON.stringify(value) !== JSON.stringify(agent.workspacePaths)
+            : value !== agent[key as keyof AgentRecord]),
       ),
     ) as Partial<
       Pick<
@@ -175,6 +232,7 @@ export class Runtime {
         | 'canCreateGroups'
         | 'steerEnabled'
         | 'dangerFullAccess'
+        | 'workspacePaths'
       >
     >;
     if (Object.keys(changed).length) {
@@ -242,23 +300,33 @@ export class Runtime {
   }
   createGroup(actor: Actor, input: CreateGroup) {
     this.mayOrganize(actor);
-    return this.store.createGroup(actor, input.name, input.memberIds);
+    if (actor !== 'user' && input.workspacePaths?.length)
+      throw new HttpError(403, '共享工作区由用户在群设置中配置');
+    const paths = normalizeWorkspacePaths(input.workspacePaths ?? []);
+    const channel = this.store.createGroup(actor, input.name, input.memberIds, paths);
+    if (paths.length) this.refreshWorkspaceConfiguration(channel.memberIds);
+    return channel;
   }
   deleteGroup(id: string) {
     return this.store.deleteGroup(id);
   }
   addMembers(channelId: string, actor: Actor, agentIds: string[]) {
     this.mayOrganize(actor);
-    this.store.addMembers(channelId, actor, agentIds);
+    normalizeWorkspacePaths(this.store.getChannel(channelId).workspacePaths);
+    const added = this.store.addMembers(channelId, actor, agentIds);
+    this.refreshWorkspaceConfiguration(added);
     return this.store.publicChannel(channelId);
   }
   removeMember(channelId: string, agentId: string) {
     this.store.removeMember(channelId, agentId);
     return this.store.publicChannel(channelId);
   }
-  updateChannel(id: string, update: { name?: string | undefined; paused?: boolean | undefined }) {
+  updateChannel(id: string, update: UpdateChannel) {
+    if (update.workspacePaths !== undefined)
+      update = { ...update, workspacePaths: normalizeWorkspacePaths(update.workspacePaths) };
     const paused = this.store.getChannel(id).paused;
     const channel = this.store.updateChannel(id, update);
+    if (update.workspacePaths !== undefined) this.refreshWorkspaceConfiguration(channel.memberIds);
     // Pausing never interrupts a running turn; resuming wakes members with saved unread.
     if (paused && !channel.paused) for (const agentId of channel.memberIds) this.kick(agentId);
     return channel;
@@ -302,6 +370,7 @@ export class Runtime {
       !!handle.session &&
       !!active.turnId &&
       !active.steerRejected &&
+      JSON.stringify(agent.workspacePaths) === JSON.stringify(handle.workspacePaths) &&
       agent.steerEnabled &&
       this.runnable(id) &&
       this.harnesses.get(agent.harness).descriptor.capabilities.steer &&
@@ -402,6 +471,7 @@ export class Runtime {
       status: agent.threadId ? 'recovering' : 'creating',
       error: null,
     });
+    handle.workspacePaths = [...agent.workspacePaths];
     await this.workspace.prepareWorkspace(agent);
     let connection: HarnessSession | undefined;
     let bound = false;
@@ -926,7 +996,12 @@ export class Runtime {
     } finally {
       if (handle.task === task) delete handle.task;
       this.resetting.delete(id);
-      if (!this.closing && this.runnable(id) && this.store.hasPendingMessages(id)) this.kick(id);
+      if (
+        !this.closing &&
+        this.runnable(id) &&
+        (handle.refresh || this.store.hasPendingMessages(id))
+      )
+        this.kick(id);
     }
   }
   private async replaceSession(id: string, handle: Handle, previousSessionId: string | null) {
@@ -977,6 +1052,7 @@ export class Runtime {
   }
   async close() {
     this.closing = true;
+    await this.workspaceSettingsTask;
     for (const [id, handle] of this.handles) {
       const activities = this.allActivities(handle);
       for (const active of activities) this.flushOutput(active, 'interrupted');

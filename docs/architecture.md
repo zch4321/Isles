@@ -1,6 +1,6 @@
 # Isles（群岛）架构设计
 
-> 版本：0.24 · 日期：2026-10-24 · 状态：五种 harness 升级及统一原生活动模型验证中
+> 版本：0.25 · 日期：2026-10-28 · 状态：附加共享工作区已完成验收
 >
 > 产品语义以 [需求文档](requirements.md) 为准。本文整理技术选型、模块边界和关键运行流程；已实现范围与阶段验收见 [实现计划](implementation-plan.md)。
 >
@@ -176,6 +176,14 @@ Agent ID 应独立于显示名称。名称中的 `harness-model-1/2/3` 表达用
 原生 session ID 需要结合 harness 和原生状态存储范围解释，不能假定不同 harness 返回的 ID 全局唯一。
 
 当前存储与 API 的 `threadId` 字段保留现有命名，表示 adapter 返回的不透明原生 session ID。数据库基线不限制 harness 只能为 Codex；原生 ID 的唯一性按 `(harness, nativeHome, threadId)` 限定。Runtime 通过 Agent 所属 controller 和 adapter 处理事件，同名 session ID 不得串到其他 Agent。创建必须指定已注册 harness，编辑不允许更换它。此轮不增加旧 schema 检测、数据迁移或兼容代码，不清理或搬移已有 Codex 数据。
+
+### 5.1.1 附加工作区的追加分发
+
+Agent 和群聊分别保存 `workspacePaths` 数组。全局默认数组由 ConfigManager 保存到 `[paths].shared_workspaces`，通过 `GET/PUT /api/workspaces` 查询和更新。Runtime 校验服务器上的现有绝对目录并解析真实路径；存储层负责目录去重、同步事务和变更事件。
+
+群创建、实际加入成员以及群目录新增在同一事务内更新成员最终路径列表。全局保存串行执行配置写入和新增路径分发。共享配置移除与群成员退出保留已有 Agent 目录，数据模型只有最终路径列表。Agent 创建在插入前读取最新全局默认值。
+
+每个 native connection 捕获 Agent 目录快照。Runtime 在路径变化时等待全部主/子活动结束，恢复相同 session 并加载新快照；待应用期间的新消息自动投递排队。适配器合并内置 shared 与附加目录，为各原生权限接口提供列表。群消息和 MCP 目录带当前群路径，cwd 始终指向 Agent 个人目录。具体接口和验证见 [附加共享工作区](shared-workspaces.md)。
 
 ### 5.2 三种顺序与游标
 

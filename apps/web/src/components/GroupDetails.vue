@@ -8,6 +8,7 @@ import { invalidateAll } from '@/api/queries';
 import GroupDialog from './GroupDialog.vue';
 import DeleteGroupDialog from './DeleteGroupDialog.vue';
 import ParticipantAvatar from './ParticipantAvatar.vue';
+import WorkspacePathEditor from './WorkspacePathEditor.vue';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { Directory } from '@/lib/channels';
@@ -39,6 +40,36 @@ const remove = useMutation({
   mutationFn: (agentId: string) => removeMember(props.channel.id, agentId),
   onSettled: () => invalidateAll(queryClient),
 });
+const workspacePaths = ref([...props.channel.workspacePaths]);
+const initialWorkspacePaths = ref([...props.channel.workspacePaths]);
+const workspaceChanges = computed(
+  () => JSON.stringify(workspacePaths.value) !== JSON.stringify(initialWorkspacePaths.value),
+);
+const workspaceConflict = computed(
+  () =>
+    JSON.stringify(props.channel.workspacePaths) !== JSON.stringify(initialWorkspacePaths.value),
+);
+function reloadWorkspaces() {
+  workspacePaths.value = [...props.channel.workspacePaths];
+  initialWorkspacePaths.value = [...props.channel.workspacePaths];
+}
+watch(
+  () => JSON.stringify(props.channel.workspacePaths),
+  () => {
+    if (!workspaceChanges.value) reloadWorkspaces();
+  },
+);
+const saveWorkspaces = useMutation({
+  mutationFn: () => updateChannel(props.channel.id, { workspacePaths: workspacePaths.value }),
+  onSuccess: async (channel) => {
+    await invalidateAll(queryClient);
+    workspacePaths.value = [...channel.workspacePaths];
+    initialWorkspacePaths.value = [...channel.workspacePaths];
+  },
+});
+function submitWorkspaces() {
+  if (!workspaceConflict.value && !saveWorkspaces.isPending.value) saveWorkspaces.mutate();
+}
 const adding = ref(false);
 const deleteOpen = ref(false);
 watch(
@@ -96,6 +127,38 @@ const error = computed(() => rename.error.value?.message ?? remove.error.value?.
         </template>
       </dl>
       <p v-if="error" role="alert" class="text-xs text-destructive">{{ error }}</p>
+    </section>
+
+    <section v-if="!channel.deletedAt" class="grid gap-3 border-b border-line p-4">
+      <form class="grid gap-3" @submit.prevent="submitWorkspaces">
+        <WorkspacePathEditor
+          id="group-details-workspaces"
+          v-model="workspacePaths"
+          label="群聊目录"
+          :disabled="saveWorkspaces.isPending.value"
+        />
+        <p class="text-xs leading-relaxed text-muted-foreground">
+          新增目录会追加到当前成员，新成员入群时自动获得群聊目录。移除目录、移出成员和删除群聊后，Agent
+          保留各自目录，可在编辑 Agent 中移除。当前原生活动结束后应用修改。
+        </p>
+        <p v-if="saveWorkspaces.error.value" role="alert" class="text-xs text-destructive">
+          {{ saveWorkspaces.error.value.message }}
+        </p>
+        <div v-if="workspaceConflict && !saveWorkspaces.isPending.value" class="grid gap-2">
+          <p role="status" class="text-xs leading-relaxed text-muted-foreground">
+            群目录已更新，可重新加载后继续编辑。
+          </p>
+          <Button type="button" variant="outline" @click="reloadWorkspaces">重新加载群目录</Button>
+        </div>
+        <Button
+          v-if="workspaceChanges"
+          type="submit"
+          variant="outline"
+          :disabled="saveWorkspaces.isPending.value || workspaceConflict"
+        >
+          <LoaderCircle v-if="saveWorkspaces.isPending.value" class="animate-spin" />保存群聊目录
+        </Button>
+      </form>
     </section>
 
     <section v-if="!channel.deletedAt" class="border-b border-line p-4">

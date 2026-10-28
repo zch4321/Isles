@@ -66,6 +66,10 @@ export function formatChannelMessages(
 ) {
   const label = labels.channel(channel);
   const blocks: string[] = [];
+  if (channel.kind === 'group' && channel.workspacePaths.length && (messages.length || skipped))
+    blocks.push(
+      `[channel: ${label}, workspace_paths: ${channel.workspacePaths.map(quote).join('|')}]`,
+    );
   if (skipped) blocks.push(`[channel: ${label}, skipped_unread: ${skipped}]`);
   for (const message of messages) {
     const sender =

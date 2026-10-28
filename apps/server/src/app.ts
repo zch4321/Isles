@@ -10,6 +10,7 @@ import {
   sendMessageSchema,
   updateAgentSchema,
   updateChannelSchema,
+  workspaceSettingsUpdateSchema,
   type HealthResponse,
 } from '@isles/contracts';
 import { sql } from 'drizzle-orm';
@@ -140,6 +141,12 @@ export async function buildApp(options: AppOptions) {
   });
 
   app.get('/api/harnesses', () => ({ harnesses: runtime.harnesses.list() }));
+  app.get('/api/workspaces', () => workspace.workspaceSettings());
+  app.put('/api/workspaces', (request) =>
+    runtime.configureSharedWorkspaces(
+      workspaceSettingsUpdateSchema.parse(request.body).workspacePaths,
+    ),
+  );
   app.get<{ Params: { id: string }; Querystring: { refresh?: string } }>(
     '/api/harnesses/:id/status',
     (request) => {

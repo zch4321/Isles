@@ -149,6 +149,7 @@ const agent = {
   name: 'Codex protocol fixture',
   harness: 'codex',
   workspace: join(root, 'agent'),
+  workspacePaths: [],
   nativeHome: home,
   model: 'gpt-6.1-sol',
   reasoningEffort: 'high',

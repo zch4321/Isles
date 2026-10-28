@@ -40,6 +40,7 @@ async function fixture() {
     model: 'fixture/nested/model',
     reasoningEffort: 'high',
     workspace: join(root, 'workspace'),
+    workspacePaths: [],
     nativeHome: home,
     threadId: null,
     threadCreationAttempted: false,
@@ -262,14 +263,44 @@ describe('DSH native SDK adapter', () => {
       insert: expect.arrayContaining([
         expect.objectContaining({
           id: 'isles-fs-shared',
-          config: { cwd: f.agent.workspace, sharedDir: f.environment.workspace.sharedDir },
+          config: { cwd: f.agent.workspace, additionalDirs: [f.environment.workspace.sharedDir] },
         }),
         expect.objectContaining({
           id: 'isles-sandbox-shared',
-          config: { sharedDir: f.environment.workspace.sharedDir },
+          config: { additionalDirs: [f.environment.workspace.sharedDir] },
         }),
       ]),
     });
+  });
+
+  it('passes every additional workspace to file, command and prompt plugins while retaining the primary cwd', async () => {
+    const f = await fixture();
+    const external = join(f.root, 'external worktree');
+    const second = join(f.root, 'second worktree');
+    await Promise.all(
+      [external, second, f.environment.workspace.sharedDir].map((path) =>
+        mkdir(path, { recursive: true }),
+      ),
+    );
+    f.agent.workspacePaths = [external, second, external, f.environment.workspace.sharedDir];
+    const session = await f.connect();
+    await session.createSession(() => {});
+    const runtime = f.native.runtimes.at(-1)!;
+    expect(runtime.cwd).toBe(f.agent.workspace);
+    const patch = JSON.parse(await readFile(runtime.runtime.args[3]!, 'utf8'));
+    const inserted = patch.find((row: { insert?: unknown }) => row.insert)?.insert;
+    for (const id of ['isles-fs-shared', 'isles-sandbox-shared', 'isles-dsh-bridge'])
+      expect(inserted).toContainEqual(
+        expect.objectContaining({
+          id,
+          config: expect.objectContaining({
+            additionalDirs: [f.environment.workspace.sharedDir, external, second],
+          }),
+        }),
+      );
+    expect(f.native.calls.find((call) => call.method === 'isles/session/create')?.params.cwd).toBe(
+      f.agent.workspace,
+    );
   });
 
   it('presents a one-shot permission form, validates fixed decisions and ignores expired answers', async () => {

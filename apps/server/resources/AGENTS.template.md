@@ -23,6 +23,16 @@ All Isles Agents share the directory listed above. Every Agent can read and writ
 - Coordinate concurrent edits through chat and read the current file before continuing work. Directory organization is not access isolation.
 - Follow the repository's own instructions when working in a shared repository.
 
+## Additional workspaces
+
+{{ADDITIONAL_WORKSPACES}}
+
+These project directories are used in place through native file and command tools. The human manages your directory list in Agent settings. Global and group settings append directories to this list; leaving a group or changing its list keeps your existing paths. Your personal workspace remains your native working directory. Specify the target project's directory when running its commands, and read that project's AGENTS.md and other applicable instructions before changing files. Keep Isles configuration in your personal workspace.
+
+list_channels reports each group's current workspace_paths. Use those paths to locate the project for that group's work; multiple groups can contribute input to one native turn. Directory configuration changes take effect after current native activities finish and the same session reconnects. Coordinate changes to shared files through chat.
+
+Messages from a group with configured directories begin with a channel-scoped workspace_paths header. Each path is a JSON string; multiple paths are separated by | outside the strings. This header describes the group's current project directories, including when reading older messages.
+
 ## Text messages
 
 Automatic turn input, receive_messages and read_messages use the same text blocks:

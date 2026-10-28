@@ -61,6 +61,21 @@ export const harnessDescriptorSchema = z.object({
   configuration: z.enum(['cli-path']).nullable(),
   capabilities: harnessCapabilitiesSchema,
 });
+export const workspacePathsSchema = z.array(
+  z
+    .string()
+    .regex(/^[^\r\n\0]*$/)
+    .trim()
+    .min(1)
+    .max(4096),
+);
+export const workspaceSettingsUpdateSchema = z
+  .object({ workspacePaths: workspacePathsSchema })
+  .strict();
+export const workspaceSettingsSchema = workspaceSettingsUpdateSchema.extend({
+  defaultSharedDir: z.string(),
+  configFilePath: z.string(),
+});
 export const createAgentSchema = z
   .object({
     harness: harnessIdSchema,
@@ -70,6 +85,7 @@ export const createAgentSchema = z
     canCreateGroups: z.boolean().default(false),
     steerEnabled: z.boolean().default(false),
     dangerFullAccess: z.boolean().default(false),
+    workspacePaths: workspacePathsSchema.default([]),
   })
   .strict();
 export const createAgentsSchema = createAgentSchema.extend({
@@ -83,6 +99,7 @@ export const updateAgentSchema = z
     canCreateGroups: z.boolean().optional(),
     steerEnabled: z.boolean().optional(),
     dangerFullAccess: z.boolean().optional(),
+    workspacePaths: workspacePathsSchema.optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, { message: '请至少修改一个字段' });
@@ -98,12 +115,14 @@ export const createGroupSchema = z
   .object({
     name: z.string().trim().min(1).max(80),
     memberIds: z.array(z.string().uuid()).max(50),
+    workspacePaths: workspacePathsSchema.default([]),
   })
   .strict();
 export const updateChannelSchema = z
   .object({
     name: z.string().trim().min(1).max(80).optional(),
     paused: z.boolean().optional(),
+    workspacePaths: workspacePathsSchema.optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, { message: '请至少修改一个字段' });
@@ -120,6 +139,7 @@ export const agentSchema = z.object({
   /** The Agent's private chat with the user. */
   channelId: z.string().uuid(),
   workspace: z.string(),
+  workspacePaths: workspacePathsSchema,
   threadId: z.string().nullable(),
   canCreateGroups: z.boolean(),
   steerEnabled: z.boolean(),
@@ -162,6 +182,7 @@ export const channelSchema = z.object({
   deletedAt: z.string().nullable(),
   createdBy: z.string(),
   memberIds: z.array(z.string()),
+  workspacePaths: workspacePathsSchema,
   lastMessage: messageSchema.nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -286,7 +307,9 @@ export type ChannelDetail = z.infer<typeof channelDetailSchema>;
 export type CreateAgent = z.input<typeof createAgentSchema>;
 export type CreateAgents = z.input<typeof createAgentsSchema>;
 export type UpdateAgent = z.infer<typeof updateAgentSchema>;
-export type CreateGroup = z.infer<typeof createGroupSchema>;
+export type CreateGroup = z.input<typeof createGroupSchema>;
+export type UpdateChannel = z.infer<typeof updateChannelSchema>;
+export type WorkspaceSettings = z.infer<typeof workspaceSettingsSchema>;
 export type SendMessage = z.infer<typeof sendMessageSchema>;
 export type Model = z.infer<typeof modelSchema>;
 export type HarnessId = z.infer<typeof harnessIdSchema>;

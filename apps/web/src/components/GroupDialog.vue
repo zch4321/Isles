@@ -6,6 +6,7 @@ import { computed, ref, watch } from 'vue';
 import { addMembers, createGroup } from '@/api/isles';
 import { invalidateAll, useAgents } from '@/api/queries';
 import AgentChecklist from './AgentChecklist.vue';
+import WorkspacePathEditor from './WorkspacePathEditor.vue';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -31,11 +32,16 @@ const candidates = computed(() =>
 
 const name = ref('');
 const selected = ref<string[]>([]);
+const workspacePaths = ref<string[]>([]);
 const save = useMutation({
   mutationFn: () =>
     props.channel
       ? addMembers(props.channel.id, selected.value)
-      : createGroup({ name: name.value, memberIds: selected.value }),
+      : createGroup({
+          name: name.value,
+          memberIds: selected.value,
+          workspacePaths: workspacePaths.value,
+        }),
   onSuccess: async (channel) => {
     await invalidateAll(queryClient);
     emit('done', channel.id);
@@ -47,6 +53,7 @@ watch(open, (value) => {
   save.reset();
   name.value = '';
   selected.value = [];
+  workspacePaths.value = [];
 });
 
 function focusFirst(event: Event) {
@@ -93,6 +100,17 @@ function focusFirst(event: Event) {
             {{ channel ? '所有 Agent 都已在群中。' : '还没有 Agent，请先新建 Agent。' }}
           </p>
         </fieldset>
+        <template v-if="!channel">
+          <WorkspacePathEditor
+            id="group-workspaces"
+            v-model="workspacePaths"
+            label="群聊目录"
+            :disabled="save.isPending.value"
+          />
+          <p class="-mt-2 text-xs leading-relaxed text-muted-foreground">
+            群聊目录会追加到成员 Agent，新成员入群时自动获得这些目录。
+          </p>
+        </template>
         <p
           v-if="save.error.value"
           role="alert"

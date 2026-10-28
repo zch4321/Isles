@@ -19,6 +19,7 @@ import { Label } from '@/components/ui/label';
 import { NativeSelect } from '@/components/ui/native-select';
 import { Switch } from '@/components/ui/switch';
 import ExecutionAccessSetting from './ExecutionAccessSetting.vue';
+import WorkspacePathEditor from './WorkspacePathEditor.vue';
 
 const props = defineProps<{ agent: Agent }>();
 const open = defineModel<boolean>('open', { required: true });
@@ -36,8 +37,10 @@ const form = ref({
   canCreateGroups: false,
   steerEnabled: false,
   dangerFullAccess: false,
+  workspacePaths: [] as string[],
 });
 const validationError = ref('');
+const initialWorkspacePaths = ref<string[]>([]);
 const current = computed(() =>
   models.data.value?.models.find((model) => model.model === form.value.model),
 );
@@ -60,6 +63,8 @@ const changes = computed<UpdateAgent>(() => {
     result.steerEnabled = form.value.steerEnabled;
   if (form.value.dangerFullAccess !== props.agent.dangerFullAccess)
     result.dangerFullAccess = form.value.dangerFullAccess;
+  if (JSON.stringify(form.value.workspacePaths) !== JSON.stringify(initialWorkspacePaths.value))
+    result.workspacePaths = form.value.workspacePaths;
   return result;
 });
 const hasChanges = computed(() => Object.keys(changes.value).length > 0);
@@ -82,7 +87,9 @@ watch(
       canCreateGroups: props.agent.canCreateGroups,
       steerEnabled: props.agent.steerEnabled,
       dangerFullAccess: props.agent.dangerFullAccess,
+      workspacePaths: [...props.agent.workspacePaths],
     };
+    initialWorkspacePaths.value = [...props.agent.workspacePaths];
     validationError.value = '';
     save.reset();
   },
@@ -207,6 +214,15 @@ function focusName(event: Event) {
           class="rounded-md border px-3 py-2.5"
           :disabled="save.isPending.value"
         />
+        <WorkspacePathEditor
+          id="edit-agent-workspaces"
+          v-model="form.workspacePaths"
+          label="额外工作目录"
+          :disabled="save.isPending.value"
+        />
+        <p class="-mt-2 text-xs leading-relaxed text-muted-foreground">
+          这里是此 Agent 的完整额外目录列表，可直接增删。当前原生活动结束后应用修改。
+        </p>
         <div class="flex items-start gap-3 rounded-md border px-3 py-2.5">
           <div class="min-w-0 flex-1">
             <p id="edit-agent-groups" class="text-[13px] font-medium">允许拉群</p>

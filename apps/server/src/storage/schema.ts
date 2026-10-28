@@ -19,6 +19,10 @@ export const agents = sqliteTable(
     model: text().notNull(),
     reasoningEffort: text('reasoning_effort').notNull(),
     workspace: text().notNull(),
+    workspacePaths: text('workspace_paths', { mode: 'json' })
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     nativeHome: text('native_home').notNull(),
     threadId: text('thread_id'),
     threadCreationAttempted: integer('thread_creation_attempted', { mode: 'boolean' })
@@ -48,6 +52,10 @@ export const channels = sqliteTable(
     // The Agent of a private chat; null for groups.
     agentId: text('agent_id').references(() => agents.id),
     paused: integer({ mode: 'boolean' }).notNull().default(false),
+    workspacePaths: text('workspace_paths', { mode: 'json' })
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     nextMessageSeq: integer('next_message_seq').notNull().default(1),
     // 'user' or the ID of the Agent that created the group.
     createdBy: text('created_by').notNull(),

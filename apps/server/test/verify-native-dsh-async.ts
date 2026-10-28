@@ -36,6 +36,7 @@ await writeFile(
         {
           id: 'isles-dsh-bridge',
           name: fileURLToPath(new URL('../resources/dsh-bridge.mjs', import.meta.url)),
+          config: { additionalDirs: [] },
         },
       ],
     },

@@ -12,6 +12,7 @@ import {
   type HarnessTurnInput,
 } from '../types.js';
 import type { AgentRecord } from '../../storage/store.js';
+import { additionalWorkspacePaths } from '../../runtime/workspace-paths.js';
 import { NativeCatalog } from './catalog.js';
 import { StdioClient } from './client.js';
 import type { NativeEnvironment } from './environment.js';
@@ -106,6 +107,7 @@ export class CodexAdapter implements HarnessAdapter {
 }
 
 class CodexSession implements HarnessSession {
+  private readonly workspacePaths: string[];
   private sessionId: string | undefined;
   private client: NativeClient | undefined;
   private closing: Promise<void> | undefined;
@@ -135,6 +137,7 @@ class CodexSession implements HarnessSession {
     private baseUrl: string,
     private output: HarnessHandlers,
   ) {
+    this.workspacePaths = additionalWorkspacePaths(agent, environment.workspace.sharedDir);
     this.handlers = {
       notification: (method, params) => this.notification(method, params),
       request: (id, method, params) => this.question(id, method, params),
@@ -167,7 +170,7 @@ class CodexSession implements HarnessSession {
         ...this.environment.threadConfig(this.agent, this.baseUrl),
         ...(!this.agent.dangerFullAccess
           ? {
-              'sandbox_workspace_write.writable_roots': [this.environment.workspace.sharedDir],
+              'sandbox_workspace_write.writable_roots': this.workspacePaths,
               'sandbox_workspace_write.network_access': true,
             }
           : {}),
@@ -245,7 +248,7 @@ class CodexSession implements HarnessSession {
             ? { type: 'dangerFullAccess' }
             : {
                 type: 'workspaceWrite',
-                writableRoots: [this.agent.workspace, this.environment.workspace.sharedDir],
+                writableRoots: [this.agent.workspace, ...this.workspacePaths],
                 networkAccess: true,
                 excludeTmpdirEnvVar: false,
                 excludeSlashTmp: false,

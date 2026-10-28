@@ -61,6 +61,7 @@ port = 4310
 data_dir = 'data'
 workspace_dir = 'workspace'
 log_dir = 'logs'
+shared_workspaces = []
 
 [log]
 level = 'info'
@@ -117,7 +118,11 @@ Claude 路径留空时自动发现；Claude home 依次采用 `ISLES_CLAUDE_HOME
 
 默认数据库为 `~/.Isles/data/isles.sqlite`，使用 WAL 模式。在用户明确宣布首个 release 前，不提供向后兼容或旧数据迁移，数据库以当前 schema 的全新基线初始化。如果旧库阻碍启动，开发时可直接清理或覆盖并重建，无需保留旧数据或要求用户切换配置；操作前停止占用该数据目录的服务并核验目标属于 Isles。旧 JSON 配置及旧数据库转换不再支持。历史迁移验收仅记录当时的实现，不构成当前升级承诺。
 
-每个 Agent 默认使用 `~/.Isles/workspace/agents/<id>/workspace`，MCP token 单独保存在 `~/.Isles/data/agents/<id>/isles-mcp-token`（权限 `0600`）。共享目录为 `~/.Isles/workspace/shared`；各 Agent 的 `AGENTS.md` 写入共享目录绝对路径与使用约定，协作时将产物放入该目录并在消息中提供准确路径。共享目录不提供快照、版本管理或额外权限隔离。修改工作区根目录只影响新建 Agent；同版本已有 Agent 继续使用数据库中保存的工作区路径，共享根目录随配置更新，不搬移原有文件。
+每个 Agent 默认使用 `~/.Isles/workspace/agents/<id>/workspace`，MCP token 单独保存在 `~/.Isles/data/agents/<id>/isles-mcp-token`（权限 `0600`）。内置共享目录为 `~/.Isles/workspace/shared`；各 Agent 的 `AGENTS.md` 写入目录绝对路径与使用约定。修改工作区根目录影响新建 Agent，已有 Agent 使用已保存的个人路径，文件保留在原位置。
+
+侧栏的“共享工作目录”设置全局附加目录，创建和编辑 Agent 可维护自己的额外目录，群聊详情可维护群共享目录。填写 Isles 服务所在机器上已有目录的绝对路径，项目文件原地使用。新建 Agent 获得全局目录，入群获得群目录；在界面新增共享路径会追加给现有 Agent 或当前群成员。移除共享路径、退群和删除群聊保留 Agent 已保存的目录，用户可在编辑 Agent 时移除。相同真实路径去重，主工作目录和原生会话保持稳定。当前主代理及后台子代理活动结束后应用目录修改。规则与验收见 [附加共享工作区](docs/shared-workspaces.md)。
+
+全局列表保存为 `[paths].shared_workspaces`。通过界面保存时立即分发新增路径；直接修改 TOML 并重启后，这份列表作为新建 Agent 的默认目录。目录访问沿用各 harness 的原生权限。
 
 Codex Agent 的原生进程直接使用你的 Codex 目录：配置、登录、MCP server、插件、skills、全局 `AGENTS.md` 与长期记忆都是你本人的那一份，只有对话上下文按 Agent 独立。Isles 不复制也不写入该目录的配置，每个 Agent 在建立或恢复 thread 时按会话设定自己的 Isles MCP 地址（token 经环境变量传入，不进入配置文件和模型上下文），并以 workspace 的 `.isles-root` 作为项目根，不加载外层 Isles 仓库的 `AGENTS.md`。Agent 的会话保存在该目录的 `sessions/`，可以在 Codex 应用或 `codex resume <thread ID>` 中查看；在其他地方继续对话前先在 Isles 停止该 Agent。修改 Codex home 后已有 Agent 无法恢复原会话，会显示错误而不创建替代会话。
 

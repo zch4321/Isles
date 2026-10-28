@@ -9,12 +9,14 @@ import {
   messagePageSchema,
   messageSchema,
   modelSchema,
+  workspaceSettingsSchema,
   type CreateAgent,
   type CreateAgents,
   type CreateGroup,
   type QuestionAnswer,
   type SendMessage,
   type UpdateAgent,
+  type UpdateChannel,
 } from '@isles/contracts';
 import { z } from 'zod';
 
@@ -83,6 +85,9 @@ export async function downloadChat(channelId: string) {
 
 export const fetchHarnesses = () =>
   api('/harnesses', z.object({ harnesses: z.array(harnessDescriptorSchema) }));
+export const fetchWorkspaceSettings = () => api('/workspaces', workspaceSettingsSchema);
+export const saveWorkspaceSettings = (workspacePaths: string[]) =>
+  api('/workspaces', workspaceSettingsSchema, { workspacePaths }, 'PUT');
 export const fetchHarnessStatus = (id: string, refresh = false) =>
   api(
     `/harnesses/${encodeURIComponent(id)}/status${refresh ? '?refresh=true' : ''}`,
@@ -126,7 +131,7 @@ export const fetchChannelDetail = (id: string) => api(`/channels/${id}`, channel
 export const createGroup = (input: CreateGroup) => api('/channels', channelSchema, input);
 export const deleteGroup = (id: string) =>
   api(`/channels/${id}`, channelSchema, undefined, 'DELETE');
-export const updateChannel = (id: string, input: { name?: string; paused?: boolean }) =>
+export const updateChannel = (id: string, input: UpdateChannel) =>
   api(`/channels/${id}`, channelSchema, input, 'PATCH');
 export const addMembers = (id: string, agentIds: string[]) =>
   api(`/channels/${id}/members`, channelSchema, { agentIds });

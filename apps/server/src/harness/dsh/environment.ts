@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseDocument } from 'yaml';
 import type { AgentRecord } from '../../storage/store.js';
 import { AgentWorkspace, agentRoot, MCP_TOKEN_ENV } from '../../runtime/workspace.js';
+import { additionalWorkspacePaths } from '../../runtime/workspace-paths.js';
 import type { Logger } from '../../logging.js';
 import type { CliExecutable } from '../shared/executable.js';
 import { findDshExecutable } from './executable.js';
@@ -124,21 +125,24 @@ export class DshEnvironment {
       ? agentRoot(this.workspace.dataDir, agent)
       : join(this.workspace.dataDir, 'dsh-catalog');
     await mkdir(dir, { recursive: true });
+    const additionalDirs = agent
+      ? additionalWorkspacePaths(agent, this.workspace.sharedDir)
+      : [this.workspace.sharedDir];
     const inserted: Record<string, unknown>[] = [
       {
         id: 'isles-fs-shared',
         name: fileURLToPath(new URL('../../../resources/dsh-fs-shared.mjs', import.meta.url)),
-        config: { cwd, sharedDir: this.workspace.sharedDir },
+        config: { cwd, additionalDirs },
       },
       {
         id: 'isles-sandbox-shared',
         name: fileURLToPath(new URL('../../../resources/dsh-sandbox-shared.mjs', import.meta.url)),
-        config: { sharedDir: this.workspace.sharedDir },
+        config: { additionalDirs },
       },
       {
         id: 'isles-dsh-bridge',
         name: fileURLToPath(new URL('../../../resources/dsh-bridge.mjs', import.meta.url)),
-        config: { sharedDir: this.workspace.sharedDir },
+        config: { additionalDirs },
       },
       {
         id: 'isles-user-question-tool',

@@ -16,6 +16,7 @@ async function contextFixture(page: Page) {
       model: 'gpt-6.1-sol',
       reasoningEffort: 'high',
       workspace: '/isles/agents/context/workspace',
+      workspacePaths: [],
       threadId: 'session-before',
       canCreateGroups: false,
       steerEnabled: false,
@@ -59,6 +60,7 @@ async function contextFixture(page: Page) {
       name: null,
       agentId,
       paused: false,
+      workspacePaths: [],
       deletedAt: null,
       createdBy: 'user',
       memberIds: [agentId],
@@ -72,6 +74,7 @@ async function contextFixture(page: Page) {
       name: '上下文群聊',
       agentId: null,
       paused: true,
+      workspacePaths: [],
       deletedAt: null,
       createdBy: 'user',
       memberIds: [agentId],
@@ -105,6 +108,14 @@ async function contextFixture(page: Page) {
       }
       if (path === '/api/health')
         return route.fulfill({ json: { status: 'ok', service: 'isles', database: 'ready' } });
+      if (path === '/api/workspaces')
+        return route.fulfill({
+          json: {
+            workspacePaths: [],
+            defaultSharedDir: '/isles/shared',
+            configFilePath: '/isles/config.toml',
+          },
+        });
       if (path === '/api/agents')
         return route.fulfill({ json: { agents: [detail.agent], cursor: 0 } });
       if (path === `/api/agents/${agentId}`) return route.fulfill({ json: detail });

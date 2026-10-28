@@ -1,6 +1,6 @@
 import { ConfigManager } from '@isles/config';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -27,7 +27,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function fixture(dangerFullAccess = false) {
+async function fixture(dangerFullAccess = false, externalWorkspaces = false) {
   const root = await mkdtemp(join(tmpdir(), 'isles-codex-adapter-'));
   roots.push(root);
   const config = new ConfigManager({
@@ -37,6 +37,15 @@ async function fixture(dangerFullAccess = false) {
   });
   const workspace = new AgentWorkspace(config);
   const environment = new NativeEnvironment(config, workspace);
+  const workspacePaths = externalWorkspaces
+    ? await Promise.all(
+        ['external one', 'external-two'].map(async (name) => {
+          const path = join(root, name);
+          await mkdir(path);
+          return realpath(path);
+        }),
+      )
+    : [];
   const agent: AgentRecord = {
     id: randomUUID(),
     channelId: randomUUID(),
@@ -45,6 +54,7 @@ async function fixture(dangerFullAccess = false) {
     model: 'model-one',
     reasoningEffort: 'high',
     workspace: join(root, 'agent'),
+    workspacePaths,
     nativeHome: environment.home,
     threadId: null,
     threadCreationAttempted: false,
@@ -306,7 +316,9 @@ describe('Codex adapter protocol boundary', () => {
   it.each([false, true])(
     'applies native permissions for create, resume and every turn (full=%s)',
     async (full) => {
-      const f = await fixture(full);
+      const f = await fixture(full, true);
+      const workspacePaths = [...f.agent.workspacePaths];
+      f.agent.workspacePaths.push(join(f.root, 'added-after-connect'));
       await f.session.createSession(() => {});
       await f.session.resumeSession('session-one');
       await f.session.submit(f.input);
@@ -314,12 +326,16 @@ describe('Codex adapter protocol boundary', () => {
         ['thread/start', 'thread/resume'].includes(call.method),
       )) {
         expect(call.params).toMatchObject({
+          cwd: f.agent.workspace,
           sandbox: full ? 'danger-full-access' : 'workspace-write',
           approvalPolicy: full ? 'never' : 'on-request',
         });
         if (!full)
           expect(call.params.config).toMatchObject({
-            'sandbox_workspace_write.writable_roots': [f.environment.workspace.sharedDir],
+            'sandbox_workspace_write.writable_roots': [
+              f.environment.workspace.sharedDir,
+              ...workspacePaths,
+            ],
           });
       }
       expect(
@@ -329,7 +345,11 @@ describe('Codex adapter protocol boundary', () => {
           ? { type: 'dangerFullAccess' }
           : {
               type: 'workspaceWrite',
-              writableRoots: [f.agent.workspace, f.environment.workspace.sharedDir],
+              writableRoots: [
+                f.agent.workspace,
+                f.environment.workspace.sharedDir,
+                ...workspacePaths,
+              ],
             },
       );
     },

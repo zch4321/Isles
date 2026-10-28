@@ -9,6 +9,7 @@ import { realpath } from 'node:fs/promises';
 import { relative } from 'node:path';
 import { z } from 'zod';
 import type { AgentRecord } from '../../storage/store.js';
+import { additionalWorkspacePaths } from '../../runtime/workspace-paths.js';
 import {
   HarnessSubmissionRejected,
   type HarnessAdapter,
@@ -57,10 +58,12 @@ const connectedFrame = z.object({
   id: z.string().startsWith('evt_'),
   data: z.object({}),
 });
-function sessionPermissions(agent: AgentRecord, sharedDir: string): OpenCodePermissionRule[] {
+function sessionPermissions(
+  agent: AgentRecord,
+  workspacePaths: readonly string[],
+): OpenCodePermissionRule[] {
   if (agent.dangerFullAccess) return [{ action: '*', resource: '*', effect: 'allow' }];
   const slash = (path: string) => path.replaceAll('\\', '/');
-  const sharedRelative = slash(relative(agent.workspace, sharedDir));
   // Core uses Location-relative resources inside its project worktree, absolute ones outside.
   // Keep shell, read and other actions on their native configured policy.
   return [
@@ -68,11 +71,15 @@ function sessionPermissions(agent: AgentRecord, sharedDir: string): OpenCodePerm
     { action: 'edit', resource: '../*', effect: 'ask' },
     { action: 'edit', resource: '/*', effect: 'ask' },
     { action: 'edit', resource: '?:/*', effect: 'ask' },
-    { action: 'edit', resource: `${slash(sharedDir)}/*`, effect: 'allow' },
-    ...(sharedRelative
-      ? [{ action: 'edit', resource: `${sharedRelative}/*`, effect: 'allow' as const }]
-      : []),
-    { action: 'external_directory', resource: `${slash(sharedDir)}/*`, effect: 'allow' },
+    ...workspacePaths.flatMap((path) => {
+      const resources = new Set([slash(path), slash(relative(agent.workspace, path))]);
+      return [...resources].filter(Boolean).flatMap((resource) =>
+        [resource, `${resource.replace(/\/$/, '')}/*`].flatMap((pattern) => [
+          { action: 'edit', resource: pattern, effect: 'allow' as const },
+          { action: 'external_directory', resource: pattern, effect: 'allow' as const },
+        ]),
+      );
+    }),
   ];
 }
 const inputRef = z.object({ sessionID: z.string(), inboxID: z.string() });
@@ -142,6 +149,7 @@ interface PendingPermission {
 
 /** Maps one native execution interval to a platform turn, using durable log identities. */
 class OpenCodeSession implements HarnessSession {
+  private readonly workspacePaths: string[];
   private client?: OpenCodeConnection;
   private sessionId?: string;
   private executions = new Map<string, string>();
@@ -167,7 +175,22 @@ class OpenCodeSession implements HarnessSession {
     private agent: AgentRecord,
     private baseUrl: string,
     private handlers: HarnessHandlers,
-  ) {}
+  ) {
+    this.workspacePaths = additionalWorkspacePaths(agent, environment.workspace.sharedDir);
+    if (!agent.dangerFullAccess) {
+      // OpenCode 2.1.4 Wildcard.match has no literal wildcard escape and always
+      // normalizes backslashes, including literal backslashes in Unix filenames.
+      const unsupported = this.workspacePaths.find(
+        (path) => /[*?]/.test(path) || (process.platform !== 'win32' && path.includes('\\')),
+      );
+      if (unsupported) {
+        const characters = process.platform === 'win32' ? '*、?' : '*、?、\\';
+        throw new Error(
+          `OpenCode 无法按字面匹配附加工作区路径“${unsupported}”。请重命名目录，移除字符 ${characters}`,
+        );
+      }
+    }
+  }
   async prepare() {
     const env = await this.environment.prepare(this.agent, this.baseUrl);
     const command = await this.environment.executable();
@@ -243,7 +266,7 @@ class OpenCodeSession implements HarnessSession {
         title: this.agent.name,
         location: { directory: this.agent.workspace },
         model: modelRef(this.agent.model, this.agent.reasoningEffort),
-        permissions: sessionPermissions(this.agent, this.environment.workspace.sharedDir),
+        permissions: sessionPermissions(this.agent, this.workspacePaths),
       }),
     ).data;
     if (session.id !== id) throw new Error('OpenCode 创建返回了不同 session');
@@ -262,7 +285,7 @@ class OpenCodeSession implements HarnessSession {
     if (inbox.data.length) throw new Error('OpenCode 原生会话有待处理输入，请先核对原生收件箱。');
     await this.native().request('PATCH', `/api/session/${id}`, {
       title: this.agent.name,
-      permissions: sessionPermissions(this.agent, this.environment.workspace.sharedDir),
+      permissions: sessionPermissions(this.agent, this.workspacePaths),
     });
     await this.bind(session);
     await this.restoreChildren(id);
@@ -283,7 +306,7 @@ class OpenCodeSession implements HarnessSession {
         if ((await realpath(child.location.directory)) !== (await realpath(this.agent.workspace)))
           throw new Error('OpenCode 子 session 的工作目录与 Agent 不一致');
         await this.native().request('PATCH', `/api/session/${child.id}`, {
-          permissions: sessionPermissions(this.agent, this.environment.workspace.sharedDir),
+          permissions: sessionPermissions(this.agent, this.workspacePaths),
         });
         this.descendants.add(child.id);
         await this.restoreChildren(child.id, visited);

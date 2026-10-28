@@ -9,6 +9,7 @@ import CreateAgentDialog from '@/components/CreateAgentDialog.vue';
 import GroupDialog from '@/components/GroupDialog.vue';
 import InspectorPanel from '@/components/InspectorPanel.vue';
 import WelcomeView from '@/components/WelcomeView.vue';
+import WorkspaceSettingsDialog from '@/components/WorkspaceSettingsDialog.vue';
 import { useEventStream } from '@/composables/useEventStream';
 import { byActivity, channelTitle } from '@/lib/channels';
 import { cn, readStorage, writeStorage } from '@/lib/utils';
@@ -17,6 +18,7 @@ const selected = ref(readStorage('isles.channel') ?? '');
 // Narrow screens show one pane at a time.
 const pane = ref<'list' | 'chat'>(selected.value ? 'chat' : 'list');
 const inspectorOpen = ref(false);
+const workspaceSettingsOpen = ref(false);
 const creating = ref<'agent' | 'group'>();
 const bulkDeleting = ref<'agent' | 'group'>();
 const bulkDeleteOpen = computed({
@@ -83,6 +85,7 @@ const groupDialog = dialogOpen('group');
       @select="choose"
       @create="creating = $event"
       @bulk-delete="bulkDeleting = $event"
+      @workspaces="workspaceSettingsOpen = true"
     />
     <main :class="cn('min-h-0 min-w-0 flex-1', pane === 'list' && 'max-md:hidden')">
       <ConversationView
@@ -111,5 +114,6 @@ const groupDialog = dialogOpen('group');
     <CreateAgentDialog v-model:open="agentDialog" @created="choose" />
     <GroupDialog v-model:open="groupDialog" @done="choose" />
     <BulkDeleteDialog v-model:open="bulkDeleteOpen" :kind="bulkDeleting ?? 'agent'" />
+    <WorkspaceSettingsDialog v-model:open="workspaceSettingsOpen" />
   </div>
 </template>

@@ -1,4 +1,10 @@
-import { agentSchema, channelSchema, contextUsageSchema, messageKey } from '@isles/contracts';
+import {
+  agentSchema,
+  channelSchema,
+  contextUsageSchema,
+  messageKey,
+  workspacePathsSchema,
+} from '@isles/contracts';
 import type {
   Agent,
   AgentDetail,
@@ -15,6 +21,7 @@ import type {
   RunItem,
   RunStatus,
   UserQuestion,
+  UpdateChannel,
 } from '@isles/contracts';
 import {
   and,
@@ -35,6 +42,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { HttpError } from '../errors.js';
+import { mergeWorkspacePaths } from '../runtime/workspace-paths.js';
 import type { IslesDatabase } from './database.js';
 import {
   agents,
@@ -68,6 +76,7 @@ type AgentUpdate = Partial<
     | 'name'
     | 'model'
     | 'reasoningEffort'
+    | 'workspacePaths'
   >
 >;
 export type Sender = { type: 'user' } | { type: 'agent'; id: string };
@@ -81,6 +90,7 @@ export interface NewAgent {
   canCreateGroups: boolean;
   steerEnabled?: boolean;
   dangerFullAccess?: boolean;
+  workspacePaths?: string[] | undefined;
   /** Native storage scope of the Agent's fixed session. */
   nativeHome: string;
 }
@@ -267,6 +277,7 @@ export class Store {
       .values({
         id,
         ...record,
+        workspacePaths: this.validWorkspacePaths(input.workspacePaths ?? []),
         status: 'creating',
         workspace: join(root, 'workspace'),
         createdAt: now(),
@@ -295,6 +306,8 @@ export class Store {
   updateAgent(id: string, update: AgentUpdate) {
     const record = { ...update };
     delete record.dangerFullAccess;
+    if (record.workspacePaths !== undefined)
+      record.workspacePaths = this.validWorkspacePaths(record.workspacePaths);
     this.change(() => {
       if (this.getAgent(id).status === 'deleted') throw new HttpError(410, '该 Agent 已删除');
       this.db
@@ -304,6 +317,36 @@ export class Store {
         .run();
       this.event('agent', { agentId: id }, update);
     });
+  }
+  private validWorkspacePaths(paths: readonly string[]): string[] {
+    const result = workspacePathsSchema.safeParse(paths);
+    if (!result.success)
+      throw new HttpError(400, '工作目录路径须为 1 到 4096 个字符，并使用单行文本');
+    return mergeWorkspacePaths(result.data);
+  }
+  /** Append once; later edits and group removal retain the Agent's own directory list. */
+  appendWorkspacePaths(agentIds: string[], paths: readonly string[]): string[] {
+    return this.change(() => this.appendAgentWorkspacePaths(agentIds, paths));
+  }
+  private appendAgentWorkspacePaths(agentIds: string[], paths: readonly string[]): string[] {
+    if (!paths.length) return [];
+    const changed: string[] = [];
+    for (const id of new Set(agentIds)) {
+      const agent = this.getAgent(id);
+      if (agent.status === 'deleted') continue;
+      const workspacePaths = this.validWorkspacePaths(
+        mergeWorkspacePaths(agent.workspacePaths, paths),
+      );
+      if (JSON.stringify(workspacePaths) === JSON.stringify(agent.workspacePaths)) continue;
+      this.db
+        .update(agents)
+        .set({ workspacePaths, updatedAt: now() })
+        .where(eq(agents.id, id))
+        .run();
+      this.event('agent', { agentId: id }, { workspacePaths });
+      changed.push(id);
+    }
+    return changed;
   }
   /** Latest native context snapshot belongs to the current session, including after restart. */
   contextUsage(id: string): ContextUsage | null {
@@ -578,8 +621,14 @@ export class Store {
     if (found.length !== unique.length) throw new HttpError(400, '只能添加已有的 Agent');
     return unique;
   }
-  createGroup(actor: Actor, name: string, memberIds: string[]): Channel {
+  createGroup(
+    actor: Actor,
+    name: string,
+    memberIds: string[],
+    workspacePaths: string[] = [],
+  ): Channel {
     const members = this.existingAgents(actor === USER ? memberIds : [actor, ...memberIds]);
+    const paths = this.validWorkspacePaths(workspacePaths);
     const id = randomUUID();
     this.change(() => {
       this.db
@@ -588,6 +637,7 @@ export class Store {
           id,
           kind: 'group',
           name,
+          workspacePaths: paths,
           createdBy: actor,
           createdAt: now(),
           updatedAt: now(),
@@ -598,6 +648,7 @@ export class Store {
           .insert(channelMembers)
           .values({ channelId: id, agentId, addedBy: actor, joinedAt: now() })
           .run();
+      this.appendAgentWorkspacePaths(members, paths);
       const names = members.map((m) => this.agentName(m)).join('、');
       this.systemMessage(
         id,
@@ -637,10 +688,20 @@ export class Store {
       return this.publicChannel(id);
     });
   }
-  updateChannel(id: string, update: { name?: string | undefined; paused?: boolean | undefined }) {
+  updateChannel(id: string, update: UpdateChannel) {
     const channel = this.group(id);
     this.change(() => {
       const set: Partial<ChannelRecord> = {};
+      if (update.workspacePaths !== undefined) {
+        const paths = this.validWorkspacePaths(update.workspacePaths);
+        if (JSON.stringify(paths) !== JSON.stringify(channel.workspacePaths)) {
+          set.workspacePaths = paths;
+          const added = mergeWorkspacePaths(channel.workspacePaths, paths).slice(
+            channel.workspacePaths.length,
+          );
+          this.appendAgentWorkspacePaths(this.memberIds(id), added);
+        }
+      }
       if (update.name !== undefined && update.name !== channel.name) {
         set.name = update.name;
         this.systemMessage(id, `用户将群名改为“${update.name}”。`);
@@ -666,7 +727,7 @@ export class Store {
   }
   /** Returns the Agents that were actually added. */
   addMembers(id: string, actor: Actor, agentIds: string[]): string[] {
-    this.group(id);
+    const channel = this.group(id);
     if (actor !== USER && !this.isMember(id, actor))
       throw new HttpError(403, '只能邀请 Agent 加入自己所在的群');
     const added = this.existingAgents(agentIds).filter((a) => !this.isMember(id, a));
@@ -677,6 +738,7 @@ export class Store {
           .insert(channelMembers)
           .values({ channelId: id, agentId, addedBy: actor, joinedAt: now() })
           .run();
+      this.appendAgentWorkspacePaths(added, channel.workspacePaths);
       this.systemMessage(
         id,
         `${this.actorName(actor)}邀请 ${added.map((a) => this.agentName(a)).join('、')} 加入了群聊。更早的消息可以通过历史读取。`,

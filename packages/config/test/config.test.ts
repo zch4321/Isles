@@ -40,6 +40,7 @@ describe('ConfigManager startup configuration', () => {
       dataDir: join(homeDir, '.Isles', 'data'),
       workspaceDir: join(homeDir, '.Isles', 'workspace'),
       sharedDir: join(homeDir, '.Isles', 'workspace', 'shared'),
+      sharedWorkspacePaths: [],
       logDir: join(homeDir, '.Isles', 'logs'),
       logLevel: 'info',
       cli: {

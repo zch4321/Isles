@@ -10,6 +10,7 @@ import {
   type HarnessTurnInput,
 } from '../types.js';
 import type { AgentRecord } from '../../storage/store.js';
+import { additionalWorkspacePaths } from '../../runtime/workspace-paths.js';
 import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import { AcpCatalog } from './catalog.js';
 import {
@@ -125,6 +126,8 @@ interface PendingQuestion {
 }
 
 class AcpSession implements HarnessSession {
+  private readonly workspacePaths: string[];
+  private readonly requiresAdditionalDirectories: boolean;
   private client: AcpConnection | undefined;
   private token: string | undefined;
   private sessionId: string | undefined;
@@ -153,7 +156,10 @@ class AcpSession implements HarnessSession {
     private baseUrl: string,
     private output: HarnessHandlers,
     private factory: AcpClientFactory,
-  ) {}
+  ) {
+    this.workspacePaths = additionalWorkspacePaths(agent, harness.workspace.sharedDir);
+    this.requiresAdditionalDirectories = agent.workspacePaths.length > 0;
+  }
   private get name() {
     return this.harness.descriptor.displayName;
   }
@@ -196,6 +202,10 @@ class AcpSession implements HarnessSession {
     );
     const capabilities = (await initializeAcp(this.native(), this.name)).agentCapabilities;
     this.additionalDirectories = capabilities?.sessionCapabilities?.additionalDirectories != null;
+    if (this.requiresAdditionalDirectories && !this.additionalDirectories)
+      throw new Error(
+        `${this.name} 未声明 additionalDirectories 支持，请使用支持附加工作区的原生适配器`,
+      );
     if (!capabilities?.mcpCapabilities?.http)
       throw new Error(`${this.name} 未声明 HTTP MCP 支持，无法连接 Isles`);
     if (capabilities.sessionCapabilities?.resume) this.resumeMethod = 'session/resume';
@@ -210,7 +220,7 @@ class AcpSession implements HarnessSession {
           cwd: this.agent.workspace,
           ...(this.additionalDirectories
             ? {
-                additionalDirectories: [this.harness.workspace.sharedDir],
+                additionalDirectories: this.workspacePaths,
               }
             : {}),
           mcpServers: this.mcpServers(),
@@ -238,7 +248,7 @@ class AcpSession implements HarnessSession {
             cwd: this.agent.workspace,
             ...(this.additionalDirectories
               ? {
-                  additionalDirectories: [this.harness.workspace.sharedDir],
+                  additionalDirectories: this.workspacePaths,
                 }
               : {}),
             mcpServers: this.mcpServers(),

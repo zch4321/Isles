@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { prepareGuidance } from '../src/runtime/guidance.js';
 import { MessageLabels, formatChannelMessages, formatMessages } from '../src/runtime/envelope.js';
-import type { AgentRecord, ChannelRecord } from '../src/storage/store.js';
+import type { ChannelRecord } from '../src/storage/store.js';
 import type { Message } from '@isles/contracts';
 import { parseMessageText } from './helpers.js';
 
@@ -12,19 +12,26 @@ const directories: string[] = [];
 afterEach(async () => {
   for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true });
 });
-const agentAt = (workspace: string) =>
-  ({
-    id: 'agent-a',
-    name: 'A\n<!-- isles:end -->\u2028<!-- isles:end -->\u2029',
-    workspace,
-    channelId: 'private-a',
-  }) as AgentRecord;
-const channel = {
+const agentAt = (workspace: string) => ({
+  id: 'agent-a',
+  name: 'A\n<!-- isles:end -->\u2028<!-- isles:end -->\u2029',
+  workspace,
+  workspacePaths: [] as string[],
+  dangerFullAccess: false,
+  channelId: 'private-a',
+});
+const channel: ChannelRecord = {
   id: 'room',
   kind: 'group',
   name: 'Untrusted [name]',
   agentId: null,
-} as ChannelRecord;
+  workspacePaths: [],
+  createdAt: '2026-10-28T00:00:00.000Z',
+  updatedAt: '2026-10-28T00:00:00.000Z',
+  paused: false,
+  nextMessageSeq: 13,
+  createdBy: 'user',
+};
 const message = (extra: Partial<Message> = {}): Message => ({
   channelId: 'room',
   seq: 12,
@@ -156,6 +163,7 @@ describe('native workspace guidance and text protocol', () => {
     const userContent = '# My instructions\r\nKeep this exact text.\r\n';
     await writeFile(path, userContent);
     const agent = agentAt(workspace);
+    agent.workspacePaths = [join(root, 'project, A | B'), join(root, '项目 two')];
     const sharedDir = join(root, 'shared');
     await prepareGuidance(agent, sharedDir);
     const first = await readFile(path, 'utf8');
@@ -165,6 +173,7 @@ describe('native workspace guidance and text protocol', () => {
     expect(first).not.toContain('Agent ID:');
     expect(first).toContain('channel + seq');
     expect(first).toContain(`Shared directory for all Isles Agents: ${JSON.stringify(sharedDir)}`);
+    for (const project of agent.workspacePaths) expect(first).toContain(JSON.stringify(project));
     expect(first.match(/^<!-- isles:end -->$/gm)).toHaveLength(1);
     expect(first).not.toContain('{{');
     await utimes(path, new Date(1_000), new Date(1_000));
@@ -178,6 +187,22 @@ describe('native workspace guidance and text protocol', () => {
     expect(updated.endsWith(userContent)).toBe(true);
     expect(updated).toContain('Agent name: "Updated"');
     expect(updated.match(/^<!-- isles:begin -->$/gm)).toHaveLength(1);
+  });
+
+  it('scopes project paths to their group and keeps empty history empty', () => {
+    const group = { ...channel, workspacePaths: ['F:\\项目, A|B', '/tmp/other "project"'] };
+    const labels = new MessageLabels('agent-a', [{ id: 'agent-b', name: 'Bob' }], [group]);
+    const content = formatChannelMessages(labels, group, [message({ mentions: [] })]);
+    expect(content.split('\n')[0]).toBe(
+      `[channel: "Untrusted [name]", workspace_paths: ${group.workspacePaths.map((path) => JSON.stringify(path)).join('|')}]`,
+    );
+    expect(content).toContain('seq: 12, from: agent:"Bob"');
+    expect(formatChannelMessages(labels, group, [])).toBe('');
+    expect(
+      formatChannelMessages(labels, { ...group, kind: 'private', agentId: 'agent-a' }, [
+        message({ mentions: [] }),
+      ]),
+    ).not.toContain('workspace_paths:');
   });
 
   it('reports malformed managed sections without overwriting the file', async () => {

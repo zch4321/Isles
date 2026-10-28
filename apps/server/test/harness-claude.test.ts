@@ -1,6 +1,6 @@
 import { ConfigManager } from '@isles/config';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -71,6 +71,7 @@ async function fixture() {
     model: 'default',
     reasoningEffort: 'high',
     workspace: join(root, 'workspace'),
+    workspacePaths: [],
     nativeHome: cli.home,
     threadId: null,
     threadCreationAttempted: false,
@@ -405,10 +406,18 @@ describe('Claude CLI adapter', () => {
     expect(f.output.exit).not.toHaveBeenCalled();
   });
   it.each([false, true])(
-    'uses native mode and shared directory when creating and restoring (full=%s)',
+    'uses native mode and all additional directories when creating and restoring (full=%s)',
     async (full) => {
       const f = await fixture();
       f.agent.dangerFullAccess = full;
+      f.agent.workspacePaths = await Promise.all(
+        ['external one', 'external-two'].map(async (name) => {
+          const path = join(f.root, name);
+          await mkdir(path);
+          return realpath(path);
+        }),
+      );
+      const workspacePaths = [f.config.current.sharedDir, ...f.agent.workspacePaths];
       const session = await f.connect();
       const id = await session.createSession(() => {});
       await session.close();
@@ -419,7 +428,10 @@ describe('Claude CLI adapter', () => {
       for (const launch of launches) {
         const args = launch.args as string[];
         expect(args.includes('--dangerously-skip-permissions')).toBe(full);
-        expect(args).toContain('--add-dir');
+        const start = args.indexOf('--add-dir');
+        expect(args.slice(start + 1, start + 1 + workspacePaths.length)).toEqual(workspacePaths);
+        expect(args[start + 1 + workspacePaths.length]).toBe('--permission-prompt-tool');
+        expect(launch.cwd).toBe(await realpath(f.agent.workspace));
         if (!full) expect(args).toContain('acceptEdits');
       }
     },

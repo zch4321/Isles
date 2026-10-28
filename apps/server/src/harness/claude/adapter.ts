@@ -15,6 +15,7 @@ import {
 } from '../types.js';
 import type { Logger } from '../../logging.js';
 import type { AgentRecord } from '../../storage/store.js';
+import { additionalWorkspacePaths } from '../../runtime/workspace-paths.js';
 import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import { ClaudeCatalog } from './catalog.js';
 import {
@@ -123,6 +124,7 @@ interface PendingQuestion {
 }
 
 class ClaudeSession implements HarnessSession {
+  private readonly workspacePaths: string[];
   private client: ClaudeConnection | undefined;
   private env: Record<string, string> | undefined;
   private sessionId: string | undefined;
@@ -145,7 +147,9 @@ class ClaudeSession implements HarnessSession {
     private baseUrl: string,
     private output: HarnessHandlers,
     private factory: ClaudeClientFactory,
-  ) {}
+  ) {
+    this.workspacePaths = additionalWorkspacePaths(agent, environment.workspace.sharedDir);
+  }
   async prepare() {
     this.env = await this.environment.launch(this.agent);
     if (this.closed) throw new Error('Claude Code 连接已停止');
@@ -170,7 +174,7 @@ class ClaudeSession implements HarnessSession {
         ? ['--dangerously-skip-permissions']
         : ['--permission-mode', 'acceptEdits']),
       '--add-dir',
-      this.environment.workspace.sharedDir,
+      ...this.workspacePaths,
       '--permission-prompt-tool',
       'stdio',
       ...(this.agent.reasoningEffort === 'default' ? [] : ['--effort', this.agent.reasoningEffort]),

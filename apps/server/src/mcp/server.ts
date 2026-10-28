@@ -78,6 +78,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         const value = store.publicChannel(channelId);
         return {
           ...channelView(value),
+          workspace_paths: value.workspacePaths,
           paused: value.paused,
           members: value.memberIds.map((m) => ({
             id: m,
@@ -174,7 +175,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         'list_channels',
         {
           description:
-            'List your channels with full channel IDs, names, members and paused state. Match the names/short suffixes shown in messages to these records, then use a full ID for group tool calls.',
+            'List your channels with full channel IDs, names, members, paused state and current workspace_paths. Match the names/short suffixes shown in messages to these records, then use a full ID for group tool calls. Workspace paths identify the projects for each group.',
           annotations: { readOnlyHint: true, openWorldHint: false },
         },
         () => result({ channels: store.channelsOf(id).map((c) => channel(c.id)) }),

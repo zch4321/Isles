@@ -283,6 +283,7 @@ test('switches registered harness catalogs and cached selections without applyin
   expect(creation.request().postDataJSON()).toEqual({
     harness: 'semantic-test',
     name: 'Semantic catalog test',
+    workspacePaths: [],
     count: 1,
     model: 'semantic-model',
     reasoningEffort: 'medium',

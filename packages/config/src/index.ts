@@ -7,6 +7,14 @@ import { parse, stringify } from 'smol-toml';
 import { z } from 'zod';
 
 const pathSchema = z.string().trim().min(1);
+const sharedWorkspacePathsSchema = z.array(
+  z
+    .string()
+    .regex(/^[^\r\n\0]*$/)
+    .trim()
+    .min(1)
+    .max(4096),
+);
 function unquoteBinary(value: string): string {
   return value.replace(/^"([\s\S]*)"$/, '$1');
 }
@@ -65,6 +73,7 @@ const fileSchema = z.strictObject({
     .strictObject({
       data_dir: pathSchema.optional(),
       workspace_dir: pathSchema.optional(),
+      shared_workspaces: sharedWorkspacePathsSchema.optional(),
       log_dir: pathSchema.optional(),
     })
     .optional(),
@@ -153,6 +162,7 @@ export interface AppConfig {
   readonly dataDir: string;
   readonly workspaceDir: string;
   readonly sharedDir: string;
+  readonly sharedWorkspacePaths: readonly string[];
   readonly logDir: string;
   readonly logLevel: LogLevel;
   readonly cli: Readonly<Record<CliHarness, CliPaths>>;
@@ -270,6 +280,9 @@ export class ConfigManager {
       dataDir: this.resolvePath(env.ISLES_DATA_DIR ?? file.paths?.data_dir ?? 'data', base),
       workspaceDir,
       sharedDir: join(workspaceDir, 'shared'),
+      sharedWorkspacePaths: Object.freeze(
+        (file.paths?.shared_workspaces ?? []).map((path) => this.resolvePath(path, base)),
+      ),
       logDir: this.resolvePath(file.paths?.log_dir ?? 'logs', base),
       logLevel: env.ISLES_LOG_LEVEL ?? file.log?.level ?? 'info',
       cli: Object.freeze(cli),
@@ -334,6 +347,47 @@ export class ConfigManager {
         }),
       });
       return this.cliConfiguration(harness);
+    });
+    const settled = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    ConfigManager.writes.set(filePath, settled);
+    void settled.then(() => {
+      if (ConfigManager.writes.get(filePath) === settled) ConfigManager.writes.delete(filePath);
+    });
+    return operation;
+  }
+
+  async configureSharedWorkspaces(paths: string[]): Promise<void> {
+    const filePath = this.current.configFilePath;
+    const selected = sharedWorkspacePathsSchema.safeParse(paths);
+    if (!selected.success) {
+      throw this.configurationError(filePath, describeValidation(selected.error));
+    }
+    const value = selected.data;
+    const previous = ConfigManager.writes.get(filePath) ?? Promise.resolve();
+    const operation = previous.then(async () => {
+      const file = this.readFile(filePath);
+      file.paths = { ...file.paths, shared_workspaces: value };
+      const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporaryPath, stringify(file), {
+          encoding: 'utf8',
+          flag: 'wx',
+          mode: 0o600,
+        });
+        await rename(temporaryPath, filePath);
+      } catch (error) {
+        await unlink(temporaryPath).catch(() => undefined);
+        throw this.configurationError(filePath, `cannot write file: ${String(error)}`);
+      }
+      this.snapshot = Object.freeze({
+        ...this.snapshot,
+        sharedWorkspacePaths: Object.freeze(
+          value.map((path) => this.resolvePath(path, dirname(filePath))),
+        ),
+      });
     });
     const settled = operation.then(
       () => undefined,

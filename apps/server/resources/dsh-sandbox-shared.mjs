@@ -1,4 +1,4 @@
-import { native, sbplString, sharedRoot } from './dsh-shared-roots.mjs';
+import { native, sbplString, additionalRoots } from './dsh-shared-roots.mjs';
 
 const { LocalSandboxProvider } = await native('@deepseek-ai/dsh-sandbox-local');
 const { grantArgs } = await native('@deepseek-ai/node-addon-system/landlock-run');
@@ -7,7 +7,7 @@ const { default: z } = await native('@deepseek-ai/schemastery');
 export default class IslesSharedSandbox extends LocalSandboxProvider {
   static Config = z.intersect([
     LocalSandboxProvider.Config,
-    z.object({ sharedDir: z.string().required() }),
+    z.object({ additionalDirs: z.array(z.string()).required() }),
   ]);
 
   constructor(ctx, config) {
@@ -21,22 +21,24 @@ export default class IslesSharedSandbox extends LocalSandboxProvider {
 
   runnerArgv(runner, policy) {
     if (policy.mode !== 'workspace-write') return super.runnerArgv(runner, policy);
-    const root = sharedRoot(this.sharedConfig);
+    const roots = additionalRoots(this.sharedConfig);
     if (runner === 'landlock')
       return [
         this.landlockLauncher(),
         ...grantArgs({
           readOnly: ['/'],
-          readWrite: ['/dev/null', '/tmp', policy.workspaceRoot, root],
+          readWrite: ['/dev/null', '/tmp', policy.workspaceRoot, ...roots],
         }),
       ];
     const argv = super.runnerArgv(runner, policy);
-    if (runner === 'bwrap') return [...argv, '--bind', root, root];
+    if (runner === 'bwrap') return [...argv, ...roots.flatMap((root) => ['--bind', root, root])];
     if (runner === 'seatbelt') {
       const index = argv.indexOf('-p');
       if (index < 0 || typeof argv[index + 1] !== 'string')
         throw new Error('Isles DSH native Seatbelt profile is unavailable');
-      argv[index + 1] += ` (allow file-write* (subpath ${sbplString(root)}))`;
+      argv[index + 1] += roots
+        .map((root) => ` (allow file-write* (subpath ${sbplString(root)}))`)
+        .join('');
     } else if (runner !== 'windows-acl')
       throw new Error(`Isles DSH unsupported sandbox runner: ${runner}`);
     return argv;
@@ -50,19 +52,27 @@ export default class IslesSharedSandbox extends LocalSandboxProvider {
 
   materializeAclGrant(sessionId, workspaceRoot) {
     const capability = super.materializeAclGrant(sessionId, workspaceRoot);
-    const root = sharedRoot(this.sharedConfig);
+    const roots = additionalRoots(this.sharedConfig);
     const granted = this.sharedGrants.get(workspaceRoot) ?? new Set();
-    if (!granted.has(root)) {
+    for (const root of roots) {
+      if (granted.has(root)) continue;
       const grant = this.workspaceGrants.get(workspaceRoot);
       if (!grant) throw new Error('Isles DSH Windows workspace grant is unavailable');
       // The native restricted token already carries this workspace's SID. Give
-      // that same SID access to shared, keeping other workspaces ungranted.
-      // Revocable shared grants are disposed by the native provider together
-      // with its existing workspace grant; keep only private's reuse ACE standing.
+      // that same SID access to each root. Native disposal revokes these grants
+      // with the workspace grant; only private's reuse ACE stays standing.
       grant.add(root);
       granted.add(root);
       this.sharedGrants.set(workspaceRoot, granted);
     }
     return capability;
+  }
+
+  revokeAclGrants() {
+    try {
+      super.revokeAclGrants();
+    } finally {
+      this.sharedGrants.clear();
+    }
   }
 }
