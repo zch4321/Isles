@@ -4,7 +4,7 @@
 >
 > [需求](requirements.md)与[架构](architecture.md)已形成基线。本文的阶段用于组织产品开发，不要求产品里的 agent 按固定流水线工作。
 
-后续 Web 与 QQ 统一接入的建议阶段和验收见 [Gateway 设计提案](gateway-design.md#11-实施拆分与验收)。提案评审后更新实施范围。
+后续 Web 与 QQ 统一接入的建议阶段和验收见 [Gateway 设计提案](gateway-design.md#11-实施拆分与验收)。已明确 Bot 绑定 Agent、统一 `gateway` 寻址及 Admin/平台昵称显示，提案评审后确定实施范围。
 
 ## 1. 已确定的方向
 

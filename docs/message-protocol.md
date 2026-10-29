@@ -4,6 +4,8 @@
 >
 > Agent 运行时的说明由 [AGENTS.md 模板](../apps/server/resources/AGENTS.template.md)生成到它的工作目录，交给 harness 原生加载。本文说明接口与数据版本边界，不通过首次聊天注入。
 
+本文记录当前已交付协议。后续统一 `gateway` 寻址、Web 的 `from: Admin` 与外部平台昵称格式见 [Gateway 设计提案](gateway-design.md#5-统一消息与模型输入)。
+
 ## 消息标识与头部
 
 一条消息在存储与接口中以 `(channel_id, seq)` 唯一定位。`seq` 是频道内递增的正整数，已分配的序号不重用；不同频道可以都有序号 1。没有单独的消息 UUID。发送重试继续使用发送者作用域内的 `clientId`，重试不分配新序号。模型可见头部优先显示名称，实际寻址仍使用完整 UUID。

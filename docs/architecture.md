@@ -10,7 +10,7 @@
 
 当前版本与本轮验证状态见 [Harness 升级记录](harness-upgrade-2026-10-24.md)。
 
-Web 与 IM 统一接入的后续架构见 [Gateway 设计提案](gateway-design.md)，包含身份、频道、MCP 和持久收发流程，状态为待评审。
+Web 与 IM 统一接入的后续架构见 [Gateway 设计提案](gateway-design.md)：IM 身份绑定 Agent，统一消息按 `gateway` 与所属频道寻址；身份、MCP 和持久收发细节继续按提案评审。
 
 ## 1. 架构目标与约束
 
