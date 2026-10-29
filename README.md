@@ -242,6 +242,7 @@ API 与存储中的 `threadId` 表示 adapter 返回的不透明原生 session I
 
 - [需求文档](docs/requirements.md)
 - [架构设计](docs/architecture.md)
+- [统一接入端设计提案](docs/gateway-design.md)
 - [Harness 适配层验收](docs/harness-adapter-acceptance.md)
 - [Steer 投递验收](docs/steer-delivery-acceptance.md)
 - [实现计划](docs/implementation-plan.md)
