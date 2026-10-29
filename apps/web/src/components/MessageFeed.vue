@@ -26,7 +26,8 @@ const emit = defineEmits<{ openInspector: [] }>();
 const GROUP_WINDOW = 5 * 60_000;
 
 const nameOf = (message: Message) => senderName(message, props.directory);
-const excerpt = (body: string) => body.replace(/\s+/g, ' ').slice(0, 80);
+const excerpt = (message: Message) =>
+  message.body.replace(/\s+/g, ' ').trim().slice(0, 80) || (message.images.length ? '[图片]' : '');
 
 // Worst state first; a group message settles once no member is still waiting for it.
 const pending = ['uncertain', 'failed', 'queued', 'submitting', 'steering'] as const;
@@ -98,7 +99,7 @@ const entries = computed(() => {
       reply:
         message.replyTo && message.replyTo !== previous?.seq
           ? {
-              label: target ? `${nameOf(target)}：${excerpt(target.body)}` : '更早的消息',
+              label: target ? `${nameOf(target)}：${excerpt(target)}` : '更早的消息',
               targetId: target ? messageKey(target) : undefined,
             }
           : undefined,

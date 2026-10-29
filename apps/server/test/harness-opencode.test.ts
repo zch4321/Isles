@@ -8,6 +8,7 @@ import { OpenCodeHttpError, readSse } from '../src/harness/opencode/client.js';
 import { OpenCodeEnvironment } from '../src/harness/opencode/environment.js';
 import type { OpenCodePermissionRule } from '../src/harness/opencode/protocol.js';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessEvent,
   type HarnessHandlers,
@@ -112,6 +113,25 @@ function nativeWildcardMatch(input: string, pattern: string) {
 }
 
 describe('OpenCode native SSE', () => {
+  it('accepts an image-bearing SSE frame larger than the former 8 MB limit', async () => {
+    const payload = 'A'.repeat(8_000_004);
+    const frames: unknown[] = [];
+    const encoder = new TextEncoder();
+    await readSse(
+      sseChunks([
+        encoder.encode(`data: {"image":"${payload.slice(0, 4_000_000)}`),
+        encoder.encode(`${payload.slice(4_000_000)}"}\n\n`),
+      ]),
+      (frame) => frames.push(frame),
+    );
+    expect(frames).toEqual([{ image: payload }]);
+  });
+  it('limits the combined data lines of an SSE frame', async () => {
+    const line = new TextEncoder().encode(`data: ${'A'.repeat(1024 * 1024)}\n`);
+    await expect(readSse(sseChunks(Array(65).fill(line)), () => {})).rejects.toThrow(
+      'OpenCode 事件帧超出大小限制',
+    );
+  });
   it('preserves UTF-8 and CRLF frame boundaries across byte-sized transport chunks', async () => {
     const text =
       ': heartbeat\r\nevent: ignored\r\ndata: {"text":\r\ndata: "中文"}\r\n\r\ndata: {"next":true}\r\n\r\n';
@@ -138,6 +158,149 @@ describe('OpenCode native SSE', () => {
 });
 
 describe('OpenCode v2 adapter', () => {
+  it.each(['preparing', 'submitting'] as const)(
+    'keeps the input retryable when the %s callback rejects',
+    async (blockedState) => {
+      const f = await fixture();
+      const session = await f.connect();
+      const id = await session.createSession(() => {});
+      const input = f.input(id);
+      const error = new Error('input invalidated');
+      const states: string[] = [];
+      await expect(
+        session.submit({
+          ...input,
+          submissionState(state) {
+            states.push(state);
+            if (state === blockedState) throw error;
+          },
+        }),
+      ).rejects.toBe(error);
+      expect(states).toEqual(
+        blockedState === 'preparing' ? ['preparing'] : ['preparing', 'submitting'],
+      );
+      expect(f.native.calls.filter((call) => call.path.endsWith('/prompt'))).toEqual([]);
+      f.native.onRequest = ({ path, body }) => {
+        if (!path.endsWith('/prompt')) return;
+        const receipt = inboxReceipt(id, 'input', (body as { id: string }).id);
+        f.native.execution(id);
+        f.native.deliver(id, receipt.data.id);
+        return receipt;
+      };
+      const retryStates: string[] = [];
+      await session.submit({ ...input, submissionState: (state) => retryStates.push(state) });
+      expect(retryStates).toEqual(['preparing', 'submitting']);
+      expect(f.native.calls.filter((call) => call.path.endsWith('/prompt'))).toHaveLength(1);
+    },
+  );
+  it('sends labeled native file attachments for a new turn and text alone for steer', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    let started = false;
+    f.native.onRequest = ({ path, body }) => {
+      if (path === '/api/model')
+        return {
+          data: [
+            {
+              ...fixtureModel,
+              capabilities: { ...fixtureModel.capabilities, input: ['text', 'image'] },
+            },
+          ],
+        };
+      if (!path.endsWith('/prompt')) return;
+      const receipt = inboxReceipt(id, 'input', (body as { id: string }).id);
+      if (!started) {
+        f.native.execution(id);
+        started = true;
+      }
+      f.native.deliver(id, receipt.data.id);
+      return receipt;
+    };
+    const image = {
+      id: 'image-1',
+      path: join(f.agent.workspace, '.isles-images', 'one.png'),
+      mimeType: 'image/png' as const,
+      data: 'aW1hZ2U=',
+      label: '[channel: test, message 1, image 1]',
+    };
+    const { turnId } = await session.submit({ ...f.input(id, 'inspect'), images: [image] });
+    await session.steer!({
+      sessionId: id,
+      expectedTurnId: turnId,
+      batchId: randomUUID(),
+      text: 'append path only',
+      ...{ images: [image] },
+    });
+    const calls = f.native.calls.filter((call) => call.path.endsWith('/prompt'));
+    expect(calls[0]?.body).toMatchObject({
+      text: `inspect\n\n${image.label}`,
+      files: [{ uri: `data:image/png;base64,${image.data}`, name: image.label }],
+    });
+    expect(calls[1]?.body).toEqual({
+      id: expect.any(String),
+      text: 'append path only',
+      delivery: 'steer',
+      metadata: { isles: f.agent.id },
+    });
+  });
+  it('rejects images before model selection and prompting for a text-only model', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const image = {
+      id: 'image-1',
+      path: join(f.agent.workspace, '.isles-images', 'one.png'),
+      mimeType: 'image/png' as const,
+      data: 'aW1hZ2U=',
+      label: '[channel: test, message 1, image 1]',
+    };
+    const prior = f.native.calls.length;
+    const refusal = await session
+      .submit({ ...f.input(id), images: [image] })
+      .catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(HarnessImageInputUnsupported);
+    expect((refusal as Error).message).toContain('请选择支持图片输入的模型并恢复 Agent');
+    expect(f.native.calls.slice(prior).some((call) => call.method === 'POST')).toBe(false);
+    f.native.onRequest = ({ path, body }) => {
+      if (!path.endsWith('/prompt')) return;
+      const receipt = inboxReceipt(id, 'text only', (body as { id: string }).id);
+      f.native.execution(id);
+      f.native.deliver(id, receipt.data.id);
+      return receipt;
+    };
+    await session.submit(f.input(id, 'text only'));
+    expect(f.native.calls.filter((call) => call.path.endsWith('/prompt'))[0]?.body).toMatchObject({
+      text: 'text only',
+    });
+  });
+  it('leaves image handling to OpenCode when the model is missing from its catalog', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    f.native.onRequest = ({ path, body }) => {
+      if (!path.endsWith('/prompt')) return;
+      const receipt = inboxReceipt(id, 'input', (body as { id: string }).id);
+      f.native.execution(id);
+      f.native.deliver(id, receipt.data.id);
+      return receipt;
+    };
+    const result = await session.submit({
+      ...f.input(id),
+      model: 'unknown/model',
+      images: [
+        {
+          id: 'image-1',
+          path: 'one.png',
+          mimeType: 'image/png',
+          data: 'aW1hZ2U=',
+          label: 'image 1',
+        },
+      ],
+    });
+    expect(result.turnId).toBeTruthy();
+    expect(f.native.calls.filter((call) => call.path.endsWith('/prompt'))).toHaveLength(1);
+  });
   async function runningFixture() {
     const f = await fixture();
     const session = await f.connect();

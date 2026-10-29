@@ -5,6 +5,7 @@ import type { AgentRecord } from '../../storage/store.js';
 import { additionalWorkspacePaths } from '../../runtime/workspace-paths.js';
 import { permissionAllowed, permissionQuestions } from '../shared/permissions.js';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessAdapter,
   type HarnessCatalog,
@@ -295,7 +296,25 @@ class KimiWebSession implements HarnessSession {
       ...(this.agent.reasoningEffort === 'default' ? {} : { thinking: this.agent.reasoningEffort }),
     };
   }
+  private async supportsImage(model: string): Promise<boolean | undefined> {
+    try {
+      const selected =
+        model === 'default'
+          ? kimiStatusSchema.parse(await this.native().request('GET', this.path('status'))).model
+          : model;
+      const models = kimiModelsSchema.parse(await this.native().request('GET', '/api/v1/models'));
+      const capabilities = models.items.find((entry) => entry.model === selected)?.capabilities;
+      return capabilities?.includes('image_in');
+    } catch (error) {
+      this.environment.log.warn(
+        { error: this.environment.redactor.text(error) },
+        'Kimi Code image capability lookup failed',
+      );
+      return undefined;
+    }
+  }
   async submit(input: HarnessTurnInput) {
+    input.submissionState?.('preparing');
     if (
       this.stopped ||
       this.active ||
@@ -305,19 +324,28 @@ class KimiWebSession implements HarnessSession {
       input.reasoningEffort !== this.agent.reasoningEffort
     )
       throw new HarnessSubmissionRejected('Kimi Code 输入与当前会话配置不一致');
+    const supported = input.images?.length ? await this.supportsImage(input.model) : undefined;
+    if (this.stopped || this.active)
+      throw new HarnessSubmissionRejected('Kimi Code 输入与当前会话配置不一致');
+    if (supported === false)
+      throw new HarnessImageInputUnsupported(
+        '当前 Kimi Code 模型不支持图片输入，请选择支持图片输入的模型并恢复 Agent',
+      );
     const prompts = kimiPromptsSchema.parse(
       await this.native().request('GET', this.path('prompts')),
     );
     if (this.stopped || this.active || prompts.active || prompts.queued.length)
       throw new HarnessSubmissionRejected('Kimi Code 原生会话有待处理输入，请等待原执行结束');
     const promptId = this.promptId(input.runId);
+    if (this.owned.has(promptId)) throw new HarnessSubmissionRejected('Kimi Code 输入批次已投递');
+    input.submissionState?.('submitting');
     const active: Turn = {
       inputs: new Map(),
       phases: new Map(),
       admitting: 0,
     };
     this.active = active;
-    return this.send(active, promptId, input.text);
+    return this.send(active, promptId, input.text, undefined, input.images);
   }
   async steer(input: HarnessSteerInput) {
     const active = this.active;
@@ -346,7 +374,13 @@ class KimiWebSession implements HarnessSession {
       throw new HarnessSubmissionRejected('Kimi Code 当前执行已结束，追加消息进入下一轮');
     return this.send(active, this.promptId(input.batchId), input.text, input.expectedTurnId);
   }
-  private async send(active: Turn, id: string, text: string, expectedTurnId?: string) {
+  private async send(
+    active: Turn,
+    id: string,
+    text: string,
+    expectedTurnId?: string,
+    images?: HarnessTurnInput['images'],
+  ) {
     if (this.owned.has(id)) throw new HarnessSubmissionRejected('Kimi Code 输入批次已投递');
     let resolve!: PendingInput['resolve'];
     let reject!: PendingInput['reject'];
@@ -376,7 +410,17 @@ class KimiWebSession implements HarnessSession {
       const result = kimiPromptSchema.parse(
         await this.native().request('POST', this.path('prompts'), {
           prompt_id: id,
-          content: [{ type: 'text', text }],
+          content: [
+            { type: 'text', text },
+            ...(images ?? []).flatMap((image) => [
+              { type: 'text', text: image.label },
+              {
+                type: 'image',
+                name: image.label,
+                source: { kind: 'path', path: image.path },
+              },
+            ]),
+          ],
           metadata: { isles_agent_id: this.agent.id },
           ...this.configuration(),
         }),

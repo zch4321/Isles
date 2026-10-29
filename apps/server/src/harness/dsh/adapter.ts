@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import type { AgentRecord } from '../../storage/store.js';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessAdapter,
   type HarnessHandlers,
@@ -126,8 +127,12 @@ class DshSession implements HarnessSession {
   }
   private checked(value: unknown) {
     const refused = rejectionSchema.safeParse(value);
-    if (refused.success)
-      throw new HarnessSubmissionRejected(this.environment.redactor.text(refused.data.reason));
+    if (refused.success) {
+      const reason = this.environment.redactor.text(refused.data.reason);
+      if (refused.data.code === 'image_input_unsupported')
+        throw new HarnessImageInputUnsupported(reason);
+      throw new HarnessSubmissionRejected(reason);
+    }
     return value;
   }
   async createSession(onCreated: (id: string) => void) {
@@ -161,12 +166,17 @@ class DshSession implements HarnessSession {
       this.handlers.event({ type: 'context_usage', sessionId, usage: session.contextUsage });
   }
   async submit(input: HarnessTurnInput) {
+    input.submissionState?.('preparing');
     if (this.stopped || input.sessionId !== this.sessionId || this.active || this.rootTurnId)
       throw new HarnessSubmissionRejected('DSH session 当前无法开始执行');
+    const selection = modelSelection(input.model, input.reasoningEffort);
+    this.native();
+    input.submissionState?.('submitting');
     const active: Active = { inputs: new Map(), submitted: new Set() };
     this.active = active;
     return this.send(active, 'submit', `msg_isles_${input.runId}`, input.text, {
-      selection: modelSelection(input.model, input.reasoningEffort),
+      selection,
+      ...(input.images?.length ? { images: input.images } : {}),
     });
   }
   async steer(input: HarnessSteerInput) {

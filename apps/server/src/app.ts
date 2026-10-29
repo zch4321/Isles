@@ -7,6 +7,7 @@ import {
   createAgentsSchema,
   cliConfigurationUpdateSchema,
   createGroupSchema,
+  MAX_IMAGE_BYTES,
   sendMessageSchema,
   updateAgentSchema,
   updateChannelSchema,
@@ -233,11 +234,52 @@ export async function buildApp(options: AppOptions) {
   app.get<{ Params: { id: string } }>('/api/channels/:id', (request) =>
     store.channelDetail(request.params.id),
   );
+  await app.register(async (images) => {
+    const parseImage = { parseAs: 'buffer' as const, bodyLimit: MAX_IMAGE_BYTES };
+    images.addContentTypeParser(/^image\//, parseImage, (_request, body, done) => done(null, body));
+    images.addContentTypeParser('application/octet-stream', parseImage, (_request, body, done) =>
+      done(null, body),
+    );
+    images.post<{ Params: { id: string } }>(
+      '/api/channels/:id/images',
+      { bodyLimit: MAX_IMAGE_BYTES },
+      async (request, reply) => {
+        const contentType = request.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase();
+        if (
+          !contentType ||
+          (!contentType.startsWith('image/') && contentType !== 'application/octet-stream')
+        )
+          throw new HttpError(415, '请上传图片文件');
+        const { name } = z.strictObject({ name: z.string() }).parse(request.query);
+        if (!Buffer.isBuffer(request.body)) throw new HttpError(400, '请上传图片文件');
+        return reply
+          .code(201)
+          .send(await runtime.images.upload(request.params.id, request.body, name));
+      },
+    );
+    images.get<{ Params: { id: string; imageId: string } }>(
+      '/api/channels/:id/images/:imageId',
+      async (request, reply) => {
+        const image = store.getImage(request.params.id, request.params.imageId);
+        const stream = await runtime.images.stream(image);
+        return reply
+          .type(image.mimeType)
+          .header('Content-Length', image.size)
+          .header('X-Content-Type-Options', 'nosniff')
+          .send(stream);
+      },
+    );
+  });
   app.get<{ Params: { id: string } }>('/api/channels/:id/export', (request, reply) => {
     const { timeZone } = z
       .strictObject({ timeZone: z.string().min(1).max(100).default('UTC') })
       .parse(request.query);
-    const format = chatExportFormatter(timeZone);
+    const address = app.server.address();
+    const imageOrigin =
+      address && typeof address === 'object'
+        ? `http://127.0.0.1:${address.port}`
+        : (options.runtimeUrl ?? `http://127.0.0.1:${options.config.current.port}`);
+    const format = chatExportFormatter(timeZone, imageOrigin);
     const { filename, markdown } = format(store.chatExportSnapshot(request.params.id));
     const encoded = encodeURIComponent(filename).replace(
       /[!'()*]/g,

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AcpAdapter } from '../src/harness/acp/adapter.js';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessEvent,
   type HarnessHandlers,
@@ -123,6 +124,114 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
 }
 
 describe('Kimi Code discovery', () => {
+  it.each(['preparing', 'submitting'] as const)(
+    'keeps ACP input retryable when the %s callback rejects',
+    async (blockedState) => {
+      const f = await fixture();
+      const { session, id } = await f.created();
+      const input = f.input('callback test', id);
+      const error = new Error('input invalidated');
+      const states: string[] = [];
+      await expect(
+        session.submit({
+          ...input,
+          submissionState(state) {
+            states.push(state);
+            if (state === blockedState) throw error;
+          },
+        }),
+      ).rejects.toBe(error);
+      expect(states).toEqual(
+        blockedState === 'preparing' ? ['preparing'] : ['preparing', 'submitting'],
+      );
+      expect(await f.frames('session/prompt')).toEqual([]);
+      const retryStates: string[] = [];
+      await session.submit({ ...input, submissionState: (state) => retryStates.push(state) });
+      await f.completed(input.runId);
+      expect(retryStates).toEqual(['preparing', 'submitting']);
+      expect(await f.frames('session/prompt')).toHaveLength(1);
+    },
+  );
+  it('marks an explicitly busy ACP retry as preparing again', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ busy: 1 });
+    const input = f.input('retry callback test', id);
+    const states: string[] = [];
+    await session.submit({ ...input, submissionState: (state) => states.push(state) });
+    await f.completed(input.runId);
+    expect(states).toEqual(['preparing', 'submitting', 'preparing', 'submitting']);
+    expect(await f.frames('session/prompt')).toHaveLength(2);
+  });
+  it('keeps an ACP input retryable when the busy-retry callback rejects', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    await f.cli.set({ busy: 1 });
+    const input = f.input('retry callback test', id);
+    const error = new Error('input invalidated');
+    let preparations = 0;
+    await expect(
+      session.submit({
+        ...input,
+        submissionState(state) {
+          if (state === 'preparing' && ++preparations === 2) throw error;
+        },
+      }),
+    ).rejects.toBe(error);
+    expect(await f.frames('session/prompt')).toHaveLength(1);
+    await session.submit(input);
+    await f.completed(input.runId);
+    expect(await f.frames('session/prompt')).toHaveLength(2);
+  });
+  it('sends labeled ACP image blocks when the agent declares image input', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    const image = {
+      id: 'image-1',
+      path: join(f.agent.workspace, '.isles-images', 'one.png'),
+      mimeType: 'image/png' as const,
+      data: 'aW1hZ2U=',
+      label: '[channel: test, message 1, image 1]',
+    };
+    const input = { ...f.input('inspect', id), images: [image] };
+    await session.submit(input);
+    await f.completed(input.runId);
+    expect((await f.frames('session/prompt'))[0]).toMatchObject({
+      params: {
+        sessionId: id,
+        prompt: [
+          { type: 'text', text: 'inspect' },
+          { type: 'text', text: image.label },
+          { type: 'image', mimeType: 'image/png', data: image.data },
+        ],
+      },
+    });
+  });
+  it.each([{ noImage: true }, { omitImageCapability: true }])(
+    'rejects images before prompting when ACP image capability is absent or false: %j',
+    async (settings) => {
+      const f = await fixture();
+      await f.cli.set(settings);
+      const { session, id } = await f.created();
+      const image = {
+        id: 'image-1',
+        path: join(f.agent.workspace, '.isles-images', 'one.png'),
+        mimeType: 'image/png' as const,
+        data: 'aW1hZ2U=',
+        label: '[channel: test, message 1, image 1]',
+      };
+      await expect(
+        session.submit({ ...f.input('inspect', id), images: [image] }),
+      ).rejects.toBeInstanceOf(HarnessImageInputUnsupported);
+      expect(await f.frames('session/prompt')).toEqual([]);
+      const plain = f.input('text only', id);
+      await session.submit(plain);
+      await f.completed(plain.runId);
+      expect((await f.frames('session/prompt'))[0]).toMatchObject({
+        params: { prompt: [{ type: 'text', text: 'text only' }] },
+      });
+    },
+  );
   it('projects usage updates after completion and during resume, filtering invalid and unrelated sessions', async () => {
     const f = await fixture();
     const { session, id } = await f.created();

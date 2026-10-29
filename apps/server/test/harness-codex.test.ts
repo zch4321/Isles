@@ -13,6 +13,7 @@ import {
   type NativeHandlers,
 } from '../src/harness/codex/protocol.js';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessCatalog,
   type HarnessHandlers,
@@ -156,6 +157,162 @@ function userInput(threadId = 'session-one', turnId = 'turn-one') {
 }
 
 describe('Codex adapter protocol boundary', () => {
+  it.each(['preparing', 'submitting'] as const)(
+    'keeps text submission retryable when the %s callback rejects',
+    async (blockedState) => {
+      const f = await fixture();
+      await f.session.createSession(() => {});
+      const error = new Error('input invalidated');
+      const states: string[] = [];
+      await expect(
+        f.session.submit({
+          ...f.input,
+          submissionState(state) {
+            states.push(state);
+            if (state === blockedState) throw error;
+          },
+        }),
+      ).rejects.toBe(error);
+      expect(states).toEqual(
+        blockedState === 'preparing' ? ['preparing'] : ['preparing', 'submitting'],
+      );
+      expect(f.calls.filter((call) => call.method === 'turn/start')).toEqual([]);
+      const retryStates: string[] = [];
+      const retry = f.session.submit({
+        ...f.input,
+        submissionState: (state) => retryStates.push(state),
+      });
+      // Text-only input reaches the native request without yielding to a capability preflight.
+      expect(retryStates).toEqual(['preparing', 'submitting']);
+      expect(f.calls.filter((call) => call.method === 'turn/start')).toHaveLength(1);
+      await expect(retry).resolves.toEqual({ turnId: 'turn-one' });
+    },
+  );
+  it('sends labeled native images on a new turn and keeps steer text-only', async () => {
+    const f = await fixture();
+    await f.session.createSession(() => {});
+    const image = {
+      id: 'image-1',
+      path: join(f.agent.workspace, '.isles-images', 'one.png'),
+      mimeType: 'image/png' as const,
+      data: 'aW1hZ2U=',
+      label: '[channel: test, message 1, image 1]',
+    };
+    f.setRequest(async (method) =>
+      method === 'model/list'
+        ? { data: [{ model: f.input.model, inputModalities: ['text', 'image'] }], nextCursor: null }
+        : { turn: { id: 'turn-one' } },
+    );
+    await f.session.submit({ ...f.input, images: [image] });
+    expect(f.calls.find((call) => call.method === 'turn/start')?.params.input).toEqual([
+      { type: 'text', text: f.input.text, text_elements: [] },
+      { type: 'text', text: image.label, text_elements: [] },
+      { type: 'localImage', path: image.path },
+    ]);
+    f.setRequest(async () => ({ turnId: 'active-turn' }));
+    await f.session.steer!({
+      sessionId: f.input.sessionId,
+      expectedTurnId: 'active-turn',
+      batchId: randomUUID(),
+      text: 'append path only',
+      ...{ images: [image] },
+    });
+    expect(f.calls.find((call) => call.method === 'turn/steer')?.params.input).toEqual([
+      { type: 'text', text: 'append path only', text_elements: [] },
+    ]);
+  });
+  it('rejects images before turn/start when a model explicitly advertises text only', async () => {
+    const f = await fixture();
+    await f.session.createSession(() => {});
+    const image = {
+      id: 'image-1',
+      path: join(f.agent.workspace, '.isles-images', 'one.png'),
+      mimeType: 'image/png' as const,
+      data: 'aW1hZ2U=',
+      label: '[channel: test, message 1, image 1]',
+    };
+    f.setRequest(async (method) =>
+      method === 'model/list'
+        ? { data: [{ model: f.input.model, inputModalities: ['text'] }], nextCursor: null }
+        : { turn: { id: 'turn-one' } },
+    );
+    const refusal = await f.session
+      .submit({ ...f.input, images: [image] })
+      .catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(HarnessImageInputUnsupported);
+    expect((refusal as Error).message).toContain('请选择支持图片输入的模型并恢复 Agent');
+    expect(f.calls.filter((call) => call.method === 'turn/start')).toEqual([]);
+    await f.session.submit(f.input);
+    expect(f.calls.find((call) => call.method === 'turn/start')?.params.input).toEqual([
+      { type: 'text', text: f.input.text, text_elements: [] },
+    ]);
+  });
+  it.each([true, false])(
+    'does not start a turn when closed during model capability lookup (image supported: %s)',
+    async (supported) => {
+      const f = await fixture();
+      await f.session.createSession(() => {});
+      let respond!: (value: unknown) => void;
+      const pendingLookup = new Promise<unknown>((resolve) => {
+        respond = resolve;
+      });
+      f.setRequest(async (method) =>
+        method === 'model/list' ? pendingLookup : { turn: { id: 'turn-one' } },
+      );
+      const states: string[] = [];
+      const pending = f.session.submit({
+        ...f.input,
+        submissionState: (state) => states.push(state),
+        images: [
+          {
+            id: 'image-1',
+            path: 'one.png',
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+            label: 'image 1',
+          },
+        ],
+      });
+      const caught = pending.catch((error: unknown) => error);
+      await vi.waitFor(() =>
+        expect(f.calls.some((call) => call.method === 'model/list')).toBe(true),
+      );
+      await f.session.close();
+      respond({
+        data: [{ model: f.input.model, inputModalities: supported ? ['text', 'image'] : ['text'] }],
+        nextCursor: null,
+      });
+      const refusal = await caught;
+      expect(states).toEqual(['preparing']);
+      expect(refusal).toBeInstanceOf(HarnessSubmissionRejected);
+      expect(refusal).not.toBeInstanceOf(HarnessImageInputUnsupported);
+      expect(f.calls.filter((call) => call.method === 'turn/start')).toEqual([]);
+      await expect(f.session.submit(f.input)).rejects.toBeInstanceOf(HarnessSubmissionRejected);
+    },
+  );
+  it('leaves image handling to Codex when the model has no modality declaration', async () => {
+    const f = await fixture();
+    await f.session.createSession(() => {});
+    f.setRequest(async (method) =>
+      method === 'model/list'
+        ? { data: [{ model: f.input.model }], nextCursor: null }
+        : { turn: { id: 'turn-one' } },
+    );
+    await expect(
+      f.session.submit({
+        ...f.input,
+        images: [
+          {
+            id: 'image-1',
+            path: 'one.png',
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+            label: 'image 1',
+          },
+        ],
+      }),
+    ).resolves.toEqual({ turnId: 'turn-one' });
+  });
   it('filters unrelated native activity and accepts only verified descendants', async () => {
     const f = await fixture();
     await f.session.createSession(() => {});

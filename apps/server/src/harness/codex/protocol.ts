@@ -17,6 +17,10 @@ export const threadResponseSchema = z.object({
   instructionSources: z.array(z.string()).default([]),
 });
 export const turnResponseSchema = z.object({ turn: z.object({ id: z.string().min(1) }) });
+export const modelInputPageSchema = z.object({
+  data: z.array(z.object({ model: z.string(), inputModalities: z.array(z.string()).optional() })),
+  nextCursor: z.string().nullish(),
+});
 export const turnSteerResponseSchema = z.object({ turnId: z.string().min(1) });
 export const turnNotificationSchema = z.object({
   threadId: z.string(),

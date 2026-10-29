@@ -3,6 +3,9 @@ import {
   channelSchema,
   contextUsageSchema,
   messageKey,
+  imageSchema,
+  MAX_MESSAGE_IMAGES,
+  MAX_READ_IMAGE_BYTES,
   workspacePathsSchema,
 } from '@isles/contracts';
 import type {
@@ -14,6 +17,7 @@ import type {
   DeliveryStatus,
   IslesEvent,
   Message,
+  MessageImage,
   MessageRef,
   QuestionAnswer,
   QuestionDefinition,
@@ -50,6 +54,7 @@ import {
   channels,
   deliveries,
   events,
+  imageAssets,
   messages,
   questions,
   runItems,
@@ -62,6 +67,7 @@ export type AgentRecord = typeof agents.$inferSelect & {
   dangerFullAccess: boolean;
 };
 export type ChannelRecord = typeof channels.$inferSelect;
+export type ImageRecord = MessageImage & { sha256: string };
 type AgentUpdate = Partial<
   Pick<
     AgentRecord,
@@ -99,6 +105,7 @@ export interface MessageInput {
   clientId: string;
   replyTo?: number | undefined;
   mentions?: string[] | undefined;
+  imageIds?: string[] | undefined;
 }
 /** One channel's share of a merged input. */
 export interface ClaimedChannel {
@@ -119,6 +126,23 @@ export interface ChatExportSnapshot {
 const RECENT_PER_CHANNEL = 10;
 const USER = 'user';
 const now = () => new Date().toISOString();
+
+/** Keep complete messages within the image budget in the caller's pagination direction. */
+export function takeMessagesWithinImageBudget<T extends Pick<Message, 'images'>>(
+  messages: T[],
+  from: 'start' | 'end' = 'start',
+): T[] {
+  let bytes = 0;
+  let count = 0;
+  const ordered = from === 'start' ? messages : [...messages].reverse();
+  for (const message of ordered) {
+    const size = message.images.reduce((sum, image) => sum + image.size, 0);
+    if (bytes + size > MAX_READ_IMAGE_BYTES) break;
+    bytes += size;
+    count++;
+  }
+  return from === 'start' ? messages.slice(0, count) : messages.slice(messages.length - count);
+}
 
 const deliveryMessageJoin = and(
   eq(deliveries.channelId, messages.channelId),
@@ -763,7 +787,7 @@ export class Store {
           and(
             eq(deliveries.channelId, id),
             eq(deliveries.agentId, agentId),
-            inArray(deliveries.status, ['queued', 'skipped', 'steering']),
+            inArray(deliveries.status, ['queued', 'skipped', 'submitting', 'steering']),
           ),
         )
         .run();
@@ -774,21 +798,93 @@ export class Store {
 
   // Messages
 
+  private writableChannel(channelId: string): ChannelRecord {
+    const channel = this.getChannel(channelId);
+    if (channel.kind === 'group' && this.groupDeletedAt(channelId))
+      throw new HttpError(409, '群聊已删除，历史只读');
+    if (channel.kind === 'private' && this.getAgent(channel.agentId!).status === 'deleted')
+      throw new HttpError(409, '该 Agent 已删除，私聊历史只读');
+    return channel;
+  }
+
+  getImage(id: string): ImageRecord;
+  getImage(channelId: string, id: string): ImageRecord;
+  getImage(channelOrId: string, id?: string): ImageRecord {
+    const image = this.db
+      .select()
+      .from(imageAssets)
+      .where(
+        id === undefined
+          ? eq(imageAssets.id, channelOrId)
+          : and(eq(imageAssets.id, id), eq(imageAssets.channelId, channelOrId)),
+      )
+      .get();
+    if (!image) throw new HttpError(404, '图片不存在');
+    return image;
+  }
+
+  findImage(channelId: string, sha256: string, name: string): ImageRecord | undefined {
+    return this.db
+      .select()
+      .from(imageAssets)
+      .where(
+        and(
+          eq(imageAssets.channelId, channelId),
+          eq(imageAssets.sha256, sha256),
+          eq(imageAssets.name, name),
+        ),
+      )
+      .get();
+  }
+
+  registerImage(input: Omit<ImageRecord, 'createdAt'>): ImageRecord {
+    const image = { ...input, createdAt: now() };
+    if (!imageSchema.safeParse(image).success || !/^[a-f0-9]{64}$/.test(image.sha256))
+      throw new HttpError(400, '图片信息无效');
+    return this.change(() => {
+      this.writableChannel(image.channelId);
+      this.db
+        .insert(imageAssets)
+        .values(image)
+        .onConflictDoNothing({
+          target: [imageAssets.channelId, imageAssets.sha256, imageAssets.name],
+        })
+        .run();
+      return this.findImage(image.channelId, image.sha256, image.name)!;
+    });
+  }
+
+  private messageImages(rows: (typeof messages.$inferSelect)[]): Map<string, MessageImage> {
+    const ids = [...new Set(rows.flatMap((row) => row.imageIds))];
+    const images = new Map<string, MessageImage>();
+    // Bound each query's parameter count for histories with many images.
+    for (let index = 0; index < ids.length; index += 900) {
+      for (const image of this.db
+        .select({
+          id: imageAssets.id,
+          channelId: imageAssets.channelId,
+          name: imageAssets.name,
+          mimeType: imageAssets.mimeType,
+          size: imageAssets.size,
+          width: imageAssets.width,
+          height: imageAssets.height,
+          createdAt: imageAssets.createdAt,
+        })
+        .from(imageAssets)
+        .where(inArray(imageAssets.id, ids.slice(index, index + 900)))
+        .all())
+        images.set(image.id, image);
+    }
+    return images;
+  }
+
   /** All formal history in one read snapshot; exporting does not acknowledge deliveries. */
   chatExportSnapshot(channelId: string): ChatExportSnapshot {
     return this.database.sqlite.transaction(() => {
       const channel = this.getChannel(channelId);
       const exportedAt = now();
       const rows = this.db
-        .select({
-          seq: messages.seq,
-          sender: messages.sender,
-          senderId: messages.senderId,
-          body: messages.body,
-          replyTo: messages.replyTo,
-          mentions: messages.mentions,
-          createdAt: messages.createdAt,
-        })
+        .select()
         .from(messages)
         .where(
           and(eq(messages.channelId, channelId), lte(messages.seq, channel.nextMessageSeq - 1)),
@@ -804,11 +900,35 @@ export class Store {
         },
         exportedAt,
         agents: this.db.select({ id: agents.id, name: agents.name }).from(agents).all(),
-        messages: rows.map((row) => ({ ...row, mentions: JSON.parse(row.mentions) as string[] })),
+        messages: this.withImages(rows).map(
+          ({ seq, sender, senderId, body, replyTo, mentions, images, createdAt }) => ({
+            seq,
+            sender,
+            senderId,
+            body,
+            replyTo,
+            mentions,
+            images,
+            createdAt,
+          }),
+        ),
       };
     })();
   }
 
+  private withImages(rows: (typeof messages.$inferSelect)[]): Omit<Message, 'deliveries'>[] {
+    const images = this.messageImages(rows);
+    return rows.map(({ imageIds, ...row }) => ({
+      ...row,
+      mentions: JSON.parse(row.mentions) as string[],
+      images: imageIds.map((id) => {
+        const image = images.get(id);
+        if (!image || image.channelId !== row.channelId)
+          throw new Error('Invalid image reference ' + id + ' in message ' + messageKey(row));
+        return image;
+      }),
+    }));
+  }
   private withDeliveries(rows: (typeof messages.$inferSelect)[]): Message[] {
     const byMessage = new Map<string, Message['deliveries']>();
     if (rows.length)
@@ -826,10 +946,9 @@ export class Store {
           ...(byMessage.get(messageKey(d)) ?? []),
           { agentId: d.agentId, status: d.status },
         ]);
-    return rows.map((r) => ({
-      ...r,
-      mentions: JSON.parse(r.mentions) as string[],
-      deliveries: byMessage.get(messageKey(r)) ?? [],
+    return this.withImages(rows).map((row) => ({
+      ...row,
+      deliveries: byMessage.get(messageKey(row)) ?? [],
     }));
   }
   listMessages(
@@ -878,6 +997,7 @@ export class Store {
   receiveMessages(
     agentId: string,
     query: { channelId?: string | undefined; limit: number },
+    acknowledge = true,
   ): { input: ClaimedChannel[]; hasMore: boolean } {
     return this.change(() => {
       const rows = this.db
@@ -900,11 +1020,16 @@ export class Store {
         .orderBy(asc(messages.createdAt), asc(channels.id), asc(messages.seq))
         .limit(query.limit + 1)
         .all();
-      const page = rows.slice(0, query.limit);
-      this.recordReceipt(
-        agentId,
-        page.map((r) => r.message),
+      const candidates = rows.slice(0, query.limit);
+      const page = candidates.slice(
+        0,
+        takeMessagesWithinImageBudget(this.withImages(candidates.map((r) => r.message))).length,
       );
+      if (acknowledge)
+        this.recordReceipt(
+          agentId,
+          page.map((r) => r.message),
+        );
       const byChannel = new Map<string, ClaimedChannel>();
       const received = this.withDeliveries(page.map((r) => r.message));
       page.forEach(({ channel }, index) => {
@@ -912,7 +1037,7 @@ export class Store {
         entry.messages.push(received[index]!);
         byChannel.set(channel.id, entry);
       });
-      return { input: [...byChannel.values()], hasMore: rows.length > query.limit };
+      return { input: [...byChannel.values()], hasMore: rows.length > page.length };
     });
   }
   private insertMessage(
@@ -935,6 +1060,7 @@ export class Store {
       clientId: input.clientId,
       replyTo: input.replyTo ?? null,
       mentions: JSON.stringify(input.mentions),
+      imageIds: input.imageIds ?? [],
       createdAt: now(),
     };
     this.db.insert(messages).values(message).run();
@@ -963,18 +1089,24 @@ export class Store {
     );
   }
   saveMessage(channelId: string, sender: Sender, input: MessageInput): Message {
-    const channel = this.getChannel(channelId);
-    if (channel.kind === 'group' && this.groupDeletedAt(channelId))
-      throw new HttpError(409, '群聊已删除，历史只读');
-    if (channel.kind === 'private' && this.getAgent(channel.agentId!).status === 'deleted')
-      throw new HttpError(409, '该 Agent 已删除，私聊历史只读');
-    const senderId = sender.type === 'user' ? USER : sender.id;
-    if (sender.type === 'agent' && !this.isMember(channelId, sender.id))
-      throw new HttpError(403, '只能在自己所在的频道发言');
-    const members = new Set(this.memberIds(channelId));
-    const mentions = [...new Set(input.mentions ?? [])].filter((m) => m !== senderId);
-    if (mentions.some((m) => !members.has(m))) throw new HttpError(400, '只能 @ 该频道的成员');
     return this.change(() => {
+      const channel = this.writableChannel(channelId);
+      const senderId = sender.type === 'user' ? USER : sender.id;
+      if (sender.type === 'agent' && !this.isMember(channelId, sender.id))
+        throw new HttpError(403, '只能在自己所在的频道发言');
+      const members = new Set(this.memberIds(channelId));
+      const mentions = [...new Set(input.mentions ?? [])].filter((m) => m !== senderId);
+      if (mentions.some((m) => !members.has(m))) throw new HttpError(400, '只能 @ 该频道的成员');
+      const imageIds = input.imageIds ?? [];
+      if (!input.body.trim() && !imageIds.length) throw new HttpError(400, '请输入消息或添加图片');
+      if (imageIds.length > MAX_MESSAGE_IMAGES)
+        throw new HttpError(400, '每条消息最多添加 4 张图片');
+      if (new Set(imageIds).size !== imageIds.length) throw new HttpError(400, '请移除重复图片');
+      for (const id of imageIds) {
+        const image = this.db.select().from(imageAssets).where(eq(imageAssets.id, id)).get();
+        if (!image || image.channelId !== channelId)
+          throw new HttpError(400, '请选择当前频道的图片');
+      }
       const existing = this.db
         .select()
         .from(messages)
@@ -991,7 +1123,8 @@ export class Store {
         if (
           existing.body !== input.body ||
           existing.replyTo !== (input.replyTo ?? null) ||
-          existing.mentions !== JSON.stringify(mentions)
+          existing.mentions !== JSON.stringify(mentions) ||
+          JSON.stringify(existing.imageIds) !== JSON.stringify(imageIds)
         )
           throw new HttpError(409, '去重标识已用于不同内容');
         return this.withDeliveries([existing])[0]!;
@@ -1008,7 +1141,7 @@ export class Store {
       const message = this.insertMessage(
         channelId,
         { type: sender.type, id: senderId },
-        { ...input, mentions },
+        { ...input, mentions, imageIds },
       );
       return this.withDeliveries([message])[0]!;
     });
@@ -1097,22 +1230,41 @@ export class Store {
     const included: MessageRef[] = [];
     const skipped: MessageRef[] = [];
     const claims: { channel: ChannelRecord; refs: MessageRef[]; skipped: number }[] = [];
+    const images = this.messageImages(rows.map((row) => row.message));
+    let imageBytes = 0;
+    let budgetFull = false;
     for (const { channel, rows: unread } of byChannel.values()) {
       const refs: MessageRef[] = [];
-      let skippedHere = 0;
+      const skippedHere: MessageRef[] = [];
       unread.forEach(({ message }, index) => {
         const addressed =
           channel.kind === 'private'
             ? message.sender === 'user'
             : (JSON.parse(message.mentions) as string[]).includes(agentId);
-        if (addressed || index >= unread.length - RECENT_PER_CHANNEL) refs.push(message);
-        else {
-          skipped.push(message);
-          skippedHere++;
+        if (addressed || index >= unread.length - RECENT_PER_CHANNEL) {
+          const size = message.imageIds.reduce((total, id) => {
+            const image = images.get(id);
+            if (!image || image.channelId !== channel.id)
+              throw new Error(
+                'Invalid image reference ' + id + ' in message ' + messageKey(message),
+              );
+            return total + image.size;
+          }, 0);
+          if (!budgetFull && imageBytes + size <= MAX_READ_IMAGE_BYTES) {
+            refs.push(message);
+            imageBytes += size;
+          } else {
+            budgetFull = true;
+          }
+        } else {
+          skippedHere.push(message);
         }
       });
+      // Keep the channel's older messages queued until at least one of its messages is claimed.
+      if (!refs.length) continue;
       included.push(...refs);
-      claims.push({ channel, refs, skipped: skippedHere });
+      skipped.push(...skippedHere);
+      claims.push({ channel, refs, skipped: skippedHere.length });
     }
     return { rows, included, skipped, claims };
   }
@@ -1150,7 +1302,14 @@ export class Store {
       const id = randomUUID();
       this.db
         .insert(runs)
-        .values({ id, agentId, threadId, status: 'starting', createdAt: now() })
+        .values({
+          id,
+          agentId,
+          threadId,
+          inputRefs: selection.included.map(({ channelId, seq }) => ({ channelId, seq })),
+          status: 'starting',
+          createdAt: now(),
+        })
         .run();
       this.markClaim(agentId, selection.included, { status: 'submitting', runId: id });
       this.markClaim(agentId, selection.skipped, { status: 'skipped' });
@@ -1342,6 +1501,94 @@ export class Store {
       .all();
     for (const batch of batches) this.settleSteer(batch.id, 'uncertain', error, delivery);
   }
+
+  /** Restore only unsent initial input, leaving cancelled or revoked deliveries cancelled. */
+  requeueRunInput(runId: string): void {
+    this.change(() => {
+      const run = this.db
+        .select({ agentId: runs.agentId })
+        .from(runs)
+        .where(eq(runs.id, runId))
+        .get();
+      if (!run) throw new HttpError(404, '执行不存在');
+      const pending = this.db
+        .select({ channelId: deliveries.channelId, seq: deliveries.seq })
+        .from(deliveries)
+        .where(and(eq(deliveries.runId, runId), eq(deliveries.status, 'submitting')))
+        .all();
+      const queued: MessageRef[] = [];
+      const cancelled: MessageRef[] = [];
+      for (const ref of pending) {
+        if (!this.groupDeletedAt(ref.channelId) && this.isMember(ref.channelId, run.agentId))
+          queued.push(ref);
+        else cancelled.push(ref);
+      }
+      const updatedAt = now();
+      if (queued.length)
+        this.db
+          .update(deliveries)
+          .set({ status: 'queued', runId: null, turnId: null, steerId: null, updatedAt })
+          .where(
+            and(
+              eq(deliveries.runId, runId),
+              eq(deliveries.status, 'submitting'),
+              deliveryRefs(queued),
+            ),
+          )
+          .run();
+      if (cancelled.length)
+        this.db
+          .update(deliveries)
+          .set({ status: 'cancelled', updatedAt })
+          .where(
+            and(
+              eq(deliveries.runId, runId),
+              eq(deliveries.status, 'submitting'),
+              deliveryRefs(cancelled),
+            ),
+          )
+          .run();
+      for (const [status, refs] of [
+        ['queued', queued],
+        ['cancelled', cancelled],
+      ] as const)
+        for (const channelId of new Set(refs.map((ref) => ref.channelId)))
+          this.event('delivery', { agentId: run.agentId, channelId }, { runId, status });
+    });
+  }
+
+  /** Check that every selected delivery still belongs to this run and a live membership. */
+  isRunInputPending(runId: string, refs: MessageRef[], steerId?: string): boolean {
+    const run = this.db
+      .select({ agentId: runs.agentId })
+      .from(runs)
+      .where(eq(runs.id, runId))
+      .get();
+    if (!run) throw new HttpError(404, '执行不存在');
+    if (!refs.length) return true;
+    const found = this.db
+      .select({ channelId: deliveries.channelId, seq: deliveries.seq })
+      .from(deliveries)
+      .innerJoin(channels, eq(deliveries.channelId, channels.id))
+      .innerJoin(
+        channelMembers,
+        and(eq(channelMembers.channelId, channels.id), eq(channelMembers.agentId, run.agentId)),
+      )
+      .where(
+        and(
+          eq(deliveries.agentId, run.agentId),
+          eq(deliveries.runId, runId),
+          eq(deliveries.status, steerId === undefined ? 'submitting' : 'steering'),
+          steerId === undefined ? isNull(deliveries.steerId) : eq(deliveries.steerId, steerId),
+          deliveryRefs(refs),
+          this.liveChannel(),
+        ),
+      )
+      .all();
+    const keys = new Set(found.map(messageKey));
+    return refs.every((ref) => keys.has(messageKey(ref)));
+  }
+
   acceptRun(runId: string, turnId: string) {
     this.change(() => {
       const run = this.getRun(runId);
@@ -1412,7 +1659,18 @@ export class Store {
   getRun(id: string): Run {
     const row = this.db.select().from(runs).where(eq(runs.id, id)).get();
     if (!row) throw new HttpError(404, '执行不存在');
+    const { inputRefs, ...run } = row;
     const inputs: Run['inputs'] = [];
+    const added = new Set<string>();
+    const add = (ref: MessageRef) => {
+      const key = messageKey(ref);
+      if (added.has(key)) return;
+      added.add(key);
+      const group = inputs.find((input) => input.channelId === ref.channelId);
+      if (group) group.messageSeqs.push(ref.seq);
+      else inputs.push({ channelId: ref.channelId, messageSeqs: [ref.seq] });
+    };
+    for (const ref of inputRefs) add(ref);
     for (const d of this.db
       .select({
         channelId: deliveries.channelId,
@@ -1433,9 +1691,7 @@ export class Store {
         )
       )
         continue;
-      const group = inputs.find((i) => i.channelId === d.channelId);
-      if (group) group.messageSeqs.push(d.seq);
-      else inputs.push({ channelId: d.channelId, messageSeqs: [d.seq] });
+      add(d);
     }
     const items = this.db
       .select({
@@ -1447,7 +1703,7 @@ export class Store {
       .from(runItems)
       .where(eq(runItems.runId, id))
       .all();
-    return { ...row, inputs, items };
+    return { ...run, inputs, items };
   }
   /** Complete snapshots share one transaction and one execution notification. */
   updateItems(runId: string, items: RunItem[]) {

@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -31,10 +32,23 @@ async function bridgeFixture() {
   const dependencyKey = `__islesBridge_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const push = vi.fn();
   const interruptedBlocks = vi.fn((): { type: string; text: string }[] => []);
+  const createUserMessage = vi.fn((input: Record<string, unknown>) => ({
+    id: randomUUID(),
+    ...input,
+  }));
+  const saveImages = vi.fn(async (images: { data: Buffer; mediaType: string }[]) =>
+    images.map((image, index) => ({
+      attachmentId: `attachment-${index}`,
+      mediaType: image.mediaType,
+      bytes: image.data.length,
+      width: 1,
+      height: 1,
+    })),
+  );
   const dependencies = {
     '@deepseek-ai/dsh-sdk-protocol': { JsonRpcLineTransport: Transport },
     '@deepseek-ai/dsh-llm': {
-      createUserMessage: vi.fn(),
+      createUserMessage,
       BlockAssembler: class {
         push = push;
         interruptedBlocks = interruptedBlocks;
@@ -72,6 +86,8 @@ async function bridgeFixture() {
     inbox: { nextStep: [], nextTurn: [] },
     cancel: vi.fn(),
     whenIdle: vi.fn(async () => {}),
+    followup: vi.fn(),
+    steer: vi.fn(),
   };
   const children = new Map<typeof agent, typeof agent>();
   const setPermissions = vi.fn();
@@ -85,6 +101,7 @@ async function bridgeFixture() {
       if (name === 'loader') return { await: async () => {} };
       if (name === 'tokenMeter') return { measure };
       if (name === 'subagents') return { drainDescendants };
+      if (name === 'attachments') return { saveImages };
       return undefined;
     },
     logger: { warn: warnings },
@@ -105,7 +122,11 @@ async function bridgeFixture() {
     tools: { get: () => ({}) },
     llm: {
       resolveCallConfig: vi.fn(async (selection: unknown) => selection),
-      resolveModelInfo: vi.fn(async () => ({ context: { contextWindow: 4000 } })),
+      resolveModelInfo: vi.fn(
+        async (): Promise<{ context?: { contextWindow: number }; inputModalities?: string[] }> => ({
+          context: { contextWindow: 4000 },
+        }),
+      ),
     },
     agents: {
       get: (id: string) => [agent, ...children.keys()].find((entry) => entry.id === id),
@@ -141,6 +162,8 @@ async function bridgeFixture() {
     emit,
     push,
     interruptedBlocks,
+    createUserMessage,
+    saveImages,
     agent,
     setPermissions,
     drainDescendants,
@@ -179,7 +202,175 @@ async function bridgeFixture() {
   };
 }
 
-describe('DSH bridge native context meter', () => {
+describe('DSH bridge', () => {
+  it('admits image bytes to native attachments and keeps steer text-only', async () => {
+    const f = await bridgeFixture();
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      dangerFullAccess: false,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    const images = [
+      {
+        id: 'image-1',
+        label: 'channel A / message 1',
+        path: 'workspace/.isles-images/a.png',
+        mimeType: 'image/png',
+        data: 'AQID',
+      },
+      {
+        id: 'image-2',
+        label: 'channel A / message 2',
+        path: 'workspace/.isles-images/b.webp',
+        mimeType: 'image/webp',
+        data: 'BAUG',
+      },
+    ];
+    await expect(
+      f.request('isles/session/submit', {
+        sessionId: f.session.id,
+        messageId: 'input-1',
+        text: 'Compare these',
+        images,
+      }),
+    ).resolves.toEqual({ sessionId: f.session.id, messageId: 'input-1' });
+    expect(f.saveImages).toHaveBeenCalledWith([
+      { data: Buffer.from([1, 2, 3]), mediaType: 'image/png' },
+      { data: Buffer.from([4, 5, 6]), mediaType: 'image/webp' },
+    ]);
+    expect(f.agent.followup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: { kind: 'user', rpcId: 'isles:input-1' },
+        content: [
+          { type: 'text', text: 'Compare these' },
+          {
+            type: 'text',
+            text: '图片 image-1（channel A / message 1）\n文件路径：workspace/.isles-images/a.png',
+          },
+          { type: 'image', attachment: expect.objectContaining({ attachmentId: 'attachment-0' }) },
+          {
+            type: 'text',
+            text: '图片 image-2（channel A / message 2）\n文件路径：workspace/.isles-images/b.webp',
+          },
+          { type: 'image', attachment: expect.objectContaining({ attachmentId: 'attachment-1' }) },
+        ],
+      }),
+    );
+    f.emit(f.session, { type: 'turn/start', seq: 1, data: { turn: 1 } });
+    const steer = {
+      sessionId: f.session.id,
+      expectedTurnId: '1',
+      messageId: 'steer-1',
+      text: 'Use workspace/.isles-images/a.png',
+    };
+    await expect(f.request('isles/session/steer', { ...steer, images })).resolves.toMatchObject({
+      rejected: true,
+    });
+    await expect(f.request('isles/session/steer', steer)).resolves.toEqual({
+      sessionId: f.session.id,
+      messageId: 'steer-1',
+    });
+    expect(f.agent.steer).toHaveBeenCalledOnce();
+    expect(f.agent.steer).toHaveBeenCalledWith(
+      expect.objectContaining({ content: [{ type: 'text', text: steer.text }] }),
+    );
+    expect(f.saveImages).toHaveBeenCalledOnce();
+  });
+
+  it('validates image admission before enqueue and rechecks the turn after storage', async () => {
+    const f = await bridgeFixture();
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      dangerFullAccess: false,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    const image = {
+      id: 'image-1',
+      label: 'message 1',
+      path: 'a.png',
+      mimeType: 'image/png',
+      data: 'AQID',
+    };
+    const params = { sessionId: f.session.id, messageId: 'input-1', text: 'Inspect' };
+    for (const invalid of [
+      { ...image, mimeType: 'image/svg+xml' },
+      { ...image, data: 'AQID=' },
+      { ...image, data: 'AB==' },
+      { ...image, data: '' },
+      { ...image, label: '' },
+    ]) {
+      const rejected = await f.request('isles/session/submit', { ...params, images: [invalid] });
+      expect(rejected).toMatchObject({ rejected: true });
+      expect(rejected).not.toHaveProperty('code');
+    }
+    expect(f.saveImages).not.toHaveBeenCalled();
+    f.llm.resolveModelInfo.mockRejectedValueOnce(new Error('temporary model lookup failure'));
+    await expect(
+      f.request('isles/session/submit', { ...params, images: [image] }),
+    ).resolves.toEqual({ rejected: true, reason: 'DSH 模型信息暂不可用，请重试' });
+    expect(f.saveImages).not.toHaveBeenCalled();
+    f.llm.resolveModelInfo.mockResolvedValueOnce({ inputModalities: ['text'] });
+    await expect(
+      f.request('isles/session/submit', { ...params, images: [image] }),
+    ).resolves.toEqual({
+      rejected: true,
+      code: 'image_input_unsupported',
+      reason: '请选择支持图片输入的 DSH 模型并恢复 Agent',
+    });
+    expect(f.saveImages).not.toHaveBeenCalled();
+    let release!: (
+      value: {
+        attachmentId: string;
+        mediaType: string;
+        bytes: number;
+        width: number;
+        height: number;
+      }[],
+    ) => void;
+    f.saveImages.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const pending = f.request('isles/session/submit', { ...params, images: [image] });
+    await vi.waitFor(() => expect(f.saveImages).toHaveBeenCalledOnce());
+    f.emit(f.session, { type: 'turn/start', seq: 1, data: { turn: 7 } });
+    release([{ attachmentId: 'saved', mediaType: 'image/png', bytes: 3, width: 1, height: 1 }]);
+    await expect(pending).resolves.toMatchObject({ rejected: true });
+    expect(f.agent.followup).not.toHaveBeenCalled();
+  });
+
+  it('accepts a full-size image without a base64 validation stack overflow', async () => {
+    const f = await bridgeFixture();
+    await f.request('isles/session/resume', {
+      sessionId: f.session.id,
+      cwd: f.root,
+      dangerFullAccess: false,
+      selection: { provider: 'fixture', model: 'model' },
+    });
+    const data = Buffer.alloc(10 * 1024 * 1024, 1);
+    await expect(
+      f.request('isles/session/submit', {
+        sessionId: f.session.id,
+        messageId: 'large-image',
+        text: 'Inspect',
+        images: [
+          {
+            id: 'large-image',
+            label: 'message 1',
+            path: 'large.png',
+            mimeType: 'image/png',
+            data: data.toString('base64'),
+          },
+        ],
+      }),
+    ).resolves.toEqual({ sessionId: f.session.id, messageId: 'large-image' });
+    expect(f.saveImages.mock.calls[0]![0][0]!.data.equals(data)).toBe(true);
+    expect(f.agent.followup).toHaveBeenCalledOnce();
+  });
   it('shows all current allowed directories to the root and native child prompt context', async () => {
     const f = await bridgeFixture();
     await f.request('isles/session/resume', {

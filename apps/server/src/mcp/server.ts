@@ -6,12 +6,15 @@ import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { MAX_MESSAGE_IMAGES } from '@isles/contracts';
+import { takeMessagesWithinImageBudget, type ClaimedChannel } from '../storage/store.js';
 import { agentRoot } from '../runtime/workspace.js';
 import { HttpError } from '../errors.js';
 import {
   channelView,
   directoryOf,
   formatChannelMessages,
+  formatImageLabel,
   formatMessages,
 } from '../runtime/envelope.js';
 import type { Runtime } from '../runtime/runtime.js';
@@ -72,7 +75,32 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
       const result = (value: unknown) => ({
         content: [{ type: 'text' as const, text: JSON.stringify(value) }],
       });
-      const textResult = (text: string) => ({ content: [{ type: 'text' as const, text }] });
+      const messageResult = async (input: ClaimedChannel[], text: string) => {
+        const content: (
+          { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
+        )[] = [{ type: 'text', text }];
+        const labels = runtime.messageLabels(id);
+        for (const entry of input) {
+          member(entry.channel.id);
+          for (const message of entry.messages)
+            for (const [index, image] of message.images.entries()) {
+              const loaded = await runtime.images.load(image);
+              member(entry.channel.id);
+              content.push(
+                {
+                  type: 'text',
+                  text: formatImageLabel(labels, entry.channel, message, image, index),
+                },
+                { type: 'image', ...loaded },
+              );
+            }
+        }
+        // A group or Agent may have been removed while image bytes were being read.
+        if (store.getAgent(id).status === 'deleted')
+          throw new HttpError(401, 'Agent 已删除，MCP 身份已失效');
+        for (const entry of input) member(entry.channel.id);
+        return { content };
+      };
       const channel = (channelId: string) => {
         const directory = directoryOf(store.listAgents());
         const value = store.publicChannel(channelId);
@@ -91,10 +119,17 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         'send_message',
         {
           description:
-            'Publish an official message to a channel you belong to; private aliases your private chat. Use the full channel ID from list_channels for a group. replyTo is a sequence in that same channel. Sender is bound by the server. Use a stable clientId to deduplicate retries. Returns seq in the targeted channel.',
+            'Publish an official text or image message to a channel you belong to; private aliases your private chat. imagePaths accepts existing local image paths, captured as immutable attachments. Use the full channel ID from list_channels for a group. replyTo is a sequence in that same channel. Sender is bound by the server. Use a stable clientId to deduplicate retries. Returns seq in the targeted channel.',
           inputSchema: {
             channelId: messageChannel,
-            body: z.string().trim().min(1).max(32_000),
+            body: z.string().trim().max(32_000).default(''),
+            imagePaths: z
+              .array(z.string().min(1).max(4096))
+              .max(MAX_MESSAGE_IMAGES)
+              .default([])
+              .describe(
+                'Absolute paths of PNG, JPEG, WebP or GIF images in your accessible workspaces. Up to 4 images, 10 MiB each.',
+              ),
             replyTo: z.number().int().positive().optional(),
             mentions: agentIds
               .optional()
@@ -103,15 +138,19 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
           },
           annotations: { destructiveHint: false, openWorldHint: false },
         },
-        ({ channelId, body, replyTo, mentions, clientId }) => {
+        async ({ channelId, body, imagePaths, replyTo, mentions, clientId }) => {
           channelId = resolveChannel(channelId);
           member(channelId);
-          const message = runtime.publish(id, channelId, {
+          if (!body && !imagePaths.length) throw new HttpError(400, '请输入文字或添加图片');
+          const input = {
             body,
             clientId: clientId ?? randomUUID(),
             replyTo,
             mentions,
-          });
+          };
+          const message = imagePaths.length
+            ? await runtime.publishImages(id, channelId, input, imagePaths)
+            : runtime.publish(id, channelId, input);
           return result({ seq: message.seq });
         },
       );
@@ -119,7 +158,7 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
         'read_messages',
         {
           description:
-            'Read saved history, including paused groups, as the text blocks documented in AGENTS.md. private aliases your private chat. Without after/before return the latest page; use next_after or next_before markers for paging. Only returned messages are recorded as received by you and will not be automatically delivered again.',
+            'Read saved history, including paused groups, as text blocks plus inline image content. private aliases your private chat. Without after/before return the latest page; use next_after or next_before markers for paging. Image byte limits may shorten a page. Only returned messages are recorded as received by you and will not be automatically delivered again.',
           inputSchema: {
             channelId: messageChannel,
             after: z.number().int().min(0).optional(),
@@ -128,48 +167,58 @@ export function registerMcp(app: FastifyInstance, runtime: Runtime) {
           },
           annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         },
-        ({ channelId, after, before, limit }) => {
-          channelId = resolveChannel(channelId);
-          member(channelId);
-          if (after !== undefined && before !== undefined)
-            throw new HttpError(400, '不能同时指定 after 和 before');
-          const all = store.listMessages(channelId, {
-            ...(after !== undefined ? { after } : {}),
-            ...(before !== undefined ? { before } : {}),
-            limit: limit + 1,
-          });
-          const forward = after !== undefined;
-          const page = forward ? all.slice(0, limit) : all.slice(-limit);
-          const more = all.length > limit;
-          const storedChannel = store.getChannel(channelId);
-          const labels = runtime.messageLabels(id);
-          let text = formatChannelMessages(labels, storedChannel, page) || '[history: empty]';
-          if (more)
-            text += `\n\n[channel: ${labels.channel(storedChannel)}, ${forward ? 'next_after' : 'next_before'}: ${forward ? page.at(-1)!.seq : page[0]!.seq}]`;
-          const response = textResult(text);
-          store.markMessagesReceived(id, page);
-          return response;
-        },
+        ({ channelId, after, before, limit }) =>
+          runtime.readWithContent(id, async () => {
+            channelId = resolveChannel(channelId);
+            member(channelId);
+            if (after !== undefined && before !== undefined)
+              throw new HttpError(400, '不能同时指定 after 和 before');
+            const all = store.listMessages(channelId, {
+              ...(after !== undefined ? { after } : {}),
+              ...(before !== undefined ? { before } : {}),
+              limit: limit + 1,
+            });
+            const forward = after !== undefined;
+            const page = takeMessagesWithinImageBudget(
+              forward ? all.slice(0, limit) : all.slice(-limit),
+              forward ? 'start' : 'end',
+            );
+            const more = all.length > page.length;
+            const storedChannel = store.getChannel(channelId);
+            const labels = runtime.messageLabels(id);
+            let text = formatChannelMessages(labels, storedChannel, page) || '[history: empty]';
+            if (more)
+              text += `\n\n[channel: ${labels.channel(storedChannel)}, ${forward ? 'next_after' : 'next_before'}: ${forward ? page.at(-1)!.seq : page[0]!.seq}]`;
+            const response = await messageResult(
+              [{ channel: storedChannel, messages: page, skipped: 0 }],
+              text,
+            );
+            return {
+              value: response,
+              input: [{ channel: storedChannel, messages: page, skipped: 0 }],
+            };
+          }),
       );
       server.registerTool(
         'receive_messages',
         {
           description:
-            'Receive queued messages during your current turn as the text blocks documented in AGENTS.md. Omit channelId for all your channels, including paused groups; private aliases your private chat. Returns immediately. Call again on [has_more: true]. Only returned messages are marked received and will not trigger another turn. Skipped history remains available through read_messages.',
+            'Receive queued messages during your current turn as text blocks plus inline image content. Omit channelId for all your channels, including paused groups; private aliases your private chat. Returns immediately. Call again on [has_more: true]. Image byte limits may shorten a page. Only returned messages are marked received and will not trigger another turn. Skipped history remains available through read_messages.',
           inputSchema: {
             channelId: messageChannel.optional(),
             limit: z.number().int().min(1).max(100).default(50),
           },
           annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         },
-        ({ channelId, limit }) => {
-          const { input, hasMore } = runtime.receiveMessages(id, {
-            channelId: channelId === undefined ? undefined : resolveChannel(channelId),
-            limit,
-          });
-          const text = formatMessages(runtime.messageLabels(id), input) || '[unread: none]';
-          return textResult(text + (hasMore ? '\n\n[has_more: true]' : ''));
-        },
+        ({ channelId, limit }) =>
+          runtime.receiveWithContent(
+            id,
+            { channelId: channelId === undefined ? undefined : resolveChannel(channelId), limit },
+            async ({ input, hasMore }) => {
+              const text = formatMessages(runtime.messageLabels(id), input) || '[unread: none]';
+              return messageResult(input, text + (hasMore ? '\n\n[has_more: true]' : ''));
+            },
+          ),
       );
       server.registerTool(
         'list_channels',

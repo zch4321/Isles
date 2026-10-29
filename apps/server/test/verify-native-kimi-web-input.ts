@@ -15,7 +15,11 @@ import {
   kimiSnapshotSchema,
   type KimiWebEvent,
 } from '../src/harness/kimi/web-protocol.js';
-import type { HarnessEvent, HarnessSession } from '../src/harness/types.js';
+import {
+  HarnessImageInputUnsupported,
+  type HarnessEvent,
+  type HarnessSession,
+} from '../src/harness/types.js';
 
 // Run with ISLES_KIMI_BIN pointing to the native CLI under test. Every model
 // request uses the scripted loopback provider and a newly created native home.
@@ -62,8 +66,16 @@ api_key = "local-input-test"
 provider = "input"
 model = "input-test"
 max_context_size = 262144
-capabilities = ["thinking"]
+capabilities = ["thinking", "image_in"]
 display_name = "Input test"
+support_efforts = ["low", "high", "max"]
+default_effort = "high"
+[models."input/text-only"]
+provider = "input"
+model = "input-text-only"
+max_context_size = 262144
+capabilities = ["thinking"]
+display_name = "Text-only input test"
 support_efforts = ["low", "high", "max"]
 default_effort = "high"
 `,
@@ -198,9 +210,29 @@ try {
     workspace: agent.workspace,
   });
   const path = `/api/v1/sessions/${sessionId}/`;
-  const first = await session!.submit(input('KIMI_INPUT_NORMAL'));
+  const imageData =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC';
+  const imagePath = join(agent.workspace, '.isles-images', 'one.png');
+  const imageLabel = '[channel: protocol, message 1, image 1]';
+  await mkdir(join(agent.workspace, '.isles-images'), { recursive: true });
+  await writeFile(imagePath, Buffer.from(imageData, 'base64'));
+  const first = await session!.submit({
+    ...input('KIMI_INPUT_NORMAL'),
+    images: [
+      {
+        id: 'image-one',
+        path: imagePath,
+        mimeType: 'image/png',
+        data: imageData,
+        label: imageLabel,
+      },
+    ],
+  });
   const normalRequest = await until('normal model request', () => requests[0]);
-  check(JSON.stringify(normalRequest.body.messages).includes('KIMI_INPUT_NORMAL'), 'Input missing');
+  const normalMessages = JSON.stringify(normalRequest.body.messages);
+  check(normalMessages.includes('KIMI_INPUT_NORMAL'), 'Input missing');
+  check(normalMessages.includes(imageLabel), 'Image label missing');
+  check(normalMessages.includes(`data:image/png;base64,${imageData}`), 'Native image missing');
   release(0, 'KIMI_NORMAL_OK');
   const normal = await completed(first.turnId);
   check(normal.type === 'turn_completed' && normal.status === 'completed', 'Normal turn failed');
@@ -214,6 +246,7 @@ try {
     'Normal response missing from adapter output',
   );
   report.normalInput = true;
+  report.nativeImageInput = true;
 
   const second = await session!.submit(input('KIMI_INPUT_STEER_INITIAL'));
   await until('held steer model request', () => requests[1]);
@@ -356,6 +389,59 @@ try {
   );
   check(retryCompletion.payload.reason === 'completed', 'Retry failed after owner released');
   check(requests.length === 5, `Expected five total model requests, got ${requests.length}`);
+  const textOnlyCreated = await app.inject({
+    method: 'POST',
+    url: '/api/agents',
+    payload: {
+      harness: 'kimi',
+      name: 'Kimi text-only input check',
+      model: 'input/text-only',
+      reasoningEffort: 'high',
+      steerEnabled: false,
+    },
+  });
+  check(
+    textOnlyCreated.statusCode === 201,
+    `Text-only Agent create failed: ${textOnlyCreated.body}`,
+  );
+  const textOnlyId = (textOnlyCreated.json() as { id: string }).id;
+  const textOnly = await until('text-only agent ready', () => {
+    const current = app.isles.store.publicAgent(textOnlyId);
+    check(current.status !== 'error', current.error ?? 'Text-only Agent failed');
+    return current.status === 'ready' ? current : undefined;
+  });
+  check(textOnly.threadId, 'Text-only native session missing');
+  let imageRefusal: unknown;
+  try {
+    await session!.submit({
+      sessionId: textOnly.threadId,
+      runId: randomUUID(),
+      text: 'KIMI_UNSUPPORTED_IMAGE',
+      model: textOnly.model,
+      reasoningEffort: textOnly.reasoningEffort,
+      workspace: textOnly.workspace,
+      images: [
+        {
+          id: 'image-one',
+          path: imagePath,
+          mimeType: 'image/png',
+          data: imageData,
+          label: imageLabel,
+        },
+      ],
+    });
+  } catch (error) {
+    imageRefusal = error;
+  }
+  check(
+    imageRefusal instanceof HarnessImageInputUnsupported,
+    'Text-only model did not reject image',
+  );
+  check(
+    imageRefusal.message.includes('请选择支持图片输入的模型并恢复 Agent'),
+    'Image refusal lacks next step',
+  );
+  check(requests.length === 5, 'Text-only image reached the model provider');
   Object.assign(report, {
     sessionId,
     interrupt: true,
@@ -363,6 +449,7 @@ try {
     occupiedInputAbsentFromInboxAndWire: true,
     refusedPromptIdReusableAfterOwnerRelease: true,
     inferenceRequests: requests.length,
+    textOnlyImageRejected: true,
     wirePath,
   });
   console.log(JSON.stringify(report, null, 2));

@@ -76,6 +76,20 @@ CREATE TABLE `events` (
 	FOREIGN KEY (`channel_id`) REFERENCES `channels`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
+CREATE TABLE `image_assets` (
+	`id` text PRIMARY KEY NOT NULL,
+	`channel_id` text NOT NULL,
+	`name` text NOT NULL,
+	`mime_type` text NOT NULL,
+	`size` integer NOT NULL,
+	`width` integer NOT NULL,
+	`height` integer NOT NULL,
+	`sha256` text NOT NULL,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`channel_id`) REFERENCES `channels`(`id`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `image_assets_dedupe` ON `image_assets` (`channel_id`,`sha256`,`name`);--> statement-breakpoint
 CREATE TABLE `messages` (
 	`channel_id` text NOT NULL,
 	`seq` integer NOT NULL,
@@ -85,6 +99,7 @@ CREATE TABLE `messages` (
 	`client_id` text NOT NULL,
 	`reply_to` integer,
 	`mentions` text DEFAULT '[]' NOT NULL,
+	`image_ids` text DEFAULT '[]' NOT NULL,
 	`created_at` text NOT NULL,
 	PRIMARY KEY(`channel_id`, `seq`),
 	FOREIGN KEY (`channel_id`) REFERENCES `channels`(`id`) ON UPDATE no action ON DELETE no action,
@@ -122,6 +137,7 @@ CREATE TABLE `runs` (
 	`agent_id` text NOT NULL,
 	`thread_id` text NOT NULL,
 	`turn_id` text,
+	`input_refs` text DEFAULT '[]' NOT NULL,
 	`status` text NOT NULL,
 	`error` text,
 	`created_at` text NOT NULL,

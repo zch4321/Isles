@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { Buffer } from 'node:buffer';
 import { pathToFileURL } from 'node:url';
 import { appendFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -12,13 +13,36 @@ export function apply(ctx, config = {}) {
     appendFileSync(process.env.ISLES_DSH_ASYNC_AUDIT, JSON.stringify(event) + '\n');
   class ScriptedAdapter extends LlmAdapter {
     async listModels(provider) {
-      return [{ provider, id: 'scripted', name: 'scripted' }];
+      return [
+        { provider, id: 'scripted', name: 'scripted', inputModalities: ['text', 'image'] },
+        { provider, id: 'text-only', name: 'text-only', inputModalities: ['text'] },
+      ];
     }
     async resolveModel(provider, model) {
-      return { provider, id: model, name: model };
+      return {
+        provider,
+        id: model,
+        name: model,
+        inputModalities: model === 'text-only' ? ['text'] : ['text', 'image'],
+      };
     }
-    async *stream() {
-      audit({ type: 'scripted-stream' });
+    async *stream(options) {
+      const content = options.messages
+        .filter((message) => message.role === 'user')
+        .flatMap((message) => message.content);
+      const images = await Promise.all(
+        content
+          .filter((block) => block.type === 'image')
+          .map(async (block) => {
+            const stored = await ctx.get('attachments').readImage(block.attachment);
+            return {
+              attachment: block.attachment,
+              bytes: stored.data.byteLength,
+              signature: Buffer.from(stored.data).subarray(0, 8).toString('hex'),
+            };
+          }),
+      );
+      audit({ type: 'scripted-stream', content, images });
       const text = 'scripted parent answer';
       yield { type: 'block-start', index: 0, blockType: 'text' };
       yield { type: 'text-delta', index: 0, text };

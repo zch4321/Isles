@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -94,10 +94,13 @@ child.on('exit', () => {
 function request(method: string, params: object = {}) {
   return new Promise<unknown>((resolve, reject) => {
     const id = ++requestId;
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error(`Native DSH request timed out: ${method}`));
-    }, 15_000);
+    const timer = setTimeout(
+      () => {
+        pending.delete(id);
+        reject(new Error(`Native DSH request timed out: ${method}`));
+      },
+      process.env.ISLES_DSH_IMAGE_STRESS ? 60_000 : 15_000,
+    );
     pending.set(id, { resolve, reject, timer });
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
   });
@@ -111,11 +114,58 @@ try {
     dangerFullAccess: true,
     selection: { provider: 'isles-scripted', model: 'scripted' },
   });
-  await request('isles/session/submit', {
-    sessionId: 'scripted-root',
-    messageId: 'scripted-input',
-    text: 'scripted task',
-  });
+  const pixel = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC',
+    'base64',
+  );
+  const stress = process.env.ISLES_DSH_IMAGE_STRESS === '1';
+  const imageBytes = stress
+    ? Buffer.concat([pixel, Buffer.alloc(10 * 1024 * 1024 - pixel.length)])
+    : pixel;
+  const imageData = imageBytes.toString('base64');
+  const imageDir = join(root, '.isles-images');
+  await mkdir(imageDir);
+  const imagePath = join(imageDir, 'scripted.png');
+  await writeFile(imagePath, imageBytes);
+  assert.deepEqual(
+    await request('isles/session/submit', {
+      sessionId: 'scripted-root',
+      messageId: 'scripted-input',
+      text: 'scripted task',
+      selection: { provider: 'isles-scripted', model: 'text-only' },
+      images: [
+        {
+          id: 'scripted-image-0',
+          label: 'channel / message',
+          path: imagePath,
+          mimeType: 'image/png',
+          data: pixel.toString('base64'),
+        },
+      ],
+    }),
+    {
+      rejected: true,
+      code: 'image_input_unsupported',
+      reason: '请选择支持图片输入的 DSH 模型并恢复 Agent',
+    },
+  );
+  assert(!events.some((frame) => frame.event.type === 'input_accepted'));
+  const started = Date.now();
+  assert.deepEqual(
+    await request('isles/session/submit', {
+      sessionId: 'scripted-root',
+      messageId: 'scripted-input',
+      text: 'scripted task',
+      images: Array.from({ length: stress ? 4 : 1 }, (_, index) => ({
+        id: `scripted-image-${index}`,
+        label: 'channel / message',
+        path: imagePath,
+        mimeType: 'image/png',
+        data: imageData,
+      })),
+    }),
+    { sessionId: 'scripted-root', messageId: 'scripted-input' },
+  );
   const deadline = Date.now() + 15_000;
   while (
     events.filter((frame) => frame.event.type === 'turn_completed').length < 3 &&
@@ -150,10 +200,56 @@ try {
   assert.equal(childEnd?.type === 'turn_completed' && childEnd.status, 'completed');
   assert(events.every((frame) => frame.rootSessionId === 'scripted-root'));
   assert(events.indexOf(rootEnds[0]!) < events.indexOf(childEvents.at(-1)!));
+  assert(
+    events.some(
+      (frame) =>
+        frame.event.type === 'input_accepted' && frame.event.messageId === 'scripted-input',
+    ),
+  );
+  const audit = (await readFile(join(root, 'native-events.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line)) as {
+    type: string;
+    content?: { type: string; text?: string; attachment?: { attachmentId: string } }[];
+    images?: {
+      attachment: { attachmentId: string; mediaType: string; width: number; height: number };
+      bytes: number;
+      signature: string;
+    }[];
+  }[];
+  const provider = audit.find((entry) => entry.type === 'scripted-stream' && entry.images?.length);
+  assert(provider?.content && provider.images?.length);
+  assert(
+    provider.content.some((block) => block.type === 'text' && block.text?.includes(imagePath)),
+  );
+  const nativeImage = provider.content.find((block) => block.type === 'image');
+  assert(nativeImage?.attachment);
+  assert.equal(provider.images[0]!.attachment.attachmentId, nativeImage.attachment.attachmentId);
+  assert.equal(provider.images[0]!.attachment.width, 1);
+  assert.equal(provider.images[0]!.attachment.height, 1);
+  const signatures: Record<string, string> = {
+    'image/png': '89504e470d0a1a0a',
+    'image/jpeg': 'ffd8ff',
+    'image/webp': '52494646',
+    'image/gif': '47494638',
+  };
+  const signature = signatures[provider.images[0]!.attachment.mediaType];
+  assert(signature && provider.images[0]!.signature.startsWith(signature));
+  assert(provider.images[0]!.bytes > 0);
+  assert.equal(provider.images.length, stress ? 4 : 1);
   Object.assign(report, {
     passed: true,
     rootTurns: ['1', '2'],
     childSessionId: 'external-child',
+    nativeImageReachedProvider: true,
+    nativeImageBytesRead: true,
+    imageUnsupportedRefusedBeforeEnqueue: true,
+    sameInputIdAcceptedByImageModel: true,
+    imageCount: stress ? 4 : 1,
+    imageBatchBytes: imageBytes.length * (stress ? 4 : 1),
+    elapsedMs: Date.now() - started,
+    inputAccepted: true,
     remoteInferenceRequests: 0,
   });
 } catch (error) {

@@ -1,6 +1,7 @@
 import type {
   HarnessDescriptor,
   HarnessStatus,
+  ImageMimeType,
   Model,
   QuestionAnswer,
   QuestionDefinition,
@@ -70,6 +71,18 @@ export interface HarnessTurnInput {
   model: string;
   reasoningEffort: string;
   workspace: string;
+  images?: HarnessInputImage[];
+  /** Notify the Runtime around adapter preflight and immediately before native dispatch. */
+  submissionState?: (state: 'preparing' | 'submitting') => void;
+}
+
+/** Normal input carries image bytes; steer carries only paths in its text envelope. */
+export interface HarnessInputImage {
+  id: string;
+  path: string;
+  mimeType: ImageMimeType;
+  data: string;
+  label: string;
 }
 
 export interface HarnessSteerInput {
@@ -105,3 +118,6 @@ export interface HarnessAdapter {
 
 /** A definite native refusal; other submission errors retain an uncertain outcome. */
 export class HarnessSubmissionRejected extends Error {}
+
+/** The selected native model or harness cannot consume image input. */
+export class HarnessImageInputUnsupported extends HarnessSubmissionRejected {}

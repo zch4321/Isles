@@ -18,6 +18,7 @@ import type { AgentRecord } from '../src/storage/store.js';
 // Configuration, authentication and persisted native sessions all live in this temporary root.
 const root = await mkdtemp(join(tmpdir(), 'isles-native-claude-protocol-'));
 let inferenceRequests = 0;
+let imageRequest: unknown;
 let releaseResponse: (() => void) | undefined;
 let releaseChild: (() => void) | undefined;
 const provider = createServer(async (request, response) => {
@@ -57,6 +58,8 @@ const provider = createServer(async (request, response) => {
   const last = JSON.stringify(
     messages.filter((message) => message.role === 'user').at(-1)?.content,
   );
+  if (last.includes('PROTOCOL_IMAGE'))
+    imageRequest = messages.filter((message) => message.role === 'user').at(-1)?.content;
   if (last.includes('PROTOCOL_HOLD'))
     await new Promise<void>((resolve) => {
       releaseResponse = resolve;
@@ -280,6 +283,47 @@ try {
   assert.ok(
     Array.isArray(result.user_message_uuids) && result.user_message_uuids.includes(input.runId),
   );
+  const imageData =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC';
+  const imageInput = {
+    runId: randomUUID(),
+    sessionId,
+    text: 'PROTOCOL_IMAGE',
+    workspace: agent.workspace,
+    model: agent.model,
+    reasoningEffort: agent.reasoningEffort,
+    images: [
+      {
+        id: 'image-one',
+        path: join(agent.workspace, '.isles-images', 'one.png'),
+        mimeType: 'image/png' as const,
+        data: imageData,
+        label: '[channel: protocol, message 1, image 1]',
+      },
+    ],
+  };
+  await session.submit(imageInput);
+  await until(
+    () =>
+      events.some((event) => event.type === 'turn_completed' && event.turnId === imageInput.runId),
+    'image result',
+  );
+  assert.ok(Array.isArray(imageRequest));
+  assert.ok(
+    imageRequest.some(
+      (block) => block.type === 'text' && block.text.includes(imageInput.images[0]!.label),
+    ),
+  );
+  assert.ok(
+    imageRequest.some(
+      (block) =>
+        block.type === 'image' &&
+        block.source?.type === 'base64' &&
+        block.source.media_type === 'image/png' &&
+        block.source.data === imageData,
+    ),
+  );
+  report.nativeImageInput = true;
   const asked = await submit('PROTOCOL_ASK', sessionId);
   await until(() => questions.length === 1, 'AskUserQuestion control');
   const question = questions[0]!;

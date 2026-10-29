@@ -146,7 +146,7 @@ const begin = (frame) => {
   end('end_turn');
 };
 const handlers = {
-  initialize: () => ({ protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true, audio: false, embeddedContext: true }, sessionCapabilities: settings().noResume ? { delete: {} } : { list: {}, resume: {}, close: {}, delete: {}, ...(settings().noAdditionalDirectories ? {} : { additionalDirectories: {} }) }, mcpCapabilities: { http: !settings().noHttpMcp, sse: true } }, authMethods: [{ id: 'login', type: 'terminal', name: 'Login with Kimi account' }], agentInfo: { name: 'Kimi Code CLI', version: '2.1.1' } }),
+  initialize: () => ({ protocolVersion: 1, agentCapabilities: { loadSession: true, ...(settings().omitImageCapability ? {} : { promptCapabilities: { image: !settings().noImage, audio: false, embeddedContext: true } }), sessionCapabilities: settings().noResume ? { delete: {} } : { list: {}, resume: {}, close: {}, delete: {}, ...(settings().noAdditionalDirectories ? {} : { additionalDirectories: {} }) }, mcpCapabilities: { http: !settings().noHttpMcp, sse: true } }, authMethods: [{ id: 'login', type: 'terminal', name: 'Login with Kimi account' }], agentInfo: { name: 'Kimi Code CLI', version: '2.1.1' } }),
   authenticate: () => { if (settings().unauthenticated) throw { code: -32000, message: 'Authentication required' }; return {}; },
   'session/new': ({ cwd, mcpServers }) => {
     const id = 'session_' + crypto.randomUUID();

@@ -45,6 +45,7 @@ async function contextFixture(page: Page) {
     sender: 'user',
     senderId: 'user',
     body,
+    images: [],
     clientId: `context-${seq}`,
     replyTo: null,
     mentions: [],

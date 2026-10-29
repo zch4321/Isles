@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { Buffer } from 'node:buffer';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -33,7 +34,12 @@ const inputId = (message) =>
   message.source.rpcId.startsWith('isles:')
     ? message.source.rpcId.slice(6)
     : undefined;
-const rejection = (reason) => ({ rejected: true, reason });
+const rejection = (reason, code) => ({
+  rejected: true,
+  reason,
+  ...(code === undefined ? {} : { code }),
+});
+const imageTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const textOf = (blocks = []) =>
   blocks
     .map((block) => {
@@ -740,6 +746,27 @@ export function apply(ctx, config = {}) {
       !params.text.trim()
     )
       return rejection('输入需要 messageId 和非空文本');
+    if (params.images !== undefined && steer) return rejection('追加消息使用文本和图片路径');
+    if (params.images !== undefined && !Array.isArray(params.images))
+      return rejection('图片信息无效，请检查格式和内容');
+    const images = params.images ?? [];
+    if (
+      images.some(
+        (image) =>
+          !image ||
+          typeof image !== 'object' ||
+          typeof image.id !== 'string' ||
+          !image.id.trim() ||
+          typeof image.path !== 'string' ||
+          !image.path.trim() ||
+          typeof image.label !== 'string' ||
+          !image.label.trim() ||
+          !imageTypes.has(image.mimeType) ||
+          typeof image.data !== 'string' ||
+          !image.data,
+      )
+    )
+      return rejection('图片信息无效，请检查格式和内容');
     if (steer && (rec.activeTurn === undefined || rec.activeTurn !== params.expectedTurnId))
       return rejection('目标执行已经结束');
     const prior = rec.inputs.get(params.messageId);
@@ -754,6 +781,31 @@ export function apply(ctx, config = {}) {
         selection = await validateSelection(params.selection);
       } catch (error) {
         return rejection(error instanceof Error ? error.message : String(error));
+      }
+    }
+    let imageRefs = [];
+    if (images.length) {
+      const attachments = ctx.get('attachments');
+      if (!attachments) return rejection('DSH 图片服务尚未就绪');
+      const route = selection?.selection ?? rec.selection.current;
+      let model;
+      try {
+        model = await ctx.llm.resolveModelInfo(route.provider, route.model);
+      } catch {
+        return rejection('DSH 模型信息暂不可用，请重试');
+      }
+      if (model.inputModalities !== undefined && !model.inputModalities.includes('image'))
+        return rejection('请选择支持图片输入的 DSH 模型并恢复 Agent', 'image_input_unsupported');
+      try {
+        const uploads = images.map((image) => {
+          const data = Buffer.from(image.data, 'base64');
+          if (data.toString('base64') !== image.data) throw new Error('invalid image encoding');
+          return { data, mediaType: image.mimeType };
+        });
+        imageRefs = await attachments.saveImages(uploads);
+        if (imageRefs.length !== images.length) throw new Error('invalid image admission');
+      } catch {
+        return rejection('DSH 图片保存失败，请检查图片格式、大小和磁盘状态');
       }
     }
     // No asynchronous boundary between CAS and the native inbox mutation.
@@ -777,7 +829,13 @@ export function apply(ctx, config = {}) {
     }
     const message = createUserMessage({
       source: { kind: 'user', rpcId: `isles:${params.messageId}` },
-      content: [{ type: 'text', text: params.text }],
+      content: [
+        { type: 'text', text: params.text },
+        ...images.flatMap((image, index) => [
+          { type: 'text', text: `图片 ${image.id}（${image.label}）\n文件路径：${image.path}` },
+          { type: 'image', attachment: imageRefs[index] },
+        ]),
+      ],
     });
     rec.inputs.set(params.messageId, { nativeId: message.id, status: 'queued' });
     // An exception after native enqueue is ambiguous and remains a RPC error.

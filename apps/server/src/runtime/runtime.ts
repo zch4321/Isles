@@ -15,10 +15,12 @@ import {
 import type { HarnessRegistry } from '../harness/registry.js';
 import {
   HarnessSubmissionRejected,
+  HarnessImageInputUnsupported,
   type HarnessEvent,
   type HarnessQuestion,
   type HarnessRequestId,
   type HarnessSession,
+  type HarnessInputImage,
 } from '../harness/types.js';
 import { HttpError } from '../errors.js';
 import type { Logger } from '../logging.js';
@@ -30,7 +32,8 @@ import type {
   NewAgent,
   Store,
 } from '../storage/store.js';
-import { formatMessages, MessageLabels } from './envelope.js';
+import { formatImageLabel, formatMessages, MessageLabels } from './envelope.js';
+import { MessageImages } from './images.js';
 import { RunOutputBuffer } from './output.js';
 import type { AgentWorkspace } from './workspace.js';
 import {
@@ -41,6 +44,7 @@ import {
 } from './workspace-paths.js';
 
 interface Active {
+  submitStarted?: boolean;
   run: Run;
   turnId: string | null;
   output: RunOutputBuffer;
@@ -49,9 +53,16 @@ interface Active {
   steerTask?: Promise<void>;
   steerBatchId?: string;
   steerRejected?: boolean;
+  steerSubmitted?: boolean;
+}
+class InputPreparationChanged extends Error {
+  constructor() {
+    super('消息投递状态已更新，仍待处理的消息保留在队列');
+  }
 }
 interface Handle {
   workspacePaths?: string[];
+  receiving?: boolean;
   session?: HarnessSession;
   rootSessionId?: string;
   nativeSubagents?: boolean;
@@ -72,6 +83,7 @@ interface Handle {
   refresh?: boolean;
 }
 export class Runtime {
+  readonly images: MessageImages;
   private handles = new Map<string, Handle>();
   private deleting = new Set<string>();
   private resetting = new Set<string>();
@@ -79,12 +91,14 @@ export class Runtime {
   private closing = false;
   private readonly log: Logger;
   private workspaceSettingsTask: Promise<void> = Promise.resolve();
+  private inboxTasks = new Map<string, Promise<void>>();
   constructor(
     readonly store: Store,
     readonly harnesses: HarnessRegistry,
     readonly workspace: AgentWorkspace,
   ) {
     this.log = workspace.log.child({ module: 'runtime' });
+    this.images = new MessageImages(store, workspace);
     store.recoverOnBoot();
   }
   private handle(id: string) {
@@ -254,7 +268,11 @@ export class Runtime {
     const channel = this.store.getChannel(channelId);
     if (channel.kind === 'private' && channel.agentId && this.deleting.has(channel.agentId))
       throw new HttpError(409, 'Agent 正在删除，不能继续发送消息');
-    const message = this.store.saveMessage(channelId, { type: 'user' }, input);
+    const message = this.store.saveMessage(
+      channelId,
+      { type: 'user' },
+      { ...input, body: input.body ?? '' },
+    );
     this.wake(message);
     return message;
   }
@@ -268,6 +286,55 @@ export class Runtime {
     );
     this.wake(message);
     return message;
+  }
+  async publishImages(
+    agentId: string,
+    channelId: string,
+    input: MessageInput,
+    imagePaths: readonly string[],
+  ) {
+    this.running(agentId);
+    const handle = this.handle(agentId);
+    const revision = handle.controlRevision ?? 0;
+    if (!this.store.isMember(channelId, agentId)) throw new HttpError(403, '请选择已加入的频道');
+    const images = await this.images.importFiles(
+      this.store.getAgent(agentId),
+      channelId,
+      imagePaths,
+    );
+    if ((handle.controlRevision ?? 0) !== revision)
+      throw new HttpError(409, 'Agent 的运行状态已更新，请重新发送图片');
+    // Imports snapshot bytes; publication rechecks the live Agent and channel after disk I/O.
+    return this.publish(agentId, channelId, {
+      ...input,
+      imageIds: images.map((image) => image.id),
+    });
+  }
+  private async inputImagePaths(agent: AgentRecord, input: ClaimedChannel[]) {
+    return this.images.materialize(
+      agent,
+      input.flatMap((entry) => entry.messages.flatMap((message) => message.images)),
+    );
+  }
+  private async nativeImages(
+    agent: AgentRecord,
+    input: ClaimedChannel[],
+  ): Promise<HarnessInputImage[]> {
+    const paths = await this.inputImagePaths(agent, input);
+    const labels = this.messageLabels(agent.id);
+    const images: HarnessInputImage[] = [];
+    for (const entry of input)
+      for (const message of entry.messages)
+        for (const [index, image] of message.images.entries()) {
+          const loaded = await this.images.load(image);
+          images.push({
+            id: image.id,
+            path: paths.get(image.id)!,
+            ...loaded,
+            label: formatImageLabel(labels, entry.channel, message, image, index),
+          });
+        }
+    return images;
   }
   private wake(message: Message) {
     for (const d of message.deliveries) if (d.status === 'queued') this.kick(d.agentId);
@@ -291,6 +358,65 @@ export class Runtime {
         throw new HttpError(403, '只能访问自己所在的频道');
     }
     return this.store.receiveMessages(agentId, query);
+  }
+  receiveWithContent<T>(
+    agentId: string,
+    query: { channelId?: string | undefined; limit: number },
+    prepare: (page: { input: ClaimedChannel[]; hasMore: boolean }) => Promise<T>,
+  ): Promise<T> {
+    return this.readWithContent(agentId, async () => {
+      if (query.channelId !== undefined && !this.store.isMember(query.channelId, agentId))
+        throw new HttpError(403, '请选择已加入的频道');
+      const page = this.store.receiveMessages(agentId, query, false);
+      return { input: page.input, value: await prepare(page) };
+    });
+  }
+  readWithContent<T>(
+    agentId: string,
+    prepare: () => Promise<{ input: ClaimedChannel[]; value: T }>,
+  ): Promise<T> {
+    if (this.closing) throw new HttpError(503, 'Isles 正在关闭，请稍后重试');
+    this.running(agentId);
+    const handle = this.handle(agentId);
+    const revision = handle.controlRevision ?? 0;
+    const checkCurrent = () => {
+      this.running(agentId);
+      if ((handle.controlRevision ?? 0) !== revision)
+        throw new HttpError(409, 'Agent 的运行状态已更新，请重新读取消息');
+    };
+    // Reserve admission for the whole queued MCP read sequence, including between pages.
+    handle.receiving = true;
+    const previous = this.inboxTasks.get(agentId) ?? Promise.resolve();
+    const operation = previous.then(async () => {
+      if (this.closing) throw new HttpError(503, 'Isles 正在关闭，请稍后重试');
+      checkCurrent();
+      const page = await prepare();
+      if (this.closing) throw new HttpError(503, 'Isles 正在关闭，请稍后重试');
+      checkCurrent();
+      for (const entry of page.input)
+        if (
+          !this.store.isMember(entry.channel.id, agentId) ||
+          this.store.groupDeletedAt(entry.channel.id)
+        )
+          throw new HttpError(403, '频道成员关系已更新，请重新查询频道');
+      this.store.markMessagesReceived(
+        agentId,
+        page.input.flatMap((entry) => entry.messages),
+      );
+      return page.value;
+    });
+    const settled = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.inboxTasks.set(agentId, settled);
+    void settled.then(() => {
+      if (this.inboxTasks.get(agentId) !== settled) return;
+      this.inboxTasks.delete(agentId);
+      delete handle.receiving;
+      if (!this.closing && this.store.getAgent(agentId).status !== 'deleted') this.kick(agentId);
+    });
+    return operation;
   }
   private mayOrganize(actor: Actor) {
     if (actor === 'user') return;
@@ -341,6 +467,7 @@ export class Runtime {
   kick(id: string) {
     if (this.closing || !this.baseUrl || this.resetting.has(id)) return;
     const handle = this.handle(id);
+    if (handle.receiving) return;
     if (handle.active) {
       this.kickSteer(id, handle, handle.active);
       return;
@@ -353,6 +480,7 @@ export class Runtime {
         this.closing ||
         !handle.session ||
         handle.steerTask ||
+        handle.receiving ||
         (handle.refresh && handle.activities.size) ||
         !this.runnable(id)
       )
@@ -370,6 +498,7 @@ export class Runtime {
       !!handle.session &&
       !!active.turnId &&
       !active.steerRejected &&
+      !handle.receiving &&
       JSON.stringify(agent.workspacePaths) === JSON.stringify(handle.workspacePaths) &&
       agent.steerEnabled &&
       this.runnable(id) &&
@@ -388,12 +517,43 @@ export class Runtime {
         const batch = this.store.claimSteer(id, active.run.id, turnId);
         if (!batch) return;
         active.steerBatchId = batch.id;
+        active.steerSubmitted = false;
         try {
+          let paths: Map<string, string>;
+          try {
+            paths = batch.input.some((entry) =>
+              entry.messages.some((message) => message.images.length),
+            )
+              ? await this.inputImagePaths(this.store.getAgent(id), batch.input)
+              : new Map();
+          } catch (error) {
+            if (
+              !this.store.isRunInputPending(
+                active.run.id,
+                batch.input.flatMap((entry) => entry.messages),
+                batch.id,
+              )
+            )
+              throw new InputPreparationChanged();
+            throw new HarnessSubmissionRejected(this.workspace.redactor.text(error));
+          }
+          if (
+            !this.canSteer(id, handle, active) ||
+            handle.session !== client ||
+            !this.store.isRunInputPending(
+              active.run.id,
+              batch.input.flatMap((entry) => entry.messages),
+              batch.id,
+            )
+          )
+            throw new InputPreparationChanged();
+          const text = formatMessages(this.messageLabels(id), batch.input, paths);
+          active.steerSubmitted = true;
           const response = await client.steer!({
             sessionId: active.run.threadId,
             expectedTurnId: turnId,
             batchId: batch.id,
-            text: formatMessages(this.messageLabels(id), batch.input),
+            text,
           });
           const actual =
             this.store.findNativeRun(id, active.run.threadId, response.turnId) ??
@@ -422,6 +582,10 @@ export class Runtime {
           );
         } catch (error) {
           const reason = this.workspace.redactor.text(error);
+          if (error instanceof InputPreparationChanged) {
+            this.store.rejectSteer(batch.id, reason);
+            return;
+          }
           const context = { err: error, agentId: id, runId: active.run.id, batchId: batch.id };
           if (error instanceof HarnessSubmissionRejected) {
             this.log.warn(context, 'Steer rejected; messages return to the queue');
@@ -448,6 +612,7 @@ export class Runtime {
       })
       .finally(() => {
         delete active.steerBatchId;
+        delete active.steerSubmitted;
         delete active.steerTask;
         delete handle.steerTask;
         delete handle.steering;
@@ -554,7 +719,7 @@ export class Runtime {
   private async pump(id: string, handle: Handle) {
     try {
       while (!this.closing && this.runnable(id)) {
-        if (handle.active || handle.submitting || handle.steerTask) break;
+        if (handle.active || handle.submitting || handle.steerTask || handle.receiving) break;
         if (handle.retiring) {
           await handle.retiring;
           if (this.closing || !this.runnable(id)) break;
@@ -573,6 +738,7 @@ export class Runtime {
         if (handle.refresh && !handle.activities.size) continue;
         const agent = this.store.getAgent(id);
         if (
+          handle.receiving ||
           !handle.session ||
           !agent.threadId ||
           !this.runnable(id) ||
@@ -640,6 +806,9 @@ export class Runtime {
     status: 'completed' | 'interrupted' | 'failed' | 'uncertain',
     error: string | null = null,
   ) {
+    if (active.submitStarted === false) this.store.requeueRunInput(active.run.id);
+    if (active.steerBatchId && active.steerSubmitted === false)
+      this.store.rejectSteer(active.steerBatchId, '当前执行已结束，追加消息保留在队列');
     if (active.finished) {
       if (status === 'interrupted' || status === 'uncertain')
         this.store.finishRun(
@@ -679,17 +848,62 @@ export class Runtime {
     input: ClaimedChannel[],
   ) {
     const active = this.activity(run, null);
+    active.submitStarted = false;
     const pending: NonNullable<Handle['submitting']> = { active, buffered: [] };
     handle.submitting = pending;
     this.activityStatus(id, handle);
     try {
+      let images: HarnessInputImage[] = [];
+      try {
+        if (input.some((entry) => entry.messages.some((message) => message.images.length)))
+          images = await this.nativeImages(agent, input);
+      } catch (error) {
+        if (
+          !this.store.isRunInputPending(
+            run.id,
+            input.flatMap((entry) => entry.messages),
+          )
+        )
+          throw new InputPreparationChanged();
+        throw new HarnessSubmissionRejected(this.workspace.redactor.text(error));
+      }
+      if (active.finished || handle.session !== client || this.closing || !this.runnable(id))
+        throw new HarnessSubmissionRejected('Agent 已停止，消息保留当前投递状态');
+      if (
+        !this.store.isRunInputPending(
+          run.id,
+          input.flatMap((entry) => entry.messages),
+        )
+      )
+        throw new InputPreparationChanged();
+      const text = formatMessages(this.messageLabels(id), input);
+      active.submitStarted = true;
       const response = await client.submit({
         sessionId: run.threadId,
         runId: run.id,
-        text: formatMessages(this.messageLabels(id), input),
+        text,
         model: agent.model,
         reasoningEffort: agent.reasoningEffort,
         workspace: agent.workspace,
+        ...(images.length ? { images } : {}),
+        submissionState: (state) => {
+          if (state === 'preparing') {
+            active.submitStarted = false;
+            return;
+          }
+          if (
+            active.finished ||
+            handle.session !== client ||
+            this.closing ||
+            !this.runnable(id) ||
+            !this.store.isRunInputPending(
+              run.id,
+              input.flatMap((entry) => entry.messages),
+            )
+          )
+            throw new InputPreparationChanged();
+          active.submitStarted = true;
+        },
       });
       const existing = this.store.findNativeRun(id, run.threadId, response.turnId);
       if (existing && existing.id !== run.id)
@@ -711,7 +925,19 @@ export class Runtime {
       this.log.info({ agentId: id, runId: run.id, turnId: response.turnId }, 'Input accepted');
     } catch (error) {
       delete handle.submitting;
-      const rejected = error instanceof HarnessSubmissionRejected;
+      if (
+        error instanceof InputPreparationChanged ||
+        (active.submitStarted === false &&
+          !this.store.isRunInputPending(
+            run.id,
+            input.flatMap((entry) => entry.messages),
+          ))
+      ) {
+        this.finishActivity(handle, active, 'interrupted', new InputPreparationChanged().message);
+        return;
+      }
+      if (error instanceof HarnessImageInputUnsupported) this.store.requeueRunInput(run.id);
+      const rejected = error instanceof HarnessSubmissionRejected || active.submitStarted === false;
       this.log.error(
         { err: error, agentId: id, runId: run.id },
         rejected ? 'Input rejected' : 'Input result is uncertain',
@@ -979,6 +1205,7 @@ export class Runtime {
       handle.task ||
       handle.steerTask ||
       handle.submitting ||
+      handle.receiving ||
       handle.activities.size ||
       this.store.hasActiveRun(id)
     )
@@ -1053,6 +1280,7 @@ export class Runtime {
   async close() {
     this.closing = true;
     await this.workspaceSettingsTask;
+    await Promise.all(this.inboxTasks.values());
     for (const [id, handle] of this.handles) {
       const activities = this.allActivities(handle);
       for (const active of activities) this.flushOutput(active, 'interrupted');

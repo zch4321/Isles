@@ -5,6 +5,7 @@ import type { Redactor } from '../../errors.js';
 import type { Logger } from '../../logging.js';
 import type { CliCommand } from '../shared/executable.js';
 import { stopProcessTree } from '../shared/process.js';
+import { MAX_NATIVE_FRAME_LENGTH } from '../shared/native-limits.js';
 
 export type OpenCodeMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 export interface OpenCodeStream {
@@ -203,22 +204,30 @@ export async function readSse(body: ReadableStream<Uint8Array>, event: (frame: u
   const decoder = new TextDecoder();
   let buffer = '';
   let data: string[] = [];
+  let dataLength = 0;
   const line = (value: string) => {
     if (!value) {
       if (data.length) event(JSON.parse(data.join('\n')) as unknown);
       data = [];
-    } else if (value.startsWith('data:')) data.push(value.slice(5).replace(/^ /, ''));
+      dataLength = 0;
+    } else if (value.startsWith('data:')) {
+      const part = value.slice(5).replace(/^ /, '');
+      dataLength += part.length + (data.length ? 1 : 0);
+      if (dataLength > MAX_NATIVE_FRAME_LENGTH) throw new Error('OpenCode 事件帧超出大小限制');
+      data.push(part);
+    }
   };
   try {
     while (true) {
       const chunk = await reader.read();
       buffer += decoder.decode(chunk.value, { stream: !chunk.done });
-      if (buffer.length > 8_000_000) throw new Error('OpenCode 事件帧超出大小限制');
       let end: number;
       while ((end = buffer.indexOf('\n')) >= 0) {
         line(buffer.slice(0, end).replace(/\r$/, ''));
         buffer = buffer.slice(end + 1);
       }
+      if (buffer.length + dataLength > MAX_NATIVE_FRAME_LENGTH)
+        throw new Error('OpenCode 事件帧超出大小限制');
       if (chunk.done) {
         // A frame without its final blank line is incomplete and must not be accepted.
         if (data.length || buffer.trim()) throw new Error('OpenCode 事件流在完整帧前断开');

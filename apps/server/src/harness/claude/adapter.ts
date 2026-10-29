@@ -313,6 +313,7 @@ class ClaudeSession implements HarnessSession {
     }
   }
   async submit(input: HarnessTurnInput) {
+    input.submissionState?.('preparing');
     if (
       input.sessionId !== this.sessionId ||
       input.workspace !== this.agent.workspace ||
@@ -323,10 +324,16 @@ class ClaudeSession implements HarnessSession {
       [...this.receipts.values()].some((receipt) => !receipt.turn)
     )
       throw new HarnessSubmissionRejected('Claude Code 输入与当前会话配置不一致');
+    input.submissionState?.('submitting');
     const receipt: { turn?: NativeTurn } = {};
     this.receipts.set(input.runId, receipt);
     try {
-      await this.native().sendUser(input.sessionId, input.runId, input.text);
+      await this.native().sendUser(
+        input.sessionId,
+        input.runId,
+        input.text,
+        input.images?.length ? { images: input.images } : undefined,
+      );
       if (!receipt.turn) throw new Error('Claude Code 尚未确认输入所属原生回合');
       return { turnId: receipt.turn.id };
     } catch (error) {

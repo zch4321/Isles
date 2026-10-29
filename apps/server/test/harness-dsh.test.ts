@@ -7,6 +7,7 @@ import { DshAdapter } from '../src/harness/dsh/adapter.js';
 import { DshClient, DshRpcError } from '../src/harness/dsh/client.js';
 import { DshEnvironment } from '../src/harness/dsh/environment.js';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessEvent,
   type HarnessHandlers,
@@ -96,6 +97,25 @@ async function fixture() {
 }
 
 describe('DSH SDK stdio transport', () => {
+  it('accepts protocol frames larger than the former eight-megabyte limit', async () => {
+    const f = await fixture();
+    const { command, audit } = await dshTransport(f.root);
+    const handlers = { notification: vi.fn(), exit: vi.fn() };
+    const client = new DshClient(
+      command,
+      f.root,
+      { args: [], env: { DSH_FIXTURE_AUDIT: audit } },
+      handlers,
+      f.environment.redactor,
+      silentLogger,
+    );
+    cleanups.push(() => client.close());
+    const text = 'x'.repeat(8_100_000);
+    const result = (await client.request('echo', { text })) as { params: { text: string } };
+    expect(result.params.text).toEqual(text);
+    expect(handlers.exit).not.toHaveBeenCalled();
+  });
+
   it('keeps Unicode notifications separate from RPC results, scrubs stderr and shuts down once', async () => {
     const f = await fixture();
     const { command, audit } = await dshTransport(f.root);
@@ -501,6 +521,119 @@ describe('DSH native SDK adapter', () => {
     ).toBeUndefined();
   });
 
+  it('reports submit preparation and dispatch synchronously while steer stays unchanged', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const trace: string[] = [];
+    f.native.onRequest = ({ method, params }) => {
+      if (method !== 'isles/session/submit') return;
+      trace.push('native-submit');
+      const turnId = f.native.start(id);
+      f.native.accept(id, params.messageId as string, turnId);
+    };
+    const pending = session.submit({
+      ...f.input(id),
+      submissionState: (state) => trace.push(state),
+    });
+    expect(trace).toEqual(['preparing', 'submitting', 'native-submit']);
+    const { turnId } = await pending;
+    f.native.onRequest = ({ method, params }) => {
+      if (method === 'isles/session/steer') f.native.accept(id, params.messageId as string, turnId);
+    };
+    const steering = {
+      sessionId: id,
+      expectedTurnId: turnId,
+      batchId: randomUUID(),
+      text: 'path-only input',
+      submissionState: (state: string) => trace.push(state),
+    };
+    await session.steer!(steering);
+    expect(trace).toEqual(['preparing', 'submitting', 'native-submit']);
+  });
+
+  it.each(['preparing', 'submitting'] as const)(
+    'leaves the input unsubmitted when the %s callback rejects it',
+    async (blockedState) => {
+      const f = await fixture();
+      const session = await f.connect();
+      const id = await session.createSession(() => {});
+      const input = f.input(id);
+      const changed = new Error('input preparation changed');
+      const trace: string[] = [];
+      await expect(
+        session.submit({
+          ...input,
+          submissionState: (state) => {
+            trace.push(state);
+            if (state === blockedState) throw changed;
+          },
+        }),
+      ).rejects.toBe(changed);
+      expect(trace).toEqual(
+        blockedState === 'preparing' ? ['preparing'] : ['preparing', 'submitting'],
+      );
+      expect(f.native.calls.some(({ method }) => method === 'isles/session/submit')).toBe(false);
+      expect(f.handlers.exit).not.toHaveBeenCalled();
+      f.startInput(id);
+      await expect(session.submit(input)).resolves.toEqual({ turnId: expect.any(String) });
+    },
+  );
+
+  it('validates the local model before marking the input submitted', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const input = f.input(id);
+    const trace: string[] = [];
+    await expect(
+      session.submit({
+        ...input,
+        model: 'invalid',
+        submissionState: (state) => trace.push(state),
+      }),
+    ).rejects.toThrow('DSH 模型格式应为 provider/model');
+    expect(trace).toEqual(['preparing']);
+    expect(f.native.calls.some(({ method }) => method === 'isles/session/submit')).toBe(false);
+    f.startInput(id);
+    await expect(session.submit(input)).resolves.toEqual({ turnId: expect.any(String) });
+  });
+
+  it('forwards native image inputs on submit while steer carries text paths only', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    f.startInput(id);
+    const images = [
+      {
+        id: 'image-1',
+        label: 'channel / message',
+        path: join(f.agent.workspace, '.isles-images', 'image-1.png'),
+        mimeType: 'image/png' as const,
+        data: 'AQID',
+      },
+    ];
+    const { turnId } = await session.submit({ ...f.input(id), images });
+    expect(f.native.calls.find((call) => call.method === 'isles/session/submit')).toMatchObject({
+      params: { images },
+    });
+    f.native.onRequest = ({ method, params }) => {
+      if (method === 'isles/session/steer') f.native.accept(id, params.messageId as string, turnId);
+    };
+    await session.steer!({
+      sessionId: id,
+      expectedTurnId: turnId,
+      batchId: randomUUID(),
+      text: `Read ${images[0]!.path}`,
+    });
+    expect(f.native.calls.find((call) => call.method === 'isles/session/steer')).toMatchObject({
+      params: { text: `Read ${images[0]!.path}` },
+    });
+    expect(
+      f.native.calls.find((call) => call.method === 'isles/session/steer')!.params.images,
+    ).toBeUndefined();
+  });
+
   it('keeps steer pending for exact-turn consumption, refuses a stale turn and deduplicates batch IDs', async () => {
     const f = await fixture();
     const session = await f.connect();
@@ -651,6 +784,42 @@ describe('DSH native SDK adapter', () => {
     await expect(session.submit(f.input(id))).rejects.not.toBeInstanceOf(HarnessSubmissionRejected);
     await vi.waitFor(() => expect(f.native.closed).toBe(true));
     expect(f.handlers.exit).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies only the native image-capability code as an image-input refusal', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    const reason = '请选择支持图片输入的 DSH 模型并恢复 Agent';
+    const images = [
+      {
+        id: 'image-1',
+        path: join(f.agent.workspace, '.isles-images', 'image-1.png'),
+        mimeType: 'image/png' as const,
+        data: 'AQID',
+        label: 'channel / message',
+      },
+    ];
+    for (const [code, expected] of [
+      ['image_input_unsupported', HarnessImageInputUnsupported],
+      ['other_refusal', HarnessSubmissionRejected],
+      [undefined, HarnessSubmissionRejected],
+      [400, HarnessSubmissionRejected],
+    ] as const) {
+      f.native.onRequest = ({ method }) => {
+        if (method === 'isles/session/submit')
+          return { rejected: true, reason, ...(code === undefined ? {} : { code }) };
+      };
+      const error = await session
+        .submit({ ...f.input(id), images })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(expected);
+      expect(error).toHaveProperty('message', reason);
+      if (code !== 'image_input_unsupported')
+        expect(error).not.toBeInstanceOf(HarnessImageInputUnsupported);
+    }
+    expect(f.handlers.exit).not.toHaveBeenCalled();
+    expect(f.native.closed).toBe(false);
   });
 
   it('deduplicates native event IDs and keeps items attached to their original turn', async () => {

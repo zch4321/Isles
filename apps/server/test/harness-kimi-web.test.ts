@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { KimiWebAdapter } from '../src/harness/kimi/web-adapter.js';
 import { KimiWebEnvironment } from '../src/harness/kimi/web-environment.js';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessEvent,
   type HarnessHandlers,
@@ -127,6 +128,134 @@ async function fixture(agentSettings: Partial<AgentRecord> = {}) {
 }
 
 describe('Kimi Code local Web adapter', () => {
+  it.each(['preparing', 'submitting'] as const)(
+    'keeps the input retryable when the %s callback rejects',
+    async (blockedState) => {
+      const f = await fixture();
+      const { session, id } = await f.created();
+      const input = f.input('callback test', id);
+      const error = new Error('input invalidated');
+      const states: string[] = [];
+      await expect(
+        session.submit({
+          ...input,
+          submissionState(state) {
+            states.push(state);
+            if (state === blockedState) throw error;
+          },
+        }),
+      ).rejects.toBe(error);
+      expect(states).toEqual(
+        blockedState === 'preparing' ? ['preparing'] : ['preparing', 'submitting'],
+      );
+      expect(await f.requests('/prompts')).toEqual([]);
+      const retryStates: string[] = [];
+      const retry = await session.submit({
+        ...input,
+        submissionState: (state) => retryStates.push(state),
+      });
+      expect(retryStates).toEqual(['preparing', 'submitting']);
+      await f.completed(retry.turnId);
+      expect(await f.requests('/prompts')).toHaveLength(1);
+    },
+  );
+  it('sends labeled Web image parts for normal input and text alone for steer', async () => {
+    const f = await fixture();
+    await f.cli.set({
+      holdTurn: true,
+      manualOutput: true,
+      models: [
+        {
+          provider: 'kimi-code',
+          model: 'kimi-code/k3',
+          max_context_size: 262144,
+          capabilities: ['image_in'],
+          support_efforts: ['high'],
+        },
+      ],
+    });
+    const { session, id } = await f.created();
+    const image = {
+      id: 'image-1',
+      path: join(f.agent.workspace, '.isles-images', 'one.png'),
+      mimeType: 'image/png' as const,
+      data: 'aW1hZ2U=',
+      label: '[channel: test, message 1, image 1]',
+    };
+    const { turnId } = await session.submit({ ...f.input('inspect', id), images: [image] });
+    await session.steer!({
+      sessionId: id,
+      expectedTurnId: turnId,
+      batchId: randomUUID(),
+      text: 'append path only',
+      ...{ images: [image] },
+    });
+    const requests = await f.requests('/prompts');
+    expect(requests[0]?.body).toMatchObject({
+      content: [
+        { type: 'text', text: 'inspect' },
+        { type: 'text', text: image.label },
+        {
+          type: 'image',
+          name: image.label,
+          source: { kind: 'path', path: image.path },
+        },
+      ],
+    });
+    expect(requests[1]?.body).toMatchObject({
+      content: [{ type: 'text', text: 'append path only' }],
+    });
+  });
+  it('rejects images before prompting when the selected model lacks image input', async () => {
+    const f = await fixture();
+    const { session, id } = await f.created();
+    const image = {
+      id: 'image-1',
+      path: join(f.agent.workspace, '.isles-images', 'one.png'),
+      mimeType: 'image/png' as const,
+      data: 'aW1hZ2U=',
+      label: '[channel: test, message 1, image 1]',
+    };
+    const refusal = await session
+      .submit({ ...f.input('inspect', id), images: [image] })
+      .catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(HarnessImageInputUnsupported);
+    expect((refusal as Error).message).toContain('请选择支持图片输入的模型并恢复 Agent');
+    expect(await f.requests('/prompts')).toEqual([]);
+    const plain = await session.submit(f.input('text only', id));
+    await f.completed(plain.turnId);
+    expect((await f.requests('/prompts'))[0]?.body).toMatchObject({
+      content: [{ type: 'text', text: 'text only' }],
+    });
+  });
+  it('allows native handling when model image capabilities are unavailable', async () => {
+    const f = await fixture();
+    await f.cli.set({
+      models: [
+        {
+          provider: 'kimi-code',
+          model: 'kimi-code/k3',
+          max_context_size: 262144,
+          support_efforts: ['high'],
+        },
+      ],
+    });
+    const { session, id } = await f.created();
+    const result = await session.submit({
+      ...f.input('inspect', id),
+      images: [
+        {
+          id: 'image-1',
+          path: 'one.png',
+          mimeType: 'image/png',
+          data: 'aW1hZ2U=',
+          label: 'image 1',
+        },
+      ],
+    });
+    await f.completed(result.turnId);
+    expect(await f.requests('/prompts')).toHaveLength(1);
+  });
   it('expires a native tool approval resolved elsewhere without sending a second reply', async () => {
     const f = await fixture();
     await f.cli.set({ manualOutput: true, holdTurn: true });

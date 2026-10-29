@@ -5,6 +5,7 @@ import type { Redactor } from '../../errors.js';
 import type { Logger } from '../../logging.js';
 import type { CliCommand } from '../shared/executable.js';
 import { stopProcessTree } from '../shared/process.js';
+import { MAX_NATIVE_FRAME_LENGTH } from '../shared/native-limits.js';
 import type { DshRuntime } from './environment.js';
 
 const frameSchema = z.object({
@@ -75,7 +76,7 @@ export class DshClient implements DshConnection {
     stdout.on('line', (line) => {
       if (this.failed || !line.trim()) return;
       try {
-        if (line.length > 8_000_000) throw new Error('DSH 原生协议帧超出大小限制');
+        if (line.length > MAX_NATIVE_FRAME_LENGTH) throw new Error('DSH 原生协议帧超出大小限制');
         const frame = frameSchema.parse(JSON.parse(line));
         if (frame.method) {
           if (frame.id !== undefined)

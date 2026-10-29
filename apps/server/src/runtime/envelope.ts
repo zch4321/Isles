@@ -1,4 +1,4 @@
-import type { Agent, Channel, Message } from '@isles/contracts';
+import type { Agent, Channel, Message, MessageImage } from '@isles/contracts';
 import type { ChannelRecord, ClaimedChannel } from '../storage/store.js';
 import { nameLabels } from './names.js';
 
@@ -63,6 +63,7 @@ export function formatChannelMessages(
   channel: ChannelRecord | Channel,
   messages: Message[],
   skipped = 0,
+  imagePaths?: ReadonlyMap<string, string>,
 ) {
   const label = labels.channel(channel);
   const blocks: string[] = [];
@@ -78,17 +79,35 @@ export function formatChannelMessages(
     if (message.replyTo !== null) fields.push(`reply_to: ${message.replyTo}`);
     if (message.mentions.length)
       fields.push(`mentions: ${message.mentions.map((id) => labels.agent(id)).join('|')}`);
+    if (message.images.length)
+      fields.push(
+        `${imagePaths ? 'image_paths' : 'images'}: ${message.images.map((image) => quote(imagePaths ? imagePaths.get(image.id)! : image.id)).join('|')}`,
+      );
     blocks.push(`[${fields.join(', ')}]\n${escapeMessageBody(message.body)}`);
   }
   return blocks.join('\n\n');
 }
 
 /** The same text representation is used for turn input and MCP inbox/history results. */
-export function formatMessages(labels: MessageLabels, input: ClaimedChannel[]) {
+export function formatMessages(
+  labels: MessageLabels,
+  input: ClaimedChannel[],
+  imagePaths?: ReadonlyMap<string, string>,
+) {
   return input
     .map(({ channel, messages, skipped }) =>
-      formatChannelMessages(labels, channel, messages, skipped),
+      formatChannelMessages(labels, channel, messages, skipped, imagePaths),
     )
     .filter(Boolean)
     .join('\n\n');
+}
+
+export function formatImageLabel(
+  labels: MessageLabels,
+  channel: ChannelRecord | Channel,
+  message: Pick<Message, 'seq'>,
+  image: MessageImage,
+  index: number,
+) {
+  return `[channel: ${labels.channel(channel)}, seq: ${message.seq}, image: ${index + 1}, id: ${quote(image.id)}, name: ${quote(image.name)}]`;
 }

@@ -2,6 +2,7 @@ import type { HarnessDescriptor, QuestionAnswer } from '@isles/contracts';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessAdapter,
   type HarnessCatalog,
@@ -20,6 +21,7 @@ import { permissionAllowed, permissionQuestions } from '../shared/permissions.js
 import {
   approvalRequestSchema,
   inputRequestSchema,
+  modelInputPageSchema,
   NativeRpcError,
   threadResponseSchema,
   tokenUsageNotificationSchema,
@@ -232,14 +234,32 @@ class CodexSession implements HarnessSession {
     return verified;
   }
   async submit(input: HarnessTurnInput) {
+    input.submissionState?.('preparing');
+    if (this.closing) throw new HarnessSubmissionRejected('Codex 连接已关闭');
+    if (input.images?.length) {
+      const supported = await this.supportsImage(input.model);
+      if (this.closing) throw new HarnessSubmissionRejected('Codex 连接已关闭');
+      if (supported === false)
+        throw new HarnessImageInputUnsupported(
+          '当前 Codex 模型不支持图片输入，请选择支持图片输入的模型并恢复 Agent',
+        );
+    }
+    const native = this.native();
+    input.submissionState?.('submitting');
     const submission = { clientId: input.runId, accepted: false };
     this.submissions.set(input.sessionId, submission);
     try {
       const response = turnResponseSchema.parse(
-        await this.native().request('turn/start', {
+        await native.request('turn/start', {
           threadId: input.sessionId,
           clientUserMessageId: input.runId,
-          input: [{ type: 'text', text: input.text, text_elements: [] }],
+          input: [
+            { type: 'text', text: input.text, text_elements: [] },
+            ...(input.images ?? []).flatMap((image) => [
+              { type: 'text', text: image.label, text_elements: [] },
+              { type: 'localImage', path: image.path },
+            ]),
+          ],
           model: input.model,
           effort: input.reasoningEffort,
           cwd: input.workspace,
@@ -264,6 +284,28 @@ class CodexSession implements HarnessSession {
       if (this.submissions.get(input.sessionId) === submission)
         this.submissions.delete(input.sessionId);
     }
+  }
+  private async supportsImage(model: string): Promise<boolean | undefined> {
+    try {
+      let cursor: string | null = null;
+      const visited = new Set<string>();
+      do {
+        const page = modelInputPageSchema.parse(
+          await this.native().request('model/list', { cursor, limit: 100 }),
+        );
+        const selected = page.data.find((entry) => entry.model === model);
+        if (selected) return selected.inputModalities?.includes('image');
+        cursor = page.nextCursor ?? null;
+        if (cursor && visited.has(cursor)) return undefined;
+        if (cursor) visited.add(cursor);
+      } while (cursor);
+    } catch (error) {
+      this.environment.log.warn(
+        { error: this.environment.redactor.text(error) },
+        'Codex image capability lookup failed',
+      );
+    }
+    return undefined;
   }
   async interrupt(sessionId: string, turnId: string) {
     this.expireRequests(undefined, true);

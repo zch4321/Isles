@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { AgentRecord } from '../../storage/store.js';
 import { additionalWorkspacePaths } from '../../runtime/workspace-paths.js';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessAdapter,
   type HarnessHandlers,
@@ -409,6 +410,7 @@ class OpenCodeSession implements HarnessSession {
     return this.contextRefresh;
   }
   async submit(input: HarnessTurnInput) {
+    input.submissionState?.('preparing');
     if (
       input.sessionId !== this.sessionId ||
       this.executions.has(input.sessionId) ||
@@ -416,10 +418,38 @@ class OpenCodeSession implements HarnessSession {
       this.stopped
     )
       throw new HarnessSubmissionRejected('OpenCode session 当前无法开始执行');
+    if (input.images?.length) {
+      const supported = await this.supportsImage(input.model);
+      if (this.stopped || this.executions.has(input.sessionId) || this.inputs.size)
+        throw new HarnessSubmissionRejected('OpenCode session 当前无法开始执行');
+      if (supported === false)
+        throw new HarnessImageInputUnsupported(
+          '当前 OpenCode 模型不支持图片输入，请选择支持图片输入的模型并恢复 Agent',
+        );
+    }
     await this.native().request('POST', `/api/session/${input.sessionId}/model`, {
       model: modelRef(input.model, input.reasoningEffort),
     });
-    return this.send(`msg_isles_${input.runId}`, input.text);
+    if (this.stopped || this.executions.has(input.sessionId) || this.inputs.size)
+      throw new HarnessSubmissionRejected('OpenCode session 当前无法开始执行');
+    const id = `msg_isles_${input.runId}`;
+    if (this.submitted.has(id)) throw new HarnessSubmissionRejected('OpenCode 输入批次已投递');
+    input.submissionState?.('submitting');
+    return this.send(id, input.text, input.images);
+  }
+  private async supportsImage(model: string): Promise<boolean | undefined> {
+    try {
+      const models = modelsResponseSchema.parse(await this.native().request('GET', '/api/model'));
+      return models.data
+        .find((entry) => modelKey(entry) === model)
+        ?.capabilities.input.includes('image');
+    } catch (error) {
+      this.environment.log.warn(
+        { error: this.environment.redactor.text(error) },
+        'OpenCode image capability lookup failed',
+      );
+      return undefined;
+    }
   }
   async steer(input: HarnessSteerInput) {
     if (
@@ -430,7 +460,7 @@ class OpenCodeSession implements HarnessSession {
       throw new HarnessSubmissionRejected('OpenCode 当前执行已结束，追加消息进入下一轮');
     return this.send(`msg_isles_${input.batchId}`, input.text);
   }
-  private async send(id: string, text: string) {
+  private async send(id: string, text: string, images?: HarnessTurnInput['images']) {
     if (this.submitted.has(id)) throw new HarnessSubmissionRejected('OpenCode 输入批次已投递');
     let resolve: PendingInput['resolve'] = () => {};
     let reject: PendingInput['reject'] = () => {};
@@ -451,7 +481,7 @@ class OpenCodeSession implements HarnessSession {
     this.inputs.set(id, pending);
     this.ownedInputs.add(id);
     try {
-      const response = inboxResponseSchema.parse(await this.admit(id, text)).data;
+      const response = inboxResponseSchema.parse(await this.admit(id, text, images)).data;
       if (
         response.id !== id ||
         response.sessionID !== this.sessionId ||
@@ -479,10 +509,18 @@ class OpenCodeSession implements HarnessSession {
       throw reason;
     }
   }
-  private async admit(id: string, text: string) {
+  private async admit(id: string, text: string, images?: HarnessTurnInput['images']) {
     const request = this.native().request('POST', `/api/session/${this.sessionId}/prompt`, {
       id,
-      text,
+      text: images?.length ? `${text}\n\n${images.map((image) => image.label).join('\n')}` : text,
+      ...(images?.length
+        ? {
+            files: images.map((image) => ({
+              uri: `data:${image.mimeType};base64,${image.data}`,
+              name: image.label,
+            })),
+          }
+        : {}),
       delivery: 'steer',
       metadata: { isles: this.agent.id },
     });

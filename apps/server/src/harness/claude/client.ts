@@ -4,12 +4,15 @@ import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import type { Redactor } from '../../errors.js';
 import { stopProcessTree } from '../shared/process.js';
+import { MAX_NATIVE_FRAME_LENGTH } from '../shared/native-limits.js';
 import type { Logger } from '../../logging.js';
 import type { ClaudeCommand } from './executable.js';
+import type { HarnessInputImage } from '../types.js';
 
 export type ClaudeFrame = Record<string, unknown>;
 export interface ClaudeUserOptions {
   waitForConsumption?: boolean;
+  images?: HarnessInputImage[];
 }
 export interface ClaudeHandlers {
   event(frame: ClaudeFrame): void;
@@ -105,7 +108,7 @@ export class ClaudeClient implements ClaudeConnection {
     lines.on('line', (line) => {
       if (this.closed) return;
       try {
-        if (line.length > 8_000_000) throw new Error('协议帧超出大小限制');
+        if (line.length > MAX_NATIVE_FRAME_LENGTH) throw new Error('协议帧超出大小限制');
         this.receive(frameSchema.parse(JSON.parse(line)));
       } catch (error) {
         this.log.warn({ err: error }, 'Failed to process a Claude Code protocol frame');
@@ -265,7 +268,21 @@ export class ClaudeClient implements ClaudeConnection {
           uuid: messageId,
           session_id: sessionId,
           parent_tool_use_id: null,
-          message: { role: 'user', content: text },
+          message: {
+            role: 'user',
+            content: options.images?.length
+              ? [
+                  { type: 'text', text },
+                  ...options.images.flatMap((image) => [
+                    { type: 'text', text: image.label },
+                    {
+                      type: 'image',
+                      source: { type: 'base64', media_type: image.mimeType, data: image.data },
+                    },
+                  ]),
+                ]
+              : text,
+          },
         });
       } catch (error) {
         clearTimeout(timer);

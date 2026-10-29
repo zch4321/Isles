@@ -9,6 +9,7 @@ import {
   channels,
   deliveries,
   events,
+  imageAssets,
   messages,
   questions,
   runItems,
@@ -89,6 +90,7 @@ describe('database baseline', () => {
         'channels',
         'deliveries',
         'events',
+        'image_assets',
         'messages',
         'questions',
         'run_items',
@@ -201,6 +203,46 @@ describe('database baseline', () => {
     expect(() =>
       sqlite.prepare('DELETE FROM messages WHERE channel_id = ? AND seq = ?').run('left', 1),
     ).toThrow(/FOREIGN KEY constraint failed/);
+    expect(sqlite.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('stores image assets by channel and gives messages an empty image list by default', async () => {
+    const { db, sqlite } = await fixture();
+    db.insert(channels)
+      .values([group('left'), group('right')])
+      .run();
+    const image = {
+      id: 'image',
+      channelId: 'left',
+      name: 'image.png',
+      mimeType: 'image/png' as const,
+      size: 2,
+      width: 1,
+      height: 1,
+      sha256: 'a'.repeat(64),
+      createdAt: time,
+    };
+    db.insert(imageAssets).values(image).run();
+    expect(() =>
+      db
+        .insert(imageAssets)
+        .values({ ...image, id: 'duplicate' })
+        .run(),
+    ).toThrow(/UNIQUE constraint failed/);
+    db.insert(imageAssets)
+      .values({ ...image, id: 'other-channel', channelId: 'right' })
+      .run();
+    db.insert(imageAssets)
+      .values({ ...image, id: 'other-name', name: 'other.png' })
+      .run();
+    expect(() =>
+      db
+        .insert(imageAssets)
+        .values({ ...image, id: 'missing', channelId: 'missing' })
+        .run(),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+    db.insert(messages).values(message('left', 1)).run();
+    expect(db.select().from(messages).get()!.imageIds).toEqual([]);
     expect(sqlite.pragma('foreign_key_check')).toEqual([]);
   });
 

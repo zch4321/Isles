@@ -202,7 +202,24 @@ try {
     reasoningEffort: agent.reasoningEffort,
     workspace: agent.workspace,
   };
-  const first = await session.submit(input);
+  const imageData =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC';
+  const imagePath = join(agent.workspace, '.isles-images', 'one.png');
+  const imageLabel = '[channel: protocol, message 1, image 1]';
+  await mkdir(join(agent.workspace, '.isles-images'), { recursive: true });
+  await writeFile(imagePath, Buffer.from(imageData, 'base64'));
+  const first = await session.submit({
+    ...input,
+    images: [
+      {
+        id: 'image-one',
+        path: imagePath,
+        mimeType: 'image/png',
+        data: imageData,
+        label: imageLabel,
+      },
+    ],
+  });
   await until(
     () => events.some((event) => event.type === 'turn_completed' && event.turnId === first.turnId),
     'first turn completion',
@@ -242,6 +259,12 @@ try {
   assert.ok(
     events.some((event) => event.type === 'context_usage' && event.usage?.usedTokens === 120),
   );
+  const firstRequest = requests.find((request) => request.path.endsWith('/responses'));
+  const modelInput = JSON.stringify(firstRequest?.body.input);
+  assert.ok(modelInput.includes(imageLabel));
+  assert.ok(modelInput.includes('input_image'));
+  assert.ok(modelInput.includes('data:image/'));
+  report.nativeImageInput = true;
   const second = await session.submit({ ...input, runId: randomUUID() });
   await until(() => inferenceRequests === 2, 'held local response');
   assert.deepEqual(

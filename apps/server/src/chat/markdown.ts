@@ -33,7 +33,7 @@ function fileName(name: string) {
 }
 
 /** The browser supplies its time zone; offsets are computed for each message's own date. */
-export function chatExportFormatter(timeZone: string) {
+export function chatExportFormatter(timeZone: string, imageOrigin = 'http://127.0.0.1:4310') {
   let formatter: Intl.DateTimeFormat;
   try {
     formatter = new Intl.DateTimeFormat('en-GB', {
@@ -105,12 +105,17 @@ export function chatExportFormatter(timeZone: string) {
           `提及：${message.mentions.map((id) => `@${inline(agentName(id))}`).join('、')}`,
           '',
         );
-      lines.push(
-        ...message.body
-          .replace(/\r\n?/g, '\n')
-          .split('\n')
-          .map((line) => (line ? `> ${line}` : '>')),
-      );
+      if (message.body)
+        lines.push(
+          ...message.body
+            .replace(/\r\n?/g, '\n')
+            .split('\n')
+            .map((line) => (line ? `> ${line}` : '>')),
+        );
+      for (const image of message.images) {
+        const url = new URL(`/api/channels/${image.channelId}/images/${image.id}`, imageOrigin);
+        lines.push('', `![${inline(image.name)}](<${url.href}>)`);
+      }
     });
     return {
       filename: `${type}-${fileName(name)}-${exported.stamp}.md`,

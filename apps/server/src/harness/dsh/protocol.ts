@@ -33,7 +33,11 @@ export const sessionSchema = z.object({
   cwd: z.string().min(1),
   contextUsage: contextUsageSchema.optional(),
 });
-export const rejectionSchema = z.object({ rejected: z.literal(true), reason: z.string().min(1) });
+export const rejectionSchema = z.object({
+  rejected: z.literal(true),
+  reason: z.string().min(1),
+  code: z.unknown().optional(),
+});
 export const admissionSchema = z.object({
   sessionId: z.string().min(1),
   messageId: z.string().min(1),

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import type { Agent } from '@isles/contracts';
-import { ArrowUp, AtSign, LoaderCircle } from '@lucide/vue';
+import { ArrowUp, AtSign, ImagePlus, LoaderCircle, RefreshCw, X } from '@lucide/vue';
 import { computed, nextTick, onMounted, ref, useId, watch } from 'vue';
 import ParticipantAvatar from './ParticipantAvatar.vue';
 import { Button } from '@/components/ui/button';
+import type { DraftImage } from '@/composables/useDraft';
 import { agentStatusLabels, agentStatusTone } from '@/lib/format';
 import { mentionBoundary, mentionQuery } from '@/lib/mentions';
 import { cn } from '@/lib/utils';
@@ -11,13 +12,52 @@ import { cn } from '@/lib/utils';
 const props = defineProps<{
   placeholder: string;
   sending: boolean;
+  images: DraftImage[];
+  feedback: string;
   /** Group members that can be mentioned; empty in a private chat. */
   members: Agent[];
 }>();
-const emit = defineEmits<{ submit: [] }>();
+const emit = defineEmits<{
+  submit: [];
+  addImages: [files: File[]];
+  removeImage: [key: string];
+  retryImage: [key: string];
+}>();
 const model = defineModel<string>({ required: true });
 
 const textarea = ref<HTMLTextAreaElement>();
+const imageInput = ref<HTMLInputElement>();
+const dragging = ref(false);
+function filesSelected(event: Event) {
+  const input = event.target as HTMLInputElement;
+  emit('addImages', Array.from(input.files ?? []));
+  input.value = '';
+}
+function onPaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files ?? []).filter((file) =>
+    file.type.startsWith('image/'),
+  );
+  if (files.length) emit('addImages', files);
+}
+function onDragOver(event: DragEvent) {
+  if (!event.dataTransfer?.types.includes('Files')) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+  dragging.value = true;
+}
+function onDragLeave(event: DragEvent) {
+  if (
+    !event.currentTarget ||
+    !(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)
+  )
+    dragging.value = false;
+}
+function onDrop(event: DragEvent) {
+  if (!event.dataTransfer?.types.includes('Files')) return;
+  event.preventDefault();
+  dragging.value = false;
+  emit('addImages', Array.from(event.dataTransfer.files));
+}
 function resize() {
   const element = textarea.value;
   if (!element) return;
@@ -106,8 +146,16 @@ function onKeydown(event: KeyboardEvent) {
 
 <template>
   <form
-    class="relative rounded-xl border border-line-strong bg-surface shadow-1 transition-[border-color,box-shadow] focus-within:border-(--line-focus) focus-within:ring-3 focus-within:ring-ring/25"
+    :class="
+      cn(
+        'relative rounded-xl border border-line-strong bg-surface shadow-1 transition-[border-color,box-shadow] focus-within:border-(--line-focus) focus-within:ring-3 focus-within:ring-ring/25',
+        dragging && 'border-primary ring-3 ring-ring/25',
+      )
+    "
     @submit.prevent="emit('submit')"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
   >
     <ul
       v-if="options.length"
@@ -159,8 +207,73 @@ function onKeydown(event: KeyboardEvent) {
       @click="track"
       @keyup="track"
       @blur="query = undefined"
+      @paste="onPaste"
     />
+    <div
+      v-if="images.length"
+      aria-label="草稿图片"
+      aria-live="polite"
+      class="flex max-h-[30dvh] flex-wrap gap-2 overflow-y-auto px-3 pt-2"
+    >
+      <div
+        v-for="entry in images"
+        :key="entry.key"
+        class="relative w-24 overflow-hidden rounded-lg border border-line bg-surface-2"
+      >
+        <img :src="entry.url" :alt="`预览 ${entry.file.name}`" class="h-20 w-full object-cover" />
+        <button
+          type="button"
+          :aria-label="`移除图片 ${entry.file.name}`"
+          class="absolute top-1 right-1 rounded-full bg-black/70 p-1 text-white hover:bg-black"
+          @click="emit('removeImage', entry.key)"
+        >
+          <X class="size-3.5" />
+        </button>
+        <div class="min-w-0 px-1.5 py-1 text-[10px] leading-4">
+          <p class="truncate" :title="entry.file.name">{{ entry.file.name }}</p>
+          <p v-if="entry.status === 'uploading'" class="flex items-center gap-1 text-ink-3">
+            <LoaderCircle class="size-3 animate-spin" />上传中
+          </p>
+          <template v-else-if="entry.status === 'error'">
+            <p class="break-words text-st-error" role="alert">{{ entry.error }}</p>
+            <button
+              type="button"
+              :aria-label="`重试上传 ${entry.file.name}`"
+              class="flex items-center gap-1 font-medium text-primary-ink hover:underline"
+              @click="emit('retryImage', entry.key)"
+            >
+              <RefreshCw class="size-3" />重试
+            </button>
+          </template>
+          <p v-else class="text-ink-3">已上传</p>
+        </div>
+      </div>
+    </div>
+    <p v-if="feedback" role="alert" class="px-4 pt-2 text-xs break-words text-st-error">
+      {{ feedback }}
+    </p>
     <div class="flex items-center gap-2 pr-2 pb-2 pl-2">
+      <input
+        ref="imageInput"
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        multiple
+        class="sr-only"
+        aria-label="选择图片"
+        tabindex="-1"
+        @change="filesSelected"
+      />
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        aria-label="添加图片"
+        title="添加图片"
+        class="text-ink-3"
+        @click="imageInput?.click()"
+      >
+        <ImagePlus />
+      </Button>
       <Button
         v-if="members.length"
         type="button"
@@ -174,16 +287,23 @@ function onKeydown(event: KeyboardEvent) {
       >
         <AtSign />
       </Button>
-      <span class="pl-1.5 text-[11px] text-ink-3 max-sm:hidden"
-        >Enter 发送 · Shift + Enter 换行<template v-if="members.length">
-          · 消息对全体成员可见</template
-        ></span
-      >
+      <span class="pl-1.5 text-[11px] text-ink-3">
+        <span class="max-sm:hidden"
+          >Enter 发送 · Shift + Enter 换行<template v-if="members.length">
+            · 消息对全体成员可见</template
+          ><br
+        /></span>
+        PNG/JPEG/WebP/GIF · ≤10 MB/张 · 最多 4 张
+      </span>
       <Button
         type="submit"
         size="icon-sm"
         class="ml-auto"
-        :disabled="sending || !model.trim()"
+        :disabled="
+          sending ||
+          (!model.trim() && !images.length) ||
+          images.some((entry) => entry.status !== 'ready')
+        "
         aria-label="发送消息"
         title="发送消息"
       >

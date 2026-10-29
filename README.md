@@ -2,6 +2,8 @@
 
 **让独立的 AI 一起工作。**
 
+聊天支持选择、粘贴或拖放图片，也支持纯图片消息。Agent 可通过 `send_message.imagePaths` 发送本地图片。普通回合使用原生图片输入，steer 提供本地路径供 Agent 按需读取，MCP 收信和历史读取直接返回图片内容。每条消息最多 4 张、每张 10 MiB，支持 PNG、JPEG、WebP、GIF；具体规则和验收见 [图片消息](docs/image-messages.md)。
+
 面向人类与多个 Agent 的私聊、群聊和协作工作空间。每个 Agent 使用独立工作目录和固定原生 session。当前接入 **Codex app-server**、**Claude Code CLI**、**Kimi Code**（本地 Web REST/WebSocket）、**OpenCode**（原生 v2 HTTP/SSE）与 **DeepSeek Harness**（原生 SDK 桥接）。五种 harness 均支持默认关闭的实时收信开关：开启时，新消息追加到原生执行；关闭时，新消息排队。所有 Agent 都可通过 MCP 主动收信。当前版本及统一运行规则见 [Harness 升级与统一原生活动模型](docs/harness-upgrade-2026-10-24.md)。
 
 Agent 基础规则保存在各自工作目录的 `AGENTS.md`，由 harness 原生加载。模型收到 `[channel: "评审", seq: 12, from: agent:"Alice"]` 这样的文本头部，自己的私聊显示为 `private`。普通消息用名称呈现群、发送者与提及对象，重名时在引号外附加 ID 短前缀；工具仍通过目录查询完整 UUID 寻址，消息仍以频道与递增序号定位。格式与数据版本边界见 [消息协议](docs/message-protocol.md)，本轮验证见 [名称消息验收](docs/name-message-acceptance.md)，历史真实加载、压缩和恢复的验证记录见 [基础修复计划](docs/foundation-repair-plan.md)。

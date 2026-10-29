@@ -23,6 +23,7 @@ export const initializeResultSchema = z
     agentCapabilities: z
       .object({
         loadSession: z.boolean().optional(),
+        promptCapabilities: z.object({ image: z.boolean().optional() }).passthrough().optional(),
         mcpCapabilities: z.object({ http: z.boolean().optional() }).passthrough().optional(),
         sessionCapabilities: z
           .object({

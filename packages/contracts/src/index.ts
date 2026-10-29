@@ -103,14 +103,51 @@ export const updateAgentSchema = z
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, { message: '请至少修改一个字段' });
+export const imageMimeTypeSchema = z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+export type ImageMimeType = z.infer<typeof imageMimeTypeSchema>;
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_MESSAGE_IMAGES = 4;
+export const MAX_READ_IMAGE_BYTES = 40 * 1024 * 1024;
+export const imageSchema = z.object({
+  id: z.string().uuid(),
+  channelId: z.string().uuid(),
+  name: z
+    .string()
+    .min(1)
+    .max(255)
+    .refine(
+      (name) =>
+        name.trim().length > 0 &&
+        name !== '.' &&
+        name !== '..' &&
+        Array.from(name).every((character) => {
+          const code = character.codePointAt(0)!;
+          return code >= 0x20 && code !== 0x7f && character !== '/' && character !== '\\';
+        }),
+    ),
+  mimeType: imageMimeTypeSchema,
+  size: z.number().int().positive().max(MAX_IMAGE_BYTES),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  createdAt: z.string(),
+});
+export type MessageImage = z.infer<typeof imageSchema>;
+
 export const sendMessageSchema = z
   .object({
-    body: z.string().trim().min(1).max(32_000),
+    body: z.string().trim().max(32_000).default(''),
+    imageIds: z.array(z.string().uuid()).max(MAX_MESSAGE_IMAGES).default([]),
     clientId: z.string().min(1).max(120),
     replyTo: z.number().int().positive().optional(),
     mentions: z.array(z.string().uuid()).max(50).optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => value.body.length > 0 || value.imageIds.length > 0, {
+    message: '请输入消息或添加图片',
+  })
+  .refine((value) => new Set(value.imageIds).size === value.imageIds.length, {
+    message: '请移除重复图片',
+  });
 export const createGroupSchema = z
   .object({
     name: z.string().trim().min(1).max(80),
@@ -164,6 +201,7 @@ export const messageSchema = z.object({
   sender: z.enum(['user', 'agent', 'system']),
   senderId: z.string(),
   body: z.string(),
+  images: z.array(imageSchema),
   clientId: z.string(),
   replyTo: z.number().int().positive().nullable(),
   mentions: z.array(z.string()),
@@ -310,7 +348,7 @@ export type UpdateAgent = z.infer<typeof updateAgentSchema>;
 export type CreateGroup = z.input<typeof createGroupSchema>;
 export type UpdateChannel = z.infer<typeof updateChannelSchema>;
 export type WorkspaceSettings = z.infer<typeof workspaceSettingsSchema>;
-export type SendMessage = z.infer<typeof sendMessageSchema>;
+export type SendMessage = z.input<typeof sendMessageSchema>;
 export type Model = z.infer<typeof modelSchema>;
 export type HarnessId = z.infer<typeof harnessIdSchema>;
 export type HarnessCapabilities = z.infer<typeof harnessCapabilitiesSchema>;

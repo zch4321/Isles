@@ -90,6 +90,26 @@ export const channelMembers = sqliteTable(
   ],
 );
 
+export const imageAssets = sqliteTable(
+  'image_assets',
+  {
+    id: text().primaryKey(),
+    channelId: text('channel_id')
+      .notNull()
+      .references(() => channels.id),
+    name: text().notNull(),
+    mimeType: text('mime_type', {
+      enum: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+    }).notNull(),
+    size: integer().notNull(),
+    width: integer().notNull(),
+    height: integer().notNull(),
+    sha256: text().notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('image_assets_dedupe').on(t.channelId, t.sha256, t.name)],
+);
+
 export const messages = sqliteTable(
   'messages',
   {
@@ -104,6 +124,7 @@ export const messages = sqliteTable(
     replyTo: integer('reply_to'),
     // JSON array of mentioned Agent IDs.
     mentions: text().notNull().default('[]'),
+    imageIds: text('image_ids', { mode: 'json' }).$type<string[]>().notNull().default([]),
     createdAt: text('created_at').notNull(),
   },
   (t) => [
@@ -164,6 +185,10 @@ export const runs = sqliteTable(
       .references(() => agents.id),
     threadId: text('thread_id').notNull(),
     turnId: text('turn_id'),
+    inputRefs: text('input_refs', { mode: 'json' })
+      .$type<{ channelId: string; seq: number }[]>()
+      .notNull()
+      .default([]),
     status: text({
       enum: ['starting', 'running', 'waiting', 'completed', 'interrupted', 'failed', 'uncertain'],
     }).notNull(),
@@ -241,6 +266,7 @@ export const schema = {
   agents,
   channels,
   channelMembers,
+  imageAssets,
   messages,
   deliveries,
   runs,

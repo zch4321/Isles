@@ -1,6 +1,6 @@
 # Agent 消息文本协议
 
-> 日期：2026-10-28 · 自动 turn 输入、当前 turn 的 steer 追加、MCP `receive_messages` 和 `read_messages` 共用此格式。
+> 日期：2026-10-29 · 自动 turn 输入、当前 turn 的 steer 追加、MCP `receive_messages` 和 `read_messages` 共用文本信封；图片按投递方式携带内容或路径。
 >
 > Agent 运行时的说明由 [AGENTS.md 模板](../apps/server/resources/AGENTS.template.md)生成到它的工作目录，交给 harness 原生加载。本文说明接口与数据版本边界，不通过首次聊天注入。
 
@@ -41,6 +41,21 @@
 ```
 
 `workspace_paths` 中每条路径都是 JSON 字符串，以引号外的 `|` 分隔。它描述群当前配置，历史读取也使用当前列表。每组消息显示一次，空历史保持 `[history: empty]`。MCP `list_channels` 同时以数组返回 `workspace_paths`。Agent 在指定目录执行项目命令，个人原生 cwd 保持固定。
+
+## 图片与来源关联
+
+消息可以包含文字、图片或两者。普通回合的文本头部使用 `images` 列出图片 ID，随后由适配器提供原生图片内容。每个图片块前的标签指出频道、消息序号、图片序号与文件名，字符串继续使用 JSON 转义。
+
+```text
+[channel: private, seq: 8, from: user, images: "image-id"]
+看看这张设计稿。
+
+[channel: private, seq: 8, image: 1, id: "image-id", name: "设计稿.png"]
+```
+
+steer 使用 `image_paths: "绝对路径一"|"绝对路径二"`。路径指向 Agent 自己工作区中的可读副本，由 Agent 按需使用原生图片工具读取。MCP 收信和历史返回的 `content` 包含文本块与实际 `image` 块，图片数据使用 base64 与实际 MIME 类型；这些块沿用相同来源标签。
+
+`send_message` 接受可选 `imagePaths`，保存本地图片快照后发布正式消息。图片消息允许空正文，最多 4 张、每张 10 MiB；确认仍返回 `{seq}`。读取按完整消息和图片总量分页，使用原有 `has_more`、`next_after`、`next_before` 继续获取。只有成功准备并返回的消息会确认接收。
 
 ## 名称、重名与改名
 

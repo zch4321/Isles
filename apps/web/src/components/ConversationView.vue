@@ -17,7 +17,15 @@ import MessageComposer from './MessageComposer.vue';
 import MessageFeed from './MessageFeed.vue';
 import QuestionForm from './QuestionForm.vue';
 import { Button } from '@/components/ui/button';
-import { outgoing, settle, useDraft } from '@/composables/useDraft';
+import {
+  addImages,
+  clearSubmitted,
+  outgoing,
+  removeImage,
+  retryImage,
+  settle,
+  useDraft,
+} from '@/composables/useDraft';
 import { errorMessage } from '@/lib/format';
 import { findMentions } from '@/lib/mentions';
 
@@ -96,14 +104,6 @@ const answer = useMutation({
     answerQuestion(input.agentId, input.questionId, input.answers),
   ...mutationHandlers,
 });
-const send = useMutation({
-  mutationFn: (input: { body: string; clientId: string }) =>
-    sendMessage(props.channelId, {
-      ...input,
-      ...(channel.value?.kind === 'group' && { mentions: findMentions(input.body, members.value) }),
-    }),
-  ...mutationHandlers,
-});
 const exporting = useMutation({
   mutationFn: (channelId: string) => downloadChat(channelId),
   onMutate: mutationHandlers.onMutate,
@@ -113,16 +113,32 @@ const exporting = useMutation({
 const draft = useDraft(() => props.channelId);
 async function submit() {
   if (deletedGroup.value || agent.value?.status === 'deleted') return;
-  const body = draft.value.trim();
-  if (!body || send.isPending.value) return;
-  try {
-    await send.mutateAsync(outgoing(props.channelId, body));
-  } catch {
+  const id = props.channelId;
+  const current = draft.value;
+  const body = current.body.trim();
+  if (
+    current.sending ||
+    (!body && !current.images.length) ||
+    current.images.some((entry) => entry.status !== 'ready')
+  )
     return;
+  const keys = current.images.map((entry) => entry.key);
+  const imageIds = current.images.map((entry) => entry.image!.id);
+  const input = outgoing(id, body, imageIds);
+  const mentions = channel.value?.kind === 'group' ? findMentions(body, members.value) : undefined;
+  current.sending = true;
+  current.sendError = '';
+  try {
+    await sendMessage(id, { ...input, ...(mentions && { mentions }) });
+    settle(id, input.clientId);
+    // Remove only the snapshot sent; new text and images stay in this conversation's draft.
+    clearSubmitted(id, body, keys);
+  } catch (error) {
+    current.sendError = errorMessage(error);
+  } finally {
+    current.sending = false;
+    void invalidateAll(queryClient);
   }
-  settle(props.channelId);
-  // Keep anything typed while the request was in flight.
-  if (draft.value.trim() === body) draft.value = '';
 }
 
 const placeholder = computed(() => {
@@ -211,15 +227,18 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
       <div
         class="mx-auto w-full max-w-[816px] shrink-0 space-y-3 px-3 pt-2 pb-4 sm:px-6 lg:px-7 lg:pb-5"
       >
-        <div v-if="actionError" role="alert" class="notice notice-error pr-1.5">
+        <div v-if="actionError || draft.sendError" role="alert" class="notice notice-error pr-1.5">
           <CircleAlert class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-          <span class="min-w-0 flex-1 break-words">{{ actionError }}</span>
+          <span class="min-w-0 flex-1 break-words">{{ actionError || draft.sendError }}</span>
           <Button
             variant="ghost"
             size="icon-xs"
             class="text-st-error hover:text-st-error"
             aria-label="关闭提示"
-            @click="actionError = ''"
+            @click="
+              actionError = '';
+              draft.sendError = '';
+            "
           >
             <X />
           </Button>
@@ -250,11 +269,16 @@ const nameOf = (agentId: string) => directory.value.get(agentId)?.name ?? 'Agent
         </p>
         <MessageComposer
           v-if="!deletedGroup && agent?.status !== 'deleted'"
-          v-model="draft"
+          v-model="draft.body"
           :placeholder="placeholder"
-          :sending="send.isPending.value"
+          :sending="draft.sending"
+          :images="draft.images"
+          :feedback="draft.feedback"
           :members="channel.kind === 'group' ? members : []"
           @submit="submit"
+          @add-images="addImages(channelId, $event)"
+          @remove-image="removeImage(channelId, $event)"
+          @retry-image="retryImage(channelId, $event)"
         />
       </div>
     </template>

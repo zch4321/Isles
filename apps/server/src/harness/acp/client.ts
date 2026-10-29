@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import type { Redactor } from '../../errors.js';
 import type { CliCommand } from '../shared/executable.js';
 import { stopProcessTree } from '../shared/process.js';
+import { MAX_NATIVE_FRAME_LENGTH } from '../shared/native-limits.js';
 import type { Logger } from '../../logging.js';
 import {
   ACP_PROTOCOL_VERSION,
@@ -72,7 +73,7 @@ export class AcpClient implements AcpConnection {
     lines.on('line', (line) => {
       if (this.closed || !line.trim()) return;
       try {
-        if (line.length > 8_000_000) throw new Error('原生协议帧超出大小限制');
+        if (line.length > MAX_NATIVE_FRAME_LENGTH) throw new Error('原生协议帧超出大小限制');
         const frame = rpcFrameSchema.parse(JSON.parse(line));
         if (frame.method) {
           if (frame.id !== undefined) this.handlers.request(frame.id, frame.method, frame.params);

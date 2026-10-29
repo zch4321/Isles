@@ -23,6 +23,7 @@ export async function localOpenCodeProvider() {
   let requests = 0;
   let guidanceLoaded = false;
   let backgroundLaunched = false;
+  let nativeImageInput = false;
   const server = createServer(async (request, response) => {
     try {
       if (request.url !== '/v1/chat/completions') {
@@ -45,6 +46,11 @@ export async function localOpenCodeProvider() {
         );
       const prompt =
         typeof user?.content === 'string' ? user.content : JSON.stringify(user?.content ?? '');
+      nativeImageInput ||=
+        prompt.includes('OPENCODE_PRIVATE_OK') &&
+        prompt.includes('image_url') &&
+        prompt.includes('data:image/png;base64,') &&
+        prompt.includes('native.png');
       let marker =
         /OPENCODE_(?:PRIVATE|RESUME|QUESTION|GROUP|STEER|RESTART)_OK/.exec(prompt)?.[0] ??
         (prompt.includes('OPENCODE_STEER_DONE') ? 'OPENCODE_STEER_DONE' : undefined);
@@ -193,7 +199,7 @@ export async function localOpenCodeProvider() {
           settings: { baseURL: `http://127.0.0.1:${address.port}/v1`, apiKey: 'isles-fixture-key' },
           models: {
             'fixture-model': {
-              capabilities: { tools: true, input: ['text'], output: ['text'] },
+              capabilities: { tools: true, input: ['text', 'image'], output: ['text'] },
               limit: { context: 32768, output: 4096 },
             },
           },
@@ -205,6 +211,9 @@ export async function localOpenCodeProvider() {
     },
     get guidanceLoaded() {
       return guidanceLoaded;
+    },
+    get nativeImageInput() {
+      return nativeImageInput;
     },
     get requests() {
       return requests;

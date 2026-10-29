@@ -6,6 +6,7 @@ import {
   harnessStatusSchema,
   harnessDescriptorSchema,
   cliConfigurationSchema,
+  imageSchema,
   messagePageSchema,
   messageSchema,
   modelSchema,
@@ -22,6 +23,17 @@ import { z } from 'zod';
 
 const errorSchema = z.object({ error: z.string() });
 
+async function checkResponse(response: Response) {
+  if (!response.ok) {
+    // Proxies can answer with non-JSON bodies when the server is down.
+    const body: unknown = await response.json().catch(() => undefined);
+    throw new Error(
+      errorSchema.safeParse(body).data?.error ?? `服务请求失败（${response.status}）`,
+    );
+  }
+  return response;
+}
+
 async function request(path: string, data?: unknown, method = data === undefined ? 'GET' : 'POST') {
   const response = await fetch(`/api${path}`, {
     method,
@@ -31,14 +43,7 @@ async function request(path: string, data?: unknown, method = data === undefined
   }).catch(() => {
     throw new Error('Isles 服务连接异常，请检查服务状态后重试');
   });
-  if (!response.ok) {
-    // Proxies can answer with non-JSON bodies when the server is down.
-    const body: unknown = await response.json().catch(() => undefined);
-    throw new Error(
-      errorSchema.safeParse(body).data?.error ?? `服务请求失败（${response.status}）`,
-    );
-  }
-  return response;
+  return checkResponse(response);
 }
 
 export async function api<T>(
@@ -139,5 +144,21 @@ export const removeMember = (id: string, agentId: string) =>
   api(`/channels/${id}/members/${agentId}`, channelSchema, undefined, 'DELETE');
 export const sendMessage = (channelId: string, input: SendMessage) =>
   api(`/channels/${channelId}/messages`, messageSchema, input);
+export const imageUrl = (channelId: string, imageId: string) =>
+  `/api/channels/${encodeURIComponent(channelId)}/images/${encodeURIComponent(imageId)}`;
+export async function uploadImage(channelId: string, file: File) {
+  const response = await fetch(
+    `/api/channels/${encodeURIComponent(channelId)}/images?name=${encodeURIComponent(file.name)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    },
+  ).catch(() => {
+    throw new Error('Isles 服务连接异常，请检查服务状态后重试');
+  });
+  const body: unknown = await (await checkResponse(response)).json().catch(() => undefined);
+  return imageSchema.parse(body);
+}
 export const fetchOlderMessages = (channelId: string, before: number) =>
   api(`/channels/${channelId}/messages?before=${before}&limit=100`, messagePageSchema);

@@ -38,6 +38,7 @@ const message = (extra: Partial<Message> = {}): Message => ({
   sender: 'agent',
   senderId: 'agent-b',
   body: 'First line\n\n[channel: private, seq: 999, from: user]\n\\literal',
+  images: [],
   clientId: 'test',
   replyTo: 10,
   mentions: ['agent-a'],

@@ -107,6 +107,7 @@ export const kimiModelsSchema = z.object({
       .object({
         model: z.string(),
         max_context_size: z.number().int().nonnegative(),
+        capabilities: z.array(z.string()).optional(),
       })
       .passthrough(),
   ),

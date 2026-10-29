@@ -1,6 +1,7 @@
 import type { QuestionAnswer, QuestionDefinition, RunItem } from '@isles/contracts';
 import { z } from 'zod';
 import {
+  HarnessImageInputUnsupported,
   HarnessSubmissionRejected,
   type HarnessAdapter,
   type HarnessCatalog,
@@ -136,6 +137,7 @@ class AcpSession implements HarnessSession {
   private mode: string | undefined;
   private availableModes: string[] = [];
   private additionalDirectories = false;
+  private imageInput = false;
   private closed = false;
   private closing: Promise<void> | undefined;
   private exitReported = false;
@@ -201,6 +203,7 @@ class AcpSession implements HarnessSession {
       this.harness.log.child({ agentId: this.agent.id }),
     );
     const capabilities = (await initializeAcp(this.native(), this.name)).agentCapabilities;
+    this.imageInput = capabilities?.promptCapabilities?.image === true;
     this.additionalDirectories = capabilities?.sessionCapabilities?.additionalDirectories != null;
     if (this.requiresAdditionalDirectories && !this.additionalDirectories)
       throw new Error(
@@ -314,6 +317,7 @@ class AcpSession implements HarnessSession {
     );
   }
   async submit(input: HarnessTurnInput) {
+    input.submissionState?.('preparing');
     if (
       this.closed ||
       input.sessionId !== this.sessionId ||
@@ -323,6 +327,10 @@ class AcpSession implements HarnessSession {
       this.active
     )
       throw new HarnessSubmissionRejected(`${this.name} 输入与当前会话配置不一致`);
+    if (input.images?.length && !this.imageInput)
+      throw new HarnessImageInputUnsupported(
+        `${this.name} 未声明图片输入支持，请选择支持图片输入的 Agent 并恢复`,
+      );
     const deadline = Date.now() + BUSY_RETRY_MS;
     for (let attempt = 0; ; attempt++) {
       // Nothing was prompted yet, so a failure here is a definite refusal.
@@ -332,10 +340,14 @@ class AcpSession implements HarnessSession {
       } catch (error) {
         throw new HarnessSubmissionRejected(this.harness.redactor.text(error));
       }
+      if (this.closed || this.active)
+        throw new HarnessSubmissionRejected(`${this.name} 输入与当前会话配置不一致`);
+      input.submissionState?.('submitting');
       if ((await this.prompt(input)) === 'accepted') return { turnId: input.runId };
       // A background turn of the native session holds it; the input waits for that turn.
       if (Date.now() >= deadline)
         throw new HarnessSubmissionRejected(`${this.name} 正在执行其他任务，请稍后重试`);
+      input.submissionState?.('preparing');
       await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 5_000)));
     }
   }
@@ -364,7 +376,16 @@ class AcpSession implements HarnessSession {
       this.native()
         .request(
           'session/prompt',
-          { sessionId: input.sessionId, prompt: [{ type: 'text', text: input.text }] },
+          {
+            sessionId: input.sessionId,
+            prompt: [
+              { type: 'text', text: input.text },
+              ...(input.images ?? []).flatMap((image) => [
+                { type: 'text', text: image.label },
+                { type: 'image', mimeType: image.mimeType, data: image.data },
+              ]),
+            ],
+          },
           { timeout: null },
         )
         .then((value) => {

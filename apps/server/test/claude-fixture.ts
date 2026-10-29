@@ -43,6 +43,9 @@ let folded = [];
 const queued = new Map();
 let mcpReads = 0;
 let pendingContextResponse;
+const promptText = (frame) => typeof frame.message.content === 'string'
+  ? frame.message.content
+  : frame.message.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
 const acknowledge = (frame) => {
   send({ type: 'command_lifecycle', state: 'started', command_uuid: frame.uuid, session_id: sid });
   send({ type: 'user', uuid: frame.uuid, isReplay: true, session_id: sid, parent_tool_use_id: null, message: frame.message });
@@ -66,7 +69,7 @@ const next = () => {
   begin(frame);
 };
 setInterval(() => {
-  if (active && !active.message.content.startsWith('Isles session initialized.') && settings().releaseHeld) finish('Released');
+  if (active && !promptText(active).startsWith('Isles session initialized.') && settings().releaseHeld) finish('Released');
 }, 10).unref();
 const lines = readline.createInterface({ input: process.stdin });
 lines.on('line', (line) => {
@@ -155,14 +158,15 @@ lines.on('line', (line) => {
 function begin(frame) {
   const config = settings();
   active = frame;
+  const text = promptText(frame);
   fs.writeFileSync(path.join(sessions, sid + '.json'), JSON.stringify({ sid, input: frame.message.content }));
   acknowledge(frame);
-  if (frame.message.content.startsWith('Isles session initialized.')) {
+  if (text.startsWith('Isles session initialized.')) {
     if (config.blockBootstrap) return;
     send({ type: 'control_request', request_id: 'bootstrap-hook', request: { subtype: 'hook_callback', callback_id: 'isles-bootstrap', input: { hook_event_name: 'PreToolUse', tool_name: 'Bash' } } });
     return;
   }
-  if (frame.message.content === 'hold' || config.holdTurn) return;
+  if (text === 'hold' || config.holdTurn) return;
   if (frame.message.content === 'permission') {
     const toolId = 'tool-' + frame.uuid;
     question = { toolId, requestId: 'permission-' + frame.uuid };

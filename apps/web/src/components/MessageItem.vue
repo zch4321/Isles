@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { messageKey, type DeliveryStatus, type Message } from '@isles/contracts';
+import { messageKey, type DeliveryStatus, type Message, type MessageImage } from '@isles/contracts';
 import {
   AtSign,
   Ban,
@@ -10,9 +10,11 @@ import {
   LoaderCircle,
   SquareTerminal,
 } from '@lucide/vue';
-import { computed, type Component } from 'vue';
+import { computed, ref, type Component } from 'vue';
+import { imageUrl } from '@/api/isles';
 import MarkdownContent from './MarkdownContent.vue';
 import ParticipantAvatar from './ParticipantAvatar.vue';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { formatDateTime, formatTime } from '@/lib/format';
 import { mentionSegments } from '@/lib/mentions';
 import { cn } from '@/lib/utils';
@@ -62,6 +64,7 @@ const title = computed(
 const segments = computed(() =>
   props.message.sender === 'user' ? mentionSegments(props.message.body, props.mentions) : [],
 );
+const selectedImage = ref<MessageImage>();
 </script>
 
 <template>
@@ -120,10 +123,10 @@ const segments = computed(() =>
           <AtSign class="size-3 text-ink-3" aria-label="提及" />
           <span v-for="name in mentions" :key="name" class="mention">@{{ name }}</span>
         </p>
-        <MarkdownContent :source="message.body" class="mt-0.5 text-[15px]" />
+        <MarkdownContent v-if="message.body" :source="message.body" class="mt-0.5 text-[15px]" />
       </template>
       <p
-        v-else
+        v-else-if="message.body"
         class="mt-0.5 text-[15px] leading-[1.7] whitespace-pre-wrap [overflow-wrap:anywhere]"
       >
         <template v-for="(segment, index) in segments" :key="index"
@@ -131,6 +134,51 @@ const segments = computed(() =>
           ><template v-else>{{ segment.text }}</template></template
         >
       </p>
+      <div v-if="message.images.length" class="mt-2 flex flex-wrap gap-2" aria-label="消息图片">
+        <button
+          v-for="image in message.images"
+          :key="image.id"
+          type="button"
+          :aria-label="`查看图片 ${image.name}`"
+          class="overflow-hidden rounded-lg border border-line bg-surface focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          @click="selectedImage = image"
+        >
+          <img
+            :src="imageUrl(image.channelId, image.id)"
+            :alt="image.name"
+            :width="image.width"
+            :height="image.height"
+            loading="lazy"
+            class="h-36 w-36 max-w-full object-contain"
+          />
+        </button>
+      </div>
+      <Dialog
+        v-if="selectedImage"
+        :open="true"
+        @update:open="!$event && (selectedImage = undefined)"
+      >
+        <DialogContent class="max-h-[calc(100dvh-2rem)] max-w-4xl overflow-y-auto">
+          <div class="min-w-0 pr-8">
+            <DialogTitle class="break-words">{{ selectedImage.name }}</DialogTitle>
+            <DialogDescription>
+              {{ selectedImage.width }} × {{ selectedImage.height }}
+            </DialogDescription>
+          </div>
+          <img
+            :src="imageUrl(selectedImage.channelId, selectedImage.id)"
+            :alt="selectedImage.name"
+            class="mx-auto max-h-[70dvh] max-w-full object-contain"
+          />
+          <a
+            :href="imageUrl(selectedImage.channelId, selectedImage.id)"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="justify-self-start text-sm font-medium text-primary-ink hover:underline"
+            >打开原图</a
+          >
+        </DialogContent>
+      </Dialog>
       <div
         v-if="delivery && style"
         :class="cn('mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs', style.class)"

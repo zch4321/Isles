@@ -24,10 +24,11 @@ export const byActivity = (a: Channel, b: Channel) =>
 export function preview(channel: Channel, directory: Directory) {
   const message = channel.lastMessage;
   if (!message) return undefined;
-  const text = message.body
-    .replace(/[`*_#>~]+/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const text =
+    message.body
+      .replace(/[`*_#>~]+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim() || (message.images.length ? '[图片]' : '');
   if (message.sender === 'user') return `你：${text}`;
   if (message.sender === 'agent' && channel.kind === 'group')
     return `${senderName(message, directory)}：${text}`;

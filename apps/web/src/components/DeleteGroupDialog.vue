@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Channel } from '@isles/contracts';
+import type { Channel, ChannelDetail } from '@isles/contracts';
 import { useMutation, useQueryClient } from '@tanstack/vue-query';
 import { LoaderCircle, Trash2 } from '@lucide/vue';
 import { watch } from 'vue';
@@ -20,9 +20,25 @@ const open = defineModel<boolean>('open', { required: true });
 const queryClient = useQueryClient();
 const remove = useMutation({
   mutationFn: () => deleteGroup(props.channel.id),
-  onSuccess: async () => {
-    await invalidateAll(queryClient);
+  onSuccess: async (channel) => {
+    // The response is authoritative even if a subsequent list refresh fails.
+    await Promise.all([
+      queryClient.cancelQueries({ queryKey: ['channels'] }),
+      queryClient.cancelQueries({ queryKey: ['channel', channel.id] }),
+    ]);
+    queryClient.setQueryData<{ channels: Channel[]; cursor: number }>(['channels'], (current) =>
+      current
+        ? {
+            ...current,
+            channels: current.channels.map((item) => (item.id === channel.id ? channel : item)),
+          }
+        : current,
+    );
+    queryClient.setQueryData<ChannelDetail>(['channel', channel.id], (current) =>
+      current ? { ...current, channel } : current,
+    );
     open.value = false;
+    void invalidateAll(queryClient);
   },
 });
 watch(open, (value) => {

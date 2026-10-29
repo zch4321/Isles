@@ -115,14 +115,33 @@ try {
   checks.creation = { sessionId, formalMessages: 0, islesRuns: 0 };
   console.log('OpenCode native creation passed');
 
-  await send(
-    agent.channelId,
-    '这是有界接入验收。请通过 Isles send_message 向 private 发送且只发送 OPENCODE_PRIVATE_OK。不要只在原生输出中回复，不创建子代理。',
-  );
+  const firstMessage =
+    '这是有界接入验收。请通过 Isles send_message 向 private 发送且只发送 OPENCODE_PRIVATE_OK。不要只在原生输出中回复，不创建子代理。';
+  if (local) {
+    const data = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC',
+      'base64',
+    );
+    const uploaded = await app.inject({
+      method: 'POST',
+      url: `/api/channels/${agent.channelId}/images?name=native.png`,
+      headers: { 'content-type': 'image/png' },
+      payload: data,
+    });
+    requireCheck(uploaded.statusCode === 201, `Native image upload failed: ${uploaded.body}`);
+    const image = uploaded.json() as { id: string };
+    await request('POST', `/api/channels/${agent.channelId}/messages`, {
+      body: firstMessage,
+      clientId: randomUUID(),
+      imageIds: [image.id],
+    });
+  } else await send(agent.channelId, firstMessage);
   await reply(agent, agent.channelId, 'OPENCODE_PRIVATE_OK');
   checks.privateMcp = true;
   if (local) {
     requireCheck(local.guidanceLoaded, 'Native workspace AGENTS.md guidance missing');
+    requireCheck(local.nativeImageInput, 'Native image and label did not reach the model provider');
+    checks.nativeImageInput = true;
     checks.workspaceInstructions = true;
   }
   console.log('OpenCode native private MCP passed');

@@ -6,6 +6,7 @@ import type { Redactor } from '../../errors.js';
 import type { Logger } from '../../logging.js';
 import type { CliCommand } from '../shared/executable.js';
 import { stopProcessTree } from '../shared/process.js';
+import { MAX_NATIVE_FRAME_LENGTH } from '../shared/native-limits.js';
 
 export type KimiWebMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export interface KimiWebCursor {
@@ -186,7 +187,7 @@ export class KimiWebClient implements KimiWebConnection {
       socket.addEventListener('message', (event) => {
         if (this.abort.signal.aborted) return;
         try {
-          if (typeof event.data !== 'string' || event.data.length > 8_000_000)
+          if (typeof event.data !== 'string' || event.data.length > MAX_NATIVE_FRAME_LENGTH)
             throw new Error('Kimi Code WebSocket 消息无效');
           const frame = frameSchema.parse(JSON.parse(event.data));
           if (frame.type === 'server_hello') {

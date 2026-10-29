@@ -124,6 +124,106 @@ async function fixture() {
 }
 
 describe('Claude CLI adapter', () => {
+  it.each(['preparing', 'submitting'] as const)(
+    'keeps the input retryable when the %s callback rejects',
+    async (blockedState) => {
+      const f = await fixture();
+      const session = await f.connect();
+      const id = await session.createSession(() => {});
+      const input = f.input('callback test', id);
+      const error = new Error('input invalidated');
+      const states: string[] = [];
+      await expect(
+        session.submit({
+          ...input,
+          submissionState(state) {
+            states.push(state);
+            if (state === blockedState) throw error;
+          },
+        }),
+      ).rejects.toBe(error);
+      expect(states).toEqual(
+        blockedState === 'preparing' ? ['preparing'] : ['preparing', 'submitting'],
+      );
+      expect(
+        (await f.cli.records()).some(
+          (frame) => frame.type === 'user' && frame.uuid === input.runId,
+        ),
+      ).toBe(false);
+      const retryStates: string[] = [];
+      await session.submit({ ...input, submissionState: (state) => retryStates.push(state) });
+      expect(retryStates).toEqual(['preparing', 'submitting']);
+      expect(
+        (await f.cli.records()).some(
+          (frame) => frame.type === 'user' && frame.uuid === input.runId,
+        ),
+      ).toBe(true);
+    },
+  );
+  it('accepts a replayed image frame larger than the former 8 MB limit', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    await f.cli.set({ holdTurn: true });
+    const input = f.input('large image', id);
+    await session.submit({
+      ...input,
+      images: [
+        {
+          id: 'large-image',
+          path: join(f.agent.workspace, '.isles-images', 'large.png'),
+          mimeType: 'image/png',
+          data: 'A'.repeat(8_000_004),
+          label: '[channel: test, message 1, image 1]',
+        },
+      ],
+    });
+    await vi.waitFor(
+      () =>
+        expect(
+          f.received.some((frame) => frame.type === 'user' && frame.uuid === input.runId),
+        ).toBe(true),
+      { timeout: 10_000 },
+    );
+    expect(f.output.exit).not.toHaveBeenCalled();
+  });
+  it('sends labeled native image blocks and keeps steer text-only', async () => {
+    const f = await fixture();
+    const session = await f.connect();
+    const id = await session.createSession(() => {});
+    await f.cli.set({ holdTurn: true });
+    const image = {
+      id: 'image-1',
+      path: join(f.agent.workspace, '.isles-images', 'one.png'),
+      mimeType: 'image/png' as const,
+      data: 'aW1hZ2U=',
+      label: '[channel: test, message 1, image 1]',
+    };
+    const input = { ...f.input('inspect', id), images: [image] };
+    await session.submit(input);
+    const batchId = randomUUID();
+    await session.steer!({
+      sessionId: id,
+      expectedTurnId: input.runId,
+      batchId,
+      text: 'append path only',
+      ...{ images: [image] },
+    });
+    const users = (await f.cli.records()).filter((frame) => frame.type === 'user');
+    expect(users.find((frame) => frame.uuid === input.runId)).toMatchObject({
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'inspect' },
+          { type: 'text', text: image.label },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.data } },
+        ],
+      },
+    });
+    expect(users.find((frame) => frame.uuid === batchId)).toMatchObject({
+      message: { role: 'user', content: 'append path only' },
+    });
+  });
   it('records native turns and autonomous wakeups without an Isles input receipt', async () => {
     const f = await fixture();
     const session = await f.connect();

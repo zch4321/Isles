@@ -9,6 +9,7 @@ import {
 } from './protocol.js';
 import type { Redactor } from '../../errors.js';
 import { stopProcessTree } from '../shared/process.js';
+import { MAX_NATIVE_FRAME_LENGTH } from '../shared/native-limits.js';
 import type { Logger } from '../../logging.js';
 import type { NativeCommand } from './executable.js';
 
@@ -48,7 +49,7 @@ export class StdioClient implements NativeClient {
     lines.on('line', (line) => {
       if (this.closed) return;
       try {
-        if (line.length > 8_000_000) throw new Error('原生协议帧超出大小限制');
+        if (line.length > MAX_NATIVE_FRAME_LENGTH) throw new Error('原生协议帧超出大小限制');
         const frame = rpcFrameSchema.parse(JSON.parse(line));
         if (frame.method) {
           if (frame.id !== undefined)

@@ -49,6 +49,7 @@ const snapshot = (): ChatExportSnapshot => ({
       sender: 'user',
       senderId: 'user',
       body: '请检查这个实现。',
+      images: [],
       replyTo: null,
       mentions: ['kimi'],
       createdAt: '2026-10-09T03:00:00.000Z',
@@ -58,6 +59,7 @@ const snapshot = (): ChatExportSnapshot => ({
       sender: 'agent',
       senderId: 'kimi',
       body: '找到两处需要调整的地方：\n\n1. 恢复配置。\n2. 保留 session。',
+      images: [],
       replyTo: 12,
       mentions: [],
       createdAt: '2026-10-09T03:02:10.000Z',
@@ -66,6 +68,28 @@ const snapshot = (): ChatExportSnapshot => ({
 });
 
 describe('Markdown chat export', () => {
+  it('preserves image-only and mixed messages as escaped links to immutable local images', () => {
+    const data = snapshot();
+    const image = {
+      id: 'fb92384c-d8b7-4777-9c23-c9c6c0533708',
+      channelId: '74d05903-47c5-4d21-8a1c-82b3ad147cd4',
+      name: '设计 [草稿].png',
+      mimeType: 'image/png' as const,
+      size: 200,
+      width: 10,
+      height: 10,
+      createdAt: '2026-10-29T00:00:00.000Z',
+    };
+    data.messages[0]!.body = '';
+    data.messages[0]!.images = [image];
+    data.messages[1]!.images = [{ ...image, id: '8236fbca-b2d6-4baa-ae10-dd0b3af0c156' }];
+    const { markdown } = chatExportFormatter('UTC', 'http://127.0.0.1:43210')(data);
+    expect(markdown).toContain(
+      `![设计 \\[草稿\\].png](<http://127.0.0.1:43210/api/channels/${image.channelId}/images/${image.id}>)`,
+    );
+    expect(markdown).toContain('8236fbca-b2d6-4baa-ae10-dd0b3af0c156');
+    expect(markdown).toContain('> 找到两处需要调整的地方：');
+  });
   it('preserves the agreed format, original sequence, reply and mention', () => {
     const result = chatExportFormatter('Asia/Shanghai')(snapshot());
     expect(result.filename).toBe('群聊-技术评审-20261009-110500.md');
