@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { PassThrough, type Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -11,10 +12,12 @@ afterEach(async () => {
   cleanups.length = 0;
 });
 
-async function bridgeFixture() {
+async function bridgeFixture(options: { output?: Writable } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'isles-dsh-context-bridge-'));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const frames: { method: string; params: Record<string, unknown> }[] = [];
+  const transportStart = vi.fn();
+  const transportClose = vi.fn();
   let request!: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   class Transport {
     notify(method: string, params: Record<string, unknown>) {
@@ -23,8 +26,12 @@ async function bridgeFixture() {
     onRequest(callback: typeof request) {
       request = callback;
     }
-    start() {}
-    close() {}
+    start() {
+      transportStart();
+    }
+    close() {
+      transportClose();
+    }
     async flush() {}
   }
   // Replace the carrier package loader; execute the unchanged native plugin body.
@@ -78,6 +85,7 @@ async function bridgeFixture() {
       ),
   );
   const listeners = new Map<string, (this: unknown, ...args: unknown[]) => void>();
+  const effects = new Map<string, () => (() => void | Promise<void>) | undefined>();
   const history: Record<string, unknown>[] = [];
   const session = { id: 'root-session', header: { cwd: root }, snapshotEvents: () => history };
   const agent = {
@@ -121,9 +129,20 @@ async function bridgeFixture() {
     },
     tools: { get: () => ({}) },
     llm: {
+      listProviders: vi.fn(() => [{ id: 'fixture' }]),
+      listModels: vi.fn(async () => [{ id: 'model' }]),
       resolveCallConfig: vi.fn(async (selection: unknown) => selection),
       resolveModelInfo: vi.fn(
-        async (): Promise<{ context?: { contextWindow: number }; inputModalities?: string[] }> => ({
+        async (): Promise<{
+          provider?: string;
+          id?: string;
+          name?: string;
+          context?: { contextWindow: number };
+          inputModalities?: string[];
+        }> => ({
+          provider: 'fixture',
+          id: 'model',
+          name: 'Fixture Model',
           context: { contextWindow: 4000 },
         }),
       ),
@@ -142,12 +161,15 @@ async function bridgeFixture() {
       listeners.set(name, listener);
       return () => {};
     },
-    effect() {},
+    effect(callback: () => (() => void | Promise<void>) | undefined, name: string) {
+      effects.set(name, callback);
+    },
   };
   const module = await import(pathToFileURL(path).href);
   const additionalDirs = [join(root, 'shared'), join(root, 'external workspace')];
   await Promise.all(additionalDirs.map((path) => mkdir(path)));
-  module.apply(ctx, { additionalDirs, exit: vi.fn() });
+  module.apply(ctx, { additionalDirs, exit: vi.fn(), ...options });
+  let disposeServe: (() => Promise<void>) | undefined;
   const emit = (nativeSession: unknown, event: Record<string, unknown>) =>
     listeners.get('session/event')!(nativeSession, event);
   return {
@@ -156,6 +178,23 @@ async function bridgeFixture() {
     session,
     history,
     frames,
+    transportStart,
+    transportClose,
+    startServe() {
+      const dispose = effects.get('isles.jsonrpc.serve')!();
+      if (dispose) {
+        let disposed = false;
+        disposeServe = async () => {
+          if (disposed) return;
+          disposed = true;
+          await dispose();
+        };
+        cleanups.push(disposeServe);
+      }
+    },
+    async disposeServe() {
+      await disposeServe?.();
+    },
     measure,
     llm: ctx.llm,
     warnings,
@@ -201,6 +240,135 @@ async function bridgeFixture() {
     },
   };
 }
+
+describe('DSH bridge stdio diagnostics', () => {
+  function captureDiagnostics() {
+    const methods = { log: console.log, info: console.info, debug: console.debug };
+    const diagnostics: string[] = [];
+    const protocolDiagnostics: string[] = [];
+    const stderrWrite = process.stderr.write;
+    const stdoutWrite = process.stdout.write;
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((chunk, ...args) => {
+      if (String(chunk).startsWith('[dsh-catalog-fixture]')) {
+        diagnostics.push(String(chunk));
+        const callback = args.find((value) => typeof value === 'function');
+        if (typeof callback === 'function') callback();
+        return true;
+      }
+      return Reflect.apply(stderrWrite, process.stderr, [chunk, ...args]) as boolean;
+    });
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation((chunk, ...args) => {
+      if (String(chunk).startsWith('[dsh-catalog-fixture]')) {
+        protocolDiagnostics.push(String(chunk));
+        const callback = args.find((value) => typeof value === 'function');
+        if (typeof callback === 'function') callback();
+        return true;
+      }
+      return Reflect.apply(stdoutWrite, process.stdout, [chunk, ...args]) as boolean;
+    });
+    return {
+      methods,
+      diagnostics,
+      protocolDiagnostics,
+      restore() {
+        Object.assign(console, methods);
+        stderr.mockRestore();
+        stdout.mockRestore();
+      },
+    };
+  }
+
+  it('keeps catalog and asynchronous refresh diagnostics on stderr while preserving the RPC result', async () => {
+    const f = await bridgeFixture();
+    const capture = captureDiagnostics();
+    let background = Promise.resolve();
+    f.transportStart.mockImplementation(() => console.info('[dsh-catalog-fixture] startup'));
+    f.llm.listModels.mockImplementation(async () => {
+      console.info('[dsh-catalog-fixture] catalog info');
+      console.log('[dsh-catalog-fixture] catalog log');
+      console.debug('[dsh-catalog-fixture] catalog debug');
+      background = new Promise<void>((resolve) => {
+        setImmediate(() => {
+          console.info('[dsh-catalog-fixture] background refresh');
+          resolve();
+        });
+      });
+      return [{ id: 'model' }];
+    });
+    try {
+      f.startServe();
+      expect(await f.request('isles/catalog', {})).toEqual({
+        models: [{ provider: 'fixture', id: 'model', name: 'Fixture Model' }],
+      });
+      expect(capture.diagnostics).toEqual([
+        '[dsh-catalog-fixture] startup\n',
+        '[dsh-catalog-fixture] catalog info\n',
+        '[dsh-catalog-fixture] catalog log\n',
+        '[dsh-catalog-fixture] catalog debug\n',
+      ]);
+      await background;
+      expect(capture.diagnostics.at(-1)).toBe('[dsh-catalog-fixture] background refresh\n');
+      expect(capture.protocolDiagnostics).toEqual([]);
+      await expect(f.request('fixture/unknown-method', {})).rejects.toThrow('未知 Isles DSH 方法');
+      await f.disposeServe();
+      expect(f.transportClose).toHaveBeenCalledOnce();
+      expect(console.log).toBe(capture.methods.log);
+      expect(console.info).toBe(capture.methods.info);
+      expect(console.debug).toBe(capture.methods.debug);
+    } finally {
+      try {
+        await background;
+        await f.disposeServe();
+      } finally {
+        capture.restore();
+      }
+    }
+  });
+
+  it('restores console methods when starting the protocol transport throws', async () => {
+    const f = await bridgeFixture();
+    const capture = captureDiagnostics();
+    const failure = new Error('transport startup failed');
+    f.transportStart.mockImplementationOnce(() => {
+      console.info('[dsh-catalog-fixture] failing startup');
+      throw failure;
+    });
+    try {
+      expect(() => f.startServe()).toThrow(failure);
+      expect(capture.diagnostics).toEqual(['[dsh-catalog-fixture] failing startup\n']);
+      expect(capture.protocolDiagnostics).toEqual([]);
+      expect(console.log).toBe(capture.methods.log);
+      expect(console.info).toBe(capture.methods.info);
+      expect(console.debug).toBe(capture.methods.debug);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('preserves the host console when serving a custom output stream', async () => {
+    const output = new PassThrough();
+    const f = await bridgeFixture({ output });
+    const methods = { log: console.log, info: console.info, debug: console.debug };
+    try {
+      f.startServe();
+      expect(console.log).toBe(methods.log);
+      expect(console.info).toBe(methods.info);
+      expect(console.debug).toBe(methods.debug);
+      expect(await f.request('isles/catalog', {})).toEqual({
+        models: [{ provider: 'fixture', id: 'model', name: 'Fixture Model' }],
+      });
+      await f.disposeServe();
+      expect(f.transportClose).toHaveBeenCalledOnce();
+    } finally {
+      try {
+        await f.disposeServe();
+      } finally {
+        Object.assign(console, methods);
+        output.destroy();
+      }
+    }
+  });
+});
 
 describe('DSH bridge', () => {
   it('admits image bytes to native attachments and keeps steer text-only', async () => {

@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { Console } from 'node:console';
 import { Buffer } from 'node:buffer';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -52,10 +53,8 @@ const textOf = (blocks = []) =>
 
 /** One native runtime, with externally controlled root sessions and native inboxes. */
 export function apply(ctx, config = {}) {
-  const transport = new JsonRpcLineTransport(
-    config.input ?? process.stdin,
-    config.output ?? process.stdout,
-  );
+  const output = config.output ?? process.stdout;
+  const transport = new JsonRpcLineTransport(config.input ?? process.stdin, output);
   const sessions = new Map();
   const questions = new Map();
   const permissions = new Map();
@@ -989,10 +988,37 @@ export function apply(ctx, config = {}) {
     }
   });
   ctx.effect(() => {
-    transport.start();
+    // Account model discovery and background refresh use console.info. Keep
+    // diagnostics on stderr while this bridge owns stdout for JSON-RPC frames.
+    let restoreConsole = () => {};
+    if (output === process.stdout) {
+      const diagnostics = new Console({ stdout: process.stderr, stderr: process.stderr });
+      const nativeConsole = globalThis.console;
+      const previous = new Map(
+        ['log', 'info', 'debug'].map((method) => [method, nativeConsole[method]]),
+      );
+      for (const method of previous.keys()) nativeConsole[method] = diagnostics[method];
+      restoreConsole = () => {
+        for (const [method, original] of previous)
+          if (nativeConsole[method] === diagnostics[method]) nativeConsole[method] = original;
+      };
+    }
+    try {
+      transport.start();
+    } catch (error) {
+      restoreConsole();
+      throw error;
+    }
     return async () => {
-      await shutdown();
-      transport.close();
+      try {
+        await shutdown();
+      } finally {
+        try {
+          transport.close();
+        } finally {
+          restoreConsole();
+        }
+      }
     };
   }, 'isles.jsonrpc.serve');
 }

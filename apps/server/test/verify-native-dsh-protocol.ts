@@ -15,6 +15,35 @@ const root = await mkdtemp(join(tmpdir(), 'isles-dsh-protocol-'));
 console.log(`DSH protocol files: ${root}`);
 const home = join(root, 'native-home');
 await mkdir(home);
+const diagnosticPlugin = join(root, 'catalog-diagnostics.mjs');
+await writeFile(
+  diagnosticPlugin,
+  String.raw`
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import { setImmediate } from 'node:timers';
+const require = createRequire(process.argv[1]);
+const { LlmAdapter } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-llm')).href);
+export const name = 'isles-catalog-diagnostics';
+export const inject = ['llm'];
+export function apply(ctx) {
+  class DiagnosticAdapter extends LlmAdapter {
+    async listModels(provider) {
+      console.info('[llm-deepseek-account] protocol-diagnostic', process.env.ISLES_DSH_PROTOCOL_KEY);
+      setImmediate(() => console.debug('[llm-deepseek-account] protocol-background', process.env.ISLES_DSH_PROTOCOL_KEY));
+      return [{ provider, id: 'diagnostic', name: 'Protocol diagnostic' }];
+    }
+    async resolveModel(provider, model) {
+      return { provider, id: model, name: 'Protocol diagnostic' };
+    }
+    async *stream() {
+      throw new Error('Protocol check must not invoke a model');
+    }
+  }
+  ctx.llm.registerAdapter(['isles-diagnostics'], new DiagnosticAdapter());
+}
+`,
+);
 let inferenceRequests = 0;
 const provider = createServer((_request, response) => {
   inferenceRequests++;
@@ -27,6 +56,7 @@ const patch = join(home, 'cordis.patch.yml');
 await writeFile(
   patch,
   JSON.stringify([
+    { insert: [{ id: 'isles-catalog-diagnostics', name: diagnosticPlugin }] },
     {
       id: 'llm-deepseek',
       config: {
@@ -41,7 +71,11 @@ process.env.ISLES_DSH_PROTOCOL_KEY = 'local-protocol-test';
 const config = new ConfigManager({
   configFilePath: join(root, 'config.toml'),
   homeDir: root,
-  environment: { ISLES_DSH_HOME: home, ISLES_DSH_BIN: process.env.ISLES_DSH_BIN },
+  environment: {
+    ISLES_DSH_HOME: home,
+    ISLES_DSH_BIN: process.env.ISLES_DSH_BIN,
+    ISLES_LOG_LEVEL: 'debug',
+  },
 });
 const app = await buildApp({
   config,
@@ -97,12 +131,18 @@ try {
   check(app.isles.store.agentDetail(agent.id).runs.length === 0, 'Check created a run');
   check(inferenceRequests === 0, 'Check invoked inference');
   check((await readFile(patch, 'utf8')) === before, 'Native configuration changed');
+  const diagnostics = await readFile(join(root, 'server.log'), 'utf8');
+  check(diagnostics.includes('protocol-diagnostic [redacted]'), 'Catalog diagnostic missing');
+  check(diagnostics.includes('protocol-background [redacted]'), 'Background diagnostic missing');
+  check(!diagnostics.includes('local-protocol-test'), 'Native diagnostic leaked a credential');
+  check(!diagnostics.includes('DSH protocol frame failed'), 'Diagnostic entered the RPC stream');
   Object.assign(report, {
     passed: true,
     model: model.model,
     sessionId: agent.threadId,
     mcpConnected: true,
     fixedSessionResume: true,
+    diagnosticsOnStderr: true,
     inferenceRequests,
   });
 } catch (error) {

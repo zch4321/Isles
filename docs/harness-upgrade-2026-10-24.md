@@ -71,3 +71,13 @@ Kimi 的零推理协议检查还覆盖原生规则、MCP、心跳和 ACP 创建�
 独立 review 发现并修复了停止后的迟到 steer 回执创建活动、后台活动期间配置刷新及调度重入问题；回归还覆盖回答与原生结束同时到达、Kimi 完成回调立即提交下一条消息、旧连接事件与陌生会话隔离。
 
 本轮结果在本文汇总。此前各 harness 和阶段的 acceptance 文档保留当时的版本与验收事实。
+
+## 5. 2026-10-31：DSH 模型目录日志与协议分流
+
+DSH `0.2.1-rc.3` 的账号模型目录在加载成功后使用 `console.info` 输出 `[llm-deepseek-account]` 日志。该输出进入 stdout，与 JSON-RPC 共用字节流，使 Isles 的目录查询以协议解析错误结束。模型目录后台刷新也使用同一条日志路径。
+
+Isles 的桥接服务在占用标准输出期间，将 `console.log/info/debug` 路由 stderr；原生协议继续直接写入 stdout，客户端保留严格帧校验。日志沿用现有脱敏处理，桥接服务关闭或启动失败后恢复原控制台方法，自定义输出流保留宿主的控制台配置。
+
+上游已在[修复提交 41736cd](https://github.com/deepseek-ai/deepseek-harness/commit/41736cdec58451dca1bcf53aa31cf9e251baf97d)将账号目录日志改写到 stderr，并包含于 [DSH 0.2.1-rc.4](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.4)。2026-10-31 查询时 npm 的 latest 与 next 均指向 `0.2.1-rc.5`，该版本[对应源码](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.1-rc.5/packages/llm/llm-deepseek-account/src/index.ts)保留此修复。
+
+回归覆盖目录请求、响应后的后台诊断、控制台恢复、启动失败以及自定义输出流。`pnpm check` 完成格式、ESLint、类型检查、709 项测试及生产构建，1 项 Unix 特有文件名测试在 Windows 跳过。真实 `0.2.1-rc.3` SDK 验证通过目录、MCP、固定 session 创建和恢复，并确认模拟目录及后台日志经 stderr 脱敏进入日志；推理请求为零。脚本为 `apps/server/test/verify-native-dsh-protocol.ts`，本次报告目录为系统临时目录下的 `isles-dsh-protocol-YzujzW`。
