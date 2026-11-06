@@ -8,7 +8,7 @@
 
 2026-10-24 的当前版本基线、统一原生活动模型及验证状态见 [Harness 升级记录](harness-upgrade-2026-10-24.md)。
 
-2026-10-29 的后续接入方向见 [统一接入端设计提案](gateway-design.md)：在 Agent 页面配置其 Bot 身份，来信投递给绑定 Agent，各渠道通过统一的 `gateway` 与 `channelId` 寻址。Web 人类参与者显示为 Admin，外部 IM 的 `from` 使用平台用户名或昵称；具体实施范围见提案。
+后续多平台接入方向见 [多平台接入设计](multi-platform-design.md)：Agent 在 Isles 和外部 IM 上拥有账号，所有账号共享同一个 session；Core 统一管理参与者、频道、消息与唤醒，平台适配器负责翻译。Web 人类参与者显示为 Admin，外部参与者显示平台昵称。
 
 ## 1. 产品定义
 

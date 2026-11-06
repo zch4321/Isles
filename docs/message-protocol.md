@@ -4,7 +4,7 @@
 >
 > Agent 运行时的说明由 [AGENTS.md 模板](../apps/server/resources/AGENTS.template.md)生成到它的工作目录，交给 harness 原生加载。本文说明接口与数据版本边界，不通过首次聊天注入。
 
-本文记录当前已交付协议。后续统一 `gateway` 寻址、Web 的 `from: Admin` 与外部平台昵称格式见 [Gateway 设计提案](gateway-design.md#5-统一消息与模型输入)。
+本文记录当前已交付协议。多平台频道标签、`from: admin` 与外部参与者格式见 [多平台接入设计](multi-platform-design.md#3-消息与模型输入)。
 
 ## 消息标识与头部
 

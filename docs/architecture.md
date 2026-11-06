@@ -10,7 +10,7 @@
 
 当前版本与本轮验证状态见 [Harness 升级记录](harness-upgrade-2026-10-24.md)。
 
-Web 与 IM 统一接入的后续架构见 [Gateway 设计提案](gateway-design.md)：IM 身份绑定 Agent，统一消息按 `gateway` 与所属频道寻址；身份、MCP 和持久收发细节继续按提案评审。
+多平台接入的后续架构见 [多平台接入设计](multi-platform-design.md)：Agent 拥有各平台账号，频道归属平台与账号并以 `channelId` 寻址；`MessageService`、`AgentScheduler` 与平台适配器的边界在该文定义。
 
 ## 1. 架构目标与约束
 
